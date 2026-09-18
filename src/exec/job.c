@@ -14,10 +14,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 RillExec *rill_exec_new(RillPlatform *p) {
-  RillExec *e = calloc(1, sizeof(*e));
+  RillExec *e = malloc(sizeof(*e));
   if (e) {
-    e->platform = p;
-    e->polls = calloc(2, sizeof(*e->polls));
+    *e = (RillExec){.platform = p, .polls = malloc(sizeof(*e->polls))};
     if (!e->polls) {
       free(e);
       return nullptr;
@@ -56,7 +55,7 @@ static void signal_job(RillJob *j, int signal) {
     else
       grouped = true;
   }
-  // An unreaped registered child keeps this process-group ID owned.
+  // An unreaped registered child prevents reuse of this process-group ID.
   if (grouped)
     (void)kill(-j->group, signal);
 }
@@ -150,8 +149,8 @@ static void reap(RillJob *j) {
     RillExecStatus *s = &j->stages[i];
     if (s->done || s->pid <= 0)
       continue;
-    int status;
-    pid_t pid;
+    int status = {};
+    pid_t pid = {};
     while ((pid = waitpid(s->pid, &status, WNOHANG | WUNTRACED | WCONTINUED)) >
            0) {
       if (WIFSTOPPED(status)) {
@@ -201,7 +200,9 @@ static void reap(RillJob *j) {
       s->expected_pipe = s->signaled && s->status == SIGPIPE &&
                          j->connected[i - 1] && downstream && !j->cancelled;
       downstream =
-          downstream && ((!s->signaled && s->status == 0) || s->expected_pipe);
+          downstream && ((!s->signaled && s->status >= 0 && s->status < 256 &&
+                          s->accepted_codes[s->status]) ||
+                         s->expected_pipe);
     }
   }
 }
@@ -210,7 +211,6 @@ bool rill_exec_poll(RillExec *e, int timeout, int extra_fd) {
   struct pollfd *fds = e->polls;
   fds[count++] =
       (struct pollfd){.fd = e->platform->signals[0], .events = POLLIN};
-  fds[count++] = (struct pollfd){.fd = -1};
   for (RillJob *j = e->jobs; j; j = j->next) {
     pump(j);
     reap(j);
@@ -275,8 +275,8 @@ int rill_exec_result(const RillJob *j) {
       continue;
     if (s->signaled)
       return s->status > 127 ? 255 : 128 + s->status;
-    if (s->status)
-      return s->status;
+    if (s->status < 0 || s->status > 255 || !s->accepted_codes[s->status])
+      return s->status ? s->status : 1;
   }
   return 0;
 }

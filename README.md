@@ -1,25 +1,27 @@
 # Rill Shell
 
-A shell designed for explicit pipelines, reusable job plans, and functional composition.
-Arguments stay intact, plans describe work, and job handles control each execution.
+A shell for explicit pipelines, reusable job plans, and functional composition. Pass
+arguments intact, build commands as values, and control each execution through a job
+handle. First-class curried functions, immutable records, and pattern matching provide a
+small language for composing that work.
 
-The executable is `rillsh`, for Linux and macOS. Command execution and job control
-work today; the full functional language, structured streams, and expression editor
-are still in development. Rill uses its own syntax.
+`rillsh` runs on Linux and macOS and uses its own syntax. Command execution, job
+control, and the functional language are available now. Structured streams and a rich
+expression editor are planned; the current prompt uses the terminal's canonical editing.
 
 ## A first look
 
-Run an external command with `^`, and connect processes with `|`:
+Run an external command with `^` and connect processes with `|`:
 
 ```rill
 let greeting = "hello world"
 ^printf "%s\n" $greeting | ^cat
 ```
 
-Arguments stay intact: `$greeting` supplies one argument, with no word splitting or
-implicit wildcard expansion. Quoted strings do not interpolate.
+`$greeting` supplies one argument. There is no implicit word splitting, wildcard
+expansion, or interpolation inside quoted strings.
 
-Describe work once and run it more than once:
+Build a plan once and launch it repeatedly:
 
 ```rill
 let greeting = job { ^printf "%s\n" "hello" }
@@ -27,26 +29,37 @@ run(greeting)
 run(greeting)
 ```
 
-A plan stores evaluated arguments. It starts no process and opens no redirection file
-until launched. Each launch creates a separate job with its own environment snapshot.
+A plan stores evaluated arguments. Its processes start and redirection files open only
+when launched. Each launch creates a separate job and snapshots the current environment.
 
-Background jobs have explicit handles:
+Start work in the background and check its completion:
 
 ```rill
 let task = start(job { ^sleep 1 })
 check(wait(task))
 ```
 
-`wait` returns a report; `check` turns an unsuccessful report into an error. Use
-`fg`, `bg`, and `cancel` to control jobs. Scripts must acknowledge background jobs
-before reaching EOF.
+`wait` returns a report; `check` raises an error if it failed. Use `fg`, `bg`, and
+`cancel` for job control. Scripts must acknowledge background jobs before reaching EOF.
+
+Compose functions with `|>` and reuse partially applied functions:
+
+```rill
+fn larger_than(limit, value) => value > limit
+let sizes = [128, 1024, 4096]
+let total = sizes |> filter(larger_than(1000)) |> sum
+^printf "%s bytes\n" $(text(total))
+```
+
+This prints `5120 bytes`. Functions capture lexical bindings; proper tail calls support
+recursive composition. Records and nominal data types share nested pattern matching.
+Arithmetic and conversions report errors instead of silently overflowing or coercing.
 
 ## Build and try it
 
-Requirements: Linux or macOS, a GCC or Clang toolchain with GNU C23 and
-`<stdckdint.h>`, Meson 1.12 or newer, Ninja, and Python 3.14 or newer. Meson downloads
-the pinned yyjson source in the first command; subsequent configuration is offline.
-Python is needed for development and tests, not to run the installed shell.
+Use Linux or macOS, GCC or Clang with GNU C23 and `<stdckdint.h>`, Meson 1.12+, Ninja,
+and Python 3.14+. Python is a development dependency; the installed shell does not need
+it.
 
 ```sh
 meson subprojects download
@@ -56,12 +69,11 @@ meson test -C build/release --print-errorlogs
 build/release/src/rillsh
 ```
 
-Select a compiler with `CC=gcc` or `CC=clang` when setting up a new build directory.
-A portable Fedora development image is provided in [Containerfile](Containerfile);
-using a container is optional.
+The first command downloads pinned yyjson source. Configuration and compilation then
+need no network access. Select a compiler with `CC=gcc` or `CC=clang` at setup. The
+optional [Containerfile](Containerfile) provides a Fedora development environment.
 
-From your existing shell, run one command or save the first example as `example.rill`
-and execute it:
+From your existing shell:
 
 ```sh
 build/release/src/rillsh -c '^printf "%s\n" "hello"'
@@ -69,41 +81,36 @@ build/release/src/rillsh example.rill
 build/release/src/rillsh --help
 ```
 
-Running without arguments on a terminal opens the prompt. It accepts multiline input
-when the parser needs more source. Enter `exit(0)` or press Ctrl-D on an empty prompt
-to leave; live jobs must first be joined or cancelled. `--color=auto`, `always`, and
-`never` control generated color. Optional installation uses `meson install -C
-build/release` and Meson's configured prefix.
+Save a Rill example above as `example.rill` before running the file command. Scripts
+receive their arguments as Bytes through `args()`. Optional installation uses `meson
+install -C build/release` with Meson's configured prefix.
 
-## What works today
+At the prompt, incomplete expressions continue on the next line. Enter `exit(0)` or
+press Ctrl-D at an empty prompt to leave; live jobs must first finish or be cancelled.
+Interactive startup reads `rillsh/init.rill` under the XDG configuration directory;
+`--no-config` skips it. `--color=auto`, `--color=always`, and `--color=never` select
+RGB, palette, or plain output according to terminal capabilities and the override.
 
-- Literal commands, byte pipelines, ordered redirection, and reusable job plans.
-- Immutable bindings, lists, String/Bytes/Path values, and first-class native functions.
-- Foreground/background processes, stop/resume, cancellation, and terminal restoration.
-- A canonical-input REPL, strict UTF-8 source, and RGB/256/16-color or plain output.
+## Documentation
 
-Closures, currying, proper tail calls, records, ADTs and pattern matching are the next
-language milestone. Structured value streams and JSON bridges follow; grapheme-aware
-editing, completion, and persistent history complete the interactive milestone. The
-[current status](docs/status.md) distinguishes usable features from these contracts.
+Start with [current status](docs/status.md) for implemented features and validation.
+Structured streams, filesystem/JSON bridges, grapheme editing, completion, and
+persistent history remain in the [implementation plan](docs/implementation-plan.md).
 
-## Explore the project
+| Guide | Contents |
+| --- | --- |
+| [Language](docs/language.md) | Values, functions, ADTs, patterns, errors, and modules |
+| [Execution](docs/execution.md) | Commands, plans, jobs, and planned stream contracts |
+| [Interaction](docs/interaction.md) · [Platform](docs/platform.md) | Invocation, planned editing, and Linux/macOS conventions |
+| [Architecture](docs/architecture.md) | Components, ownership, evaluation, and memory |
+| [Development](docs/development.md) · [Testing](docs/testing.md) | Build profiles, contribution conventions, and acceptance contracts |
+| [References](docs/references.md) | Standards, upstream documentation, and design sources |
 
-| Read                                                              | Purpose                                              |
-| ----------------------------------------------------------------- | ---------------------------------------------------- |
-| [Development](docs/development.md)                                | Build profiles, code conventions, and quality checks |
-| [Architecture](docs/architecture.md)                              | Components, ownership, GC, and scheduling            |
-| [Implementation plan](docs/implementation-plan.md)                | Repository layout and four acceptance milestones     |
-| [Language](docs/language.md) · [Execution](docs/execution.md)     | First-release semantics and library contracts        |
-| [Interaction](docs/interaction.md) · [Platform](docs/platform.md) | Input experience and Linux/macOS conventions         |
-| [Testing](docs/testing.md)                                        | Test infrastructure and acceptance contracts         |
-| [References](docs/references.md)                                  | Standards and upstream documentation                 |
-
-Contributions should preserve explicit ownership and keep process bytes separate from
-language values and display text. Start with the development guide and the contract
-for the component you are changing.
+For changes, read the development guide and the specification that owns the behavior.
+Keep process bytes, language values, and display text separate; update the relevant
+contracts and tests together.
 
 ## License
 
-Rill Shell is licensed under the [MIT License](LICENSE). Unicode data retains its
-[Unicode license](data/unicode/license.txt); yyjson retains its upstream MIT notice.
+[MIT](LICENSE). Unicode data retains its [Unicode license](data/unicode/license.txt);
+yyjson retains its upstream MIT notice.

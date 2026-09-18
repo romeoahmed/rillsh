@@ -1,0 +1,6 @@
+fn range(n, items) => if n == 0 then items else range(n - 1, concat(items, [n]))
+let pairs = map(fn(x) => [text(x), x], range(2048, []))
+let left = record(pairs)
+let right = record(reverse(pairs))
+fn loop(n) => if n == 0 then true else if left == right then loop(n - 1) else false
+if loop(128) then () else raise(error("Benchmark", "record result"))

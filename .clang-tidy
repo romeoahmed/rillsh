@@ -8,7 +8,9 @@ Checks:
   - bugprone-assert-side-effect
   - bugprone-assignment-in-if-condition
   - bugprone-bool-pointer-implicit-conversion
+  - bugprone-chained-comparison
   - bugprone-command-processor
+  - bugprone-float-loop-counter
   - bugprone-implicit-widening-of-multiplication-result
   - bugprone-infinite-loop
   - bugprone-integer-division
@@ -35,13 +37,16 @@ Checks:
   - bugprone-suspicious-semicolon
   - bugprone-suspicious-string-compare
   - bugprone-swapped-arguments
+  - bugprone-terminating-continue
   - bugprone-too-small-loop-variable
   - bugprone-unchecked-string-to-number-conversion
   - bugprone-unsafe-functions
   - bugprone-unused-return-value
   # Different default function sets: POSIX/query results above, C library errors below.
   - cert-err33-c
+  - misc-header-include-cycle
   - misc-misleading-bidirectional
   - misc-redundant-expression
+  - misc-static-assert
   - modernize-redundant-void-arg
 WarningsAsErrors: '*'

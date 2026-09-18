@@ -23,12 +23,12 @@ int main(int argc, char **argv) {
     RillBuffer b = {};
     size_t boundaries[1024], n = 0;
     do {
-      if (!strcmp(token, "÷")) {
+      if (!strcmp(token, "\u00f7")) {
         CHECK(n < 1024);
         boundaries[n++] = b.size;
-      } else if (strcmp(token, "×") != 0) {
+      } else if (strcmp(token, "\u00d7") != 0) {
         errno = 0;
-        char *end;
+        char *end = {};
         unsigned long cp = strtoul(token, &end, 16);
         CHECK(!errno && !*end && cp <= 0x10ffff);
         CHECK(rill_text_encode(&b, (uint32_t)cp));
@@ -47,8 +47,8 @@ int main(int argc, char **argv) {
     rill_text_clear(&b);
     ++cases;
   }
-  CHECK(cases == 853); // The official corpus is independent of the generated
-                       // property tables.
+  // The upstream corpus is independent of generated property tables.
+  CHECK(cases == 853);
   CHECK(!ferror(f));
   free(line);
   CHECK(fclose(f) == 0);

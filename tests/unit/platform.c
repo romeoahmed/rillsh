@@ -18,7 +18,7 @@ static void environment() {
                       (char[]){"A=second"},
                       (char[]){"LC_ALL=C"},
                       nullptr};
-  RillEnvironment env;
+  RillEnvironment env = {};
   CHECK(rill_platform_env_init(&env, imported));
   original[2] = 'X';
   CHECK(env.count == 2 && !strcmp(rill_platform_env_get(&env, "A"), "first"));
@@ -37,7 +37,7 @@ static void environment() {
   CHECK(env.entries[env.count] == nullptr);
   char *cwd = getcwd(nullptr, 0);
   CHECK(cwd);
-  RillDiagnostic error;
+  RillDiagnostic error = {};
   CHECK(!rill_platform_cd(&env, "/dev/null/rill-missing", &error));
   char *after = getcwd(nullptr, 0);
   CHECK(after && !strcmp(cwd, after));
@@ -54,10 +54,10 @@ int main() {
   struct sigaction saved[5];
   for (size_t i = 0; i < 5; ++i)
     CHECK(sigaction(signals[i], nullptr, &saved[i]) == 0);
-  RillPlatform platform;
+  RillPlatform platform = {};
   CHECK(rill_platform_init(&platform, false));
   for (size_t i = 0; i < 2; ++i) {
-    struct sigaction current;
+    struct sigaction current = {};
     CHECK(sigaction(signals[i], nullptr, &current) == 0);
     CHECK(current.sa_flags == saved[i].sa_flags);
     if (current.sa_flags & SA_SIGINFO)
@@ -65,14 +65,28 @@ int main() {
     else
       CHECK(current.sa_handler == saved[i].sa_handler);
   }
-  CHECK(raise(SIGINT) == 0 && raise(SIGTERM) == 0);
-  unsigned events = rill_platform_signals(&platform);
-  CHECK((events & (RILL_SIG_INT | RILL_SIG_TERM)) ==
-        (RILL_SIG_INT | RILL_SIG_TERM));
+  CHECK(!rill_platform_input_ready(platform.signals[0]));
+  CHECK(raise(SIGCHLD) == 0);
+  CHECK(rill_platform_input_ready(platform.signals[0]));
   CHECK(rill_platform_signals(&platform) == 0);
+  CHECK(!rill_platform_input_ready(platform.signals[0]));
+  // A full pipe must preserve control flags and the interrupted errno.
+  const char bytes[1024] = {};
+  while (write(platform.signals[1], bytes, sizeof(bytes)) > 0) {
+  }
+  CHECK(errno == EAGAIN);
+  errno = EDOM;
+  CHECK(raise(SIGINT) == 0 && raise(SIGTERM) == 0 && raise(SIGHUP) == 0 &&
+        raise(SIGTSTP) == 0);
+  CHECK(errno == EDOM);
+  unsigned events = rill_platform_signals(&platform);
+  CHECK(events ==
+        (RILL_SIG_INT | RILL_SIG_TERM | RILL_SIG_HUP | RILL_SIG_STOP));
+  CHECK(rill_platform_signals(&platform) == 0);
+  CHECK(!rill_platform_input_ready(platform.signals[0]));
   rill_platform_clear(&platform);
   for (size_t i = 0; i < 5; ++i) {
-    struct sigaction current;
+    struct sigaction current = {};
     CHECK(sigaction(signals[i], nullptr, &current) == 0);
     if (current.sa_flags & SA_SIGINFO)
       CHECK(current.sa_sigaction == saved[i].sa_sigaction);

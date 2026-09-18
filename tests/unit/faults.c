@@ -2,7 +2,10 @@
 #include "../helpers/supervisor.h"
 #include "diagnostic.h"
 #include "exec/exec.h"
+#include "library/bundle.h"
+#include "library/library.h"
 #include "platform/posix.h"
+#include "runtime/runtime.h"
 #include "source.h"
 #include "syntax/syntax.h"
 #include "test.h"
@@ -32,6 +35,7 @@ void *rill_test_realloc(void *pointer, size_t size);
 char *rill_test_strdup(const char *text);
 
 static int allocation_budget = -1;
+static bool fail_once, allocation_failed;
 static int cwd_calls, fork_calls, group_calls;
 static int fail_fork, fail_group, fail_cwd;
 static bool fail_rollback, kill_before_exec, stop_before_group_failure;
@@ -41,7 +45,8 @@ static bool allocation_fails() {
     return false;
   if (allocation_budget-- > 0)
     return false;
-  allocation_budget = 0;
+  allocation_budget = fail_once ? -1 : 0;
+  allocation_failed = true;
   errno = ENOMEM;
   return true;
 }
@@ -82,7 +87,7 @@ int rill_test_setpgid(pid_t pid, pid_t group) {
   if (++group_calls == fail_group) {
     if (stop_before_group_failure) {
       CHECK(kill(pid, SIGSTOP) == 0);
-      siginfo_t info;
+      siginfo_t info = {};
       CHECK(waitid(P_PID, (id_t)pid, &info, WSTOPPED | WNOWAIT) == 0);
       CHECK(info.si_code == CLD_STOPPED);
     }
@@ -92,7 +97,7 @@ int rill_test_setpgid(pid_t pid, pid_t group) {
   int result = setpgid(pid, group);
   if (result == 0 && kill_before_exec) {
     CHECK(kill(pid, SIGKILL) == 0);
-    siginfo_t info;
+    siginfo_t info = {};
     // Observe termination without reaping: ownership remains with the
     // supervisor.
     CHECK(waitid(P_PID, (id_t)pid, &info, WEXITED | WNOWAIT) == 0);
@@ -107,8 +112,8 @@ static void assert_cwd(const char *expected) {
 }
 static void check_directory(int base, const char *cwd) {
   char *entries[] = {(char[]){"OLDPWD=kept"}, nullptr};
-  RillEnvironment env;
-  RillDiagnostic error;
+  RillEnvironment env = {};
+  RillDiagnostic error = {};
   int baseline = descriptor_count(0);
   CHECK(rill_platform_env_init(&env, entries));
   CHECK(rill_platform_env_set(&env, "PWD", cwd));
@@ -135,7 +140,7 @@ static void check_directory(int base, const char *cwd) {
     CHECK(!strcmp(rill_platform_env_get(&env, "OLDPWD"), "kept"));
     if (rollback) {
       CHECK(!rill_platform_env_get(&env, "PWD"));
-      struct stat actual, target;
+      struct stat actual = {}, target = {};
       CHECK(stat(".", &actual) == 0 &&
             fstatat(base, "target", &target, 0) == 0);
       CHECK(actual.st_dev == target.st_dev && actual.st_ino == target.st_ino);
@@ -195,12 +200,12 @@ static void cleanup_launch() {
 }
 
 static void check_launch(const char *child) {
-  RillPlatform platform;
+  RillPlatform platform = {};
   CHECK(rill_platform_init(&platform, false));
   RillExec *exec = rill_exec_new(&platform);
   CHECK(exec);
   active_exec = exec;
-  RillEnvironment env;
+  RillEnvironment env = {};
   extern char **environ;
   CHECK(rill_platform_env_init(&env, environ));
   RillBytes args[] = {{child, strlen(child)}, {"mark", 4}, {"launched", 8}};
@@ -235,7 +240,7 @@ static void check_launch(const char *child) {
     spec.count = cases[i].killed ? 1 : 3;
     sigset_t before, after;
     CHECK(sigprocmask(SIG_SETMASK, nullptr, &before) == 0);
-    RillDiagnostic error;
+    RillDiagnostic error = {};
     RillJob *job = rill_exec_launch(exec, &spec, &error);
     fail_fork = fail_group = 0;
     kill_before_exec = false;
@@ -247,12 +252,12 @@ static void check_launch(const char *child) {
     finish(exec, &platform, job);
     CHECK(rill_exec_result(job) != 0);
     if (cases[i].killed) {
-      size_t count;
+      size_t count = {};
       const RillExecStatus *status = rill_exec_status(job, &count);
       CHECK(count == 1 && status[0].done && status[0].signaled);
       CHECK(status[0].status == SIGKILL);
-      CHECK(rill_exec_launched(job)); // A child killed before exec also closes
-                                      // the handshake channel.
+      // Channel EOF also occurs when a child is killed before exec.
+      CHECK(rill_exec_launched(job));
     } else {
       error = rill_exec_error(job);
       CHECK(error.kind == RILL_LAUNCH);
@@ -268,7 +273,7 @@ static void check_launch(const char *child) {
   bool completed = false;
   for (int budget = 0; budget < 100 && !completed; ++budget) {
     allocation_budget = budget;
-    RillDiagnostic error;
+    RillDiagnostic error = {};
     RillJob *job = rill_exec_launch(exec, &spec, &error);
     allocation_budget = -1;
     if (job) {
@@ -308,10 +313,14 @@ static void check_text_and_syntax() {
   CHECK(errno == ENOMEM && buffer.data == storage && buffer.size == 4);
   rill_text_clear(&buffer);
 
-  const char *cases[] = {"\"\\u{1f642}\"", "let x = [1, 'two']; x[0]",
+  RillBuffer many = {};
+  for (size_t i = 0; i < 1024; ++i)
+    CHECK(rill_text_append(&many, "();", 3));
+  const char *cases[] = {many.data, "\"\\u{1f642}\"", "1_234.5e-2",
+                         "let x = [1, 'two']; x[0]",
                          "job { ^cat 'argument' | ^cat > result 2>&1 }"};
   for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); ++i) {
-    RillSource source;
+    RillSource source = {};
     CHECK(rill_source_init(&source, "fault", cases[i], strlen(cases[i])) ==
           RILL_OK);
     bool complete = false;
@@ -328,9 +337,10 @@ static void check_text_and_syntax() {
     CHECK(complete);
     rill_source_clear(&source);
   }
+  rill_text_clear(&many);
   bool complete = false;
   for (int budget = 0; budget < 20 && !complete; ++budget) {
-    RillSource source;
+    RillSource source = {};
     allocation_budget = budget;
     RillError error = rill_source_init(&source, "input", "valid", 5);
     allocation_budget = -1;
@@ -342,13 +352,352 @@ static void check_text_and_syntax() {
   CHECK(complete);
 }
 
+static void check_equality_allocations() {
+  RillHeap heap = {};
+  RillValue values[2] = {};
+  RillRoot root = {};
+  rill_runtime_root(&heap, &root, values, 2);
+  for (size_t j = 0; j < 2; ++j)
+    values[j] =
+        rill_runtime_object(&heap, RILL_V_LIST, values + j, 1, nullptr, 0, 0);
+  bool equal = false;
+  allocation_budget = 0;
+  RillError status = rill_runtime_equal(values[0], values[1], &equal);
+  allocation_budget = -1;
+  CHECK(status == RILL_OK && equal); // Small comparisons need no allocation.
+  for (size_t i = 0; i < 128; ++i)
+    for (size_t j = 0; j < 2; ++j) {
+      values[j] =
+          rill_runtime_object(&heap, RILL_V_LIST, values + j, 1, nullptr, 0, 0);
+      CHECK(values[j].kind == RILL_V_LIST);
+    }
+  bool complete = false;
+  for (int budget = 0; budget < 16 && !complete; ++budget) {
+    allocation_budget = budget;
+    status = rill_runtime_equal(values[0], values[1], &equal);
+    allocation_budget = -1;
+    complete = status == RILL_OK;
+    CHECK(complete ? equal : status == RILL_MEMORY);
+  }
+  CHECK(complete);
+  rill_runtime_unroot(&heap, &root);
+  rill_runtime_heap_clear(&heap);
+}
+static void check_runtime() {
+  const char *program =
+      "enum Box {Empty,Full {value}}; fn make(x)=>Box.Full({value:x}); let "
+      "saved=make([1,2]); match saved {Box.Full {value:[x,..tail]}=>if "
+      "tail==[2] then x else 0,_=>0}";
+  RillSource source = {};
+  CHECK(rill_source_init(&source, "fault-runtime", program, strlen(program)) ==
+        RILL_OK);
+  bool complete = false;
+  for (int budget = 0; budget < 2000 && !complete; ++budget) {
+    RillEval *eval = rill_runtime_new(nullptr, 0);
+    CHECK(eval);
+    CHECK(rill_runtime_define(
+        eval, "saved", (RillValue){.kind = RILL_V_INT, .as.integer = 7}));
+    RillSource initial = {};
+    CHECK(rill_source_init(&initial, "initial", "let stable=12", 13) ==
+          RILL_OK);
+    RillSyntax base = rill_syntax_parse(&initial);
+    CHECK(base.state == RILL_COMPLETE);
+    rill_runtime_heap(eval)->stress = true;
+    rill_runtime_begin(eval, &base);
+    RillEvalEvent initialized = {};
+    do {
+      initialized = rill_runtime_step(eval);
+    } while (initialized.state == RILL_EVAL_YIELD);
+    CHECK(initialized.state == RILL_EVAL_DONE);
+    rill_syntax_clear(&base);
+    rill_source_clear(&initial);
+    RillSyntax syntax = rill_syntax_parse(&source);
+    CHECK(syntax.state == RILL_COMPLETE);
+    allocation_budget = budget;
+    rill_runtime_begin(eval, &syntax);
+    RillEvalEvent event = {};
+    do {
+      event = rill_runtime_step(eval);
+    } while (event.state == RILL_EVAL_YIELD);
+    complete = event.state == RILL_EVAL_DONE;
+    if (!complete) {
+      CHECK(event.state == RILL_EVAL_ERROR &&
+            event.diagnostic.kind == RILL_MEMORY);
+      RillValue prior = {};
+      CHECK(rill_runtime_lookup(eval, "saved", &prior));
+      CHECK(prior.kind == RILL_V_INT && prior.as.integer == 7);
+      CHECK(rill_runtime_lookup(eval, "stable", &prior));
+      CHECK(prior.kind == RILL_V_INT && prior.as.integer == 12);
+    } else
+      CHECK(event.value.kind == RILL_V_INT && event.value.as.integer == 1);
+    allocation_budget = -1;
+    rill_runtime_free(eval);
+    rill_syntax_clear(&syntax);
+  }
+  CHECK(complete);
+  rill_source_clear(&source);
+  RillEval *eval = rill_runtime_new(nullptr, 0);
+  CHECK(eval);
+  RillValue cached = rill_runtime_object(rill_runtime_heap(eval), RILL_V_STRING,
+                                         nullptr, 0, "cached", 6, 0);
+  CHECK(cached.kind == RILL_V_STRING);
+  CHECK(rill_runtime_retain_module(eval, cached));
+  allocation_budget = 0;
+  CHECK(!rill_runtime_retain_module(eval, (RillValue){}));
+  allocation_budget = -1;
+  rill_runtime_abort(eval);
+  CHECK(cached.as.object->bytes.size == 6);
+  CHECK(!memcmp(cached.as.object->bytes.data, "cached", 6));
+  rill_runtime_free(eval);
+  complete = false;
+  for (int budget = 0; budget < 16 && !complete; ++budget) {
+    RillHeap heap = {.stress = true};
+    RillValue items[200] = {}, retained = {};
+    RillRoot ir = {}, br = {};
+    rill_runtime_root(&heap, &ir, items, 200);
+    rill_runtime_root(&heap, &br, &retained, 1);
+    for (size_t i = 0; i < 200; ++i) {
+      items[i] =
+          rill_runtime_object(&heap, RILL_V_STRING, nullptr, 0, "item", 4, 0);
+      CHECK(items[i].kind == RILL_V_STRING);
+    }
+    allocation_budget = budget;
+    retained = rill_runtime_budget(&heap, SIZE_MAX);
+    RillError status = retained.kind == RILL_V_UNIT ? RILL_MEMORY : RILL_OK;
+    for (size_t i = 0; i < 200 && !status; ++i)
+      status = rill_runtime_charge(&heap, retained, items[i]);
+    complete = status == RILL_OK;
+    CHECK(complete || status == RILL_MEMORY);
+    allocation_budget = -1;
+    rill_runtime_unroot(&heap, &br);
+    rill_runtime_unroot(&heap, &ir);
+    rill_runtime_heap_clear(&heap);
+  }
+  CHECK(complete);
+}
+static RillSyntax parse(const char *text) {
+  [[gnu::cleanup(rill_source_clear)]] RillSource source = {};
+  CHECK(rill_source_init(&source, "fault", text, strlen(text)) == RILL_OK);
+  RillSyntax syntax = rill_syntax_parse(&source);
+  CHECK(syntax.state == RILL_COMPLETE);
+  return syntax;
+}
+static void check_modules() {
+  bool complete = false;
+  for (int budget = 0; budget < 1000 && !complete; ++budget) {
+    RillEval *eval = rill_runtime_new(nullptr, 0);
+    CHECK(eval);
+    CHECK(rill_runtime_define(
+        eval, "stable", (RillValue){.kind = RILL_V_INT, .as.integer = 7}));
+    rill_runtime_prelude(eval);
+    rill_runtime_heap(eval)->stress = true;
+    [[gnu::cleanup(rill_syntax_clear)]] RillSyntax entry =
+        parse("import 'module' as m; m.identity(m.saved)");
+    rill_runtime_begin(eval, &entry);
+    CHECK(rill_runtime_step(eval).state == RILL_EVAL_IMPORT);
+    [[gnu::cleanup(rill_syntax_clear)]] RillSyntax module =
+        parse("export let saved='kept'; export fn identity(x)=>x");
+    fail_once = true;
+    allocation_failed = false;
+    allocation_budget = budget;
+    rill_runtime_module(eval, &module);
+    RillEvalEvent event = {};
+    do {
+      event = rill_runtime_step(eval);
+    } while (event.state == RILL_EVAL_YIELD);
+    allocation_budget = -1;
+    fail_once = false;
+    complete = !allocation_failed;
+    if (complete) {
+      CHECK(event.state == RILL_EVAL_MODULE &&
+            event.value.kind == RILL_V_RECORD);
+      CHECK(rill_runtime_retain_module(eval, event.value));
+      rill_runtime_resume(eval, event.value, (RillDiagnostic){});
+      do {
+        event = rill_runtime_step(eval);
+      } while (event.state == RILL_EVAL_YIELD);
+      CHECK(event.state == RILL_EVAL_DONE && event.value.kind == RILL_V_STRING);
+      CHECK(!strcmp(event.value.as.object->bytes.data, "kept"));
+    } else {
+      if (event.state != RILL_EVAL_ERROR)
+        (void)fprintf(stderr, "module fault budget %d\n", budget);
+      CHECK(event.state == RILL_EVAL_ERROR &&
+            event.diagnostic.kind == RILL_MEMORY);
+      rill_runtime_abort(eval);
+      RillValue prior = {};
+      CHECK(rill_runtime_lookup(eval, "stable", &prior) &&
+            prior.as.integer == 7);
+      CHECK(!rill_runtime_lookup(eval, "m", &prior));
+    }
+    CHECK(!module.allocated && !module.source.data);
+    rill_runtime_free(eval);
+  }
+  CHECK(complete);
+}
+static RillEvalEvent evaluate_library(RillLibrary *library,
+                                      RillSyntax *syntax) {
+  rill_runtime_begin(library->eval, syntax);
+  RillNativePending pending = {};
+  for (;;) {
+    RillEvalEvent event = rill_runtime_step(library->eval);
+    if (event.state == RILL_EVAL_YIELD)
+      continue;
+    if (event.state != RILL_EVAL_NATIVE)
+      return event;
+    // These cases construct data/plans or inspect an already completed job.
+    CHECK(rill_library_call(library, &pending, event));
+    CHECK(!pending.job);
+  }
+}
+static void check_library(const char *child) {
+  RillPlatform platform = {};
+  CHECK(rill_platform_init(&platform, false));
+  RillExec *exec = rill_exec_new(&platform);
+  CHECK(exec);
+  active_exec = exec;
+  RillEnvironment environment = {};
+  CHECK(rill_platform_env_init(&environment, nullptr));
+  RillBytes arguments[] = {{child, strlen(child)}, {"exit", 4}, {"0", 1}};
+  RillExecStage stage = {.argv = arguments, .argc = 3};
+  RillExecSpec spec = {.stages = &stage,
+                       .count = 1,
+                       .environment = &environment,
+                       .background = true};
+  RillDiagnostic diagnostic = {};
+  RillJob *job = rill_exec_launch(exec, &spec, &diagnostic);
+  CHECK(job);
+  rill_exec_cancel(job);
+  finish(exec, &platform, job);
+  CHECK(rill_exec_cancelled(job));
+  size_t native_count = {};
+  const RillNative *natives = rill_library_natives(&native_count);
+  const struct {
+    const char *name, *source;
+    enum { VALUE, OVERRIDES, EXPORTS } result;
+  } cases[] = {
+      {"arguments", "args()==[bytes([97]),bytes([]),bytes([255])]", VALUE},
+      {"environment overrides",
+       "let base=with_env({KEEP:'old',KEY:'first'},"
+       "pipe(command('printf',['text']),job {^cat}));"
+       "let plan=with_env({KEY:'value',NEW:'added'},base); true",
+       OVERRIDES},
+      {"byte conversion",
+       "concat(encode_utf8(text(42)),bytes([33]))==bytes([52,50,33])", VALUE},
+      {"exports", "export let first='one'; export let second='two'; true",
+       EXPORTS},
+      {"cancelled report",
+       "match wait(handle) {JobReport {completion: Completion.Cancelled "
+       "{reason},..}=>reason=='cancelled',_=>false}",
+       VALUE},
+      {"error conversion",
+       "match attempt(fn()=>1+true) {Result.Err {error:Error {kind,..}}"
+       "=>kind=='TypeError',_=>false}",
+       VALUE},
+      {"record rest", "match {a:1,b:[2,3],c:4} {{a,..rest}=>rest.b==[2,3]}",
+       VALUE},
+      {"sort",
+       "sort_by(fn(x)=>x.k,[{k:2,v:'a'},{k:1,v:'b'},{k:2,v:'c'}])[2].v=='c'",
+       VALUE},
+      {"Unicode scalars", "scalars('\u754ca')==['\u754c','a']", VALUE}};
+  for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); ++i) {
+    bool complete = false;
+    for (int budget = 0; budget < 1000 && !complete; ++budget) {
+      RillEval *eval = rill_runtime_new(natives, native_count);
+      CHECK(eval);
+      char *args[] = {(char[]){"a"}, (char[]){""}, (char[]){"\xff"}};
+      RillLibrary library = {.eval = eval,
+                             .exec = exec,
+                             .environment = &environment,
+                             .arguments = args,
+                             .argument_count = 3};
+      [[gnu::cleanup(rill_syntax_clear)]] RillSyntax prelude =
+          parse(rill_library_source("std:prelude"));
+      CHECK(evaluate_library(&library, &prelude).state == RILL_EVAL_DONE);
+      rill_runtime_prelude(eval);
+      CHECK(rill_runtime_define(
+          eval, "handle",
+          (RillValue){.kind = RILL_V_JOB,
+                      .as.integer = (int64_t)rill_exec_id(job)}));
+      [[gnu::cleanup(rill_syntax_clear)]] RillSyntax syntax =
+          parse(cases[i].source);
+      rill_runtime_heap(eval)->stress = true;
+      // A single failed allocation followed by recovery exposes swallowed
+      // errors that a permanently exhausted allocator would conceal.
+      fail_once = true;
+      allocation_failed = false;
+      allocation_budget = budget;
+      RillEvalEvent event = evaluate_library(&library, &syntax);
+      if (event.state == RILL_EVAL_DONE) {
+        RillValue exports = rill_runtime_exports(eval);
+        if (exports.kind == RILL_V_UNIT)
+          event = rill_runtime_step(eval);
+        else if (cases[i].result == EXPORTS)
+          CHECK(exports.kind == RILL_V_RECORD && exports.as.object->count == 4);
+      }
+      allocation_budget = -1;
+      fail_once = false;
+      complete = !allocation_failed;
+      if (complete) {
+        CHECK(event.state == RILL_EVAL_DONE &&
+              event.value.kind == RILL_V_BOOL && event.value.as.integer);
+        if (cases[i].result == OVERRIDES) {
+          RillValue plan = {}, base = {};
+          CHECK(rill_runtime_lookup(eval, "plan", &plan));
+          CHECK(rill_runtime_lookup(eval, "base", &base));
+          CHECK(plan.kind == RILL_V_PLAN && plan.as.object->count == 2);
+          const char *const keys[] = {"KEEP", "KEY", "NEW"};
+          const char *const expected[] = {"old", "value", "added"};
+          for (size_t stage_index = 0; stage_index < 2; ++stage_index) {
+            RillValue env = {}, value = {};
+            CHECK(rill_runtime_field(
+                plan.as.object->values[stage_index].as.object->metadata,
+                (RillBytes){"env", 3}, &env));
+            CHECK(env.kind == RILL_V_RECORD && env.as.object->count == 6);
+            for (size_t k = 0; k < 3; ++k) {
+              CHECK(rill_runtime_field(
+                  env, (RillBytes){keys[k], strlen(keys[k])}, &value));
+              CHECK(value.kind == RILL_V_STRING &&
+                    !strcmp(value.as.object->bytes.data, expected[k]));
+            }
+            CHECK(rill_runtime_field(
+                base.as.object->values[stage_index].as.object->metadata,
+                (RillBytes){"env", 3}, &env));
+            CHECK(env.as.object->count == 4);
+            CHECK(rill_runtime_field(env, (RillBytes){"KEY", 3}, &value));
+            CHECK(!strcmp(value.as.object->bytes.data, "first"));
+          }
+        }
+      } else {
+        if (event.state != RILL_EVAL_ERROR ||
+            event.diagnostic.kind != RILL_MEMORY)
+          (void)fprintf(stderr, "library fault %s budget %d\n", cases[i].name,
+                        budget);
+        CHECK(event.state == RILL_EVAL_ERROR &&
+              event.diagnostic.kind == RILL_MEMORY);
+      }
+      rill_runtime_free(eval);
+    }
+    CHECK(complete);
+  }
+  active_exec = nullptr;
+  rill_exec_free(exec);
+  rill_platform_env_clear(&environment);
+  rill_platform_clear(&platform);
+}
 int main(int argc, char **argv) {
   CHECK(argc == 3);
   if (!strcmp(argv[2], "memory")) {
     check_text_and_syntax();
+    check_runtime();
+    check_modules();
+    check_equality_allocations();
     return 0;
   }
   CHECK(atexit(cleanup_launch) == 0);
+  if (!strcmp(argv[2], "library")) {
+    check_library(argv[1]);
+    return 0;
+  }
   char *child = realpath(argv[1], nullptr);
   CHECK(child);
   int original = open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);

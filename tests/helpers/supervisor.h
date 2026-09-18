@@ -11,7 +11,7 @@ static inline bool supervisor_cleanup(RillExec *exec) {
   if (!exec)
     return true;
   for (RillJob *job = rill_exec_first(exec); job; job = rill_exec_next(job)) {
-    size_t count;
+    size_t count = {};
     const RillExecStatus *status = rill_exec_status(job, &count);
     for (size_t i = 0; i < count; ++i)
       if (status[i].pid > 0 && !status[i].done)

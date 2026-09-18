@@ -9,8 +9,8 @@
 #include "text/text.h"
 #include <stddef.h>
 #include <stdint.h>
-/** @brief Pending native effect, owning no runtime values outside explicit
- * roots. */
+/** @brief Pending effect borrowing a supervisor-owned job; contains no Values.
+ */
 typedef struct {
   RillJob *job;      ///< Supervisor-owned pending job.
   int64_t operation; ///< Native operation awaiting completion.
@@ -19,6 +19,8 @@ typedef struct {
  * @brief Borrowed session services and explicit exit-request state.
  */
 typedef struct {
+  char *const *arguments;       ///< Borrowed script argument vector.
+  size_t argument_count;        ///< Script arguments excluding the source path.
   RillExec *exec;               ///< Supervisor.
   RillEnvironment *environment; ///< Mutable session environment.
   RillEval *eval;               ///< Runtime and heap.
@@ -33,8 +35,9 @@ const RillNative *rill_library_natives(size_t *count);
  * @brief Dispatch a native request through the session services.
  *
  * The event must be the evaluator's current native request. False leaves an
- * operation in pending; true means the evaluator was resumed, possibly with
- * an error. Filesystem effects may block.
+ * operation in pending; service it with rill_library_progress() after polling.
+ * True means the evaluator was resumed, possibly with an error. May collect;
+ * filesystem effects may block.
  */
 bool rill_library_call(RillLibrary *library, RillNativePending *pending,
                        RillEvalEvent event);

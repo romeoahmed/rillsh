@@ -20,7 +20,7 @@ static inline int descriptor_count(int first) {
     }
     if (entry->d_name[0] == '.')
       continue;
-    char *end;
+    char *end = {};
     errno = 0;
     long fd = strtol(entry->d_name, &end, 10);
     if (errno || end == entry->d_name || *end || fd < 0 || fd > INT_MAX) {

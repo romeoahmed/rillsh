@@ -13,7 +13,6 @@ typedef struct {
 } LaunchError;
 struct RillJob {
   RillJob *next;
-  RillPlatform *platform;
   size_t id, count;
   pid_t group;
   pid_t ungrouped; // Last forked child if group registration failed.

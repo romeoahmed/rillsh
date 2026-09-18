@@ -8,8 +8,7 @@
 #include "text/text.h"
 #include <stddef.h>
 #include <stdint.h>
-/** @brief Implemented expression forms; command statements lower to unary run.
- */
+/** @brief Syntax forms; command statements lower to unary run calls. */
 typedef enum {
   RILL_STRING,
   RILL_INTEGER,
@@ -22,7 +21,29 @@ typedef enum {
   RILL_REDIRECT,
   RILL_LIST,
   RILL_INDEX,
-  RILL_FIELD
+  RILL_FIELD,
+  RILL_FLOAT,
+  RILL_BOOL,
+  RILL_NULL,
+  RILL_RECORD,
+  RILL_PAIR,
+  RILL_FUNCTION,
+  RILL_DECLARE,
+  RILL_BLOCK,
+  RILL_IF,
+  RILL_BINARY,
+  RILL_UNARY,
+  RILL_PIPE,
+  RILL_WITH,
+  RILL_MATCH,
+  RILL_ARM,
+  RILL_REST,
+  RILL_NOMINAL,
+  RILL_STRUCT,
+  RILL_ENUM,
+  RILL_REC,
+  RILL_IMPORT,
+  RILL_SPREAD
 } RillNodeKind;
 /** @brief Redirection syntax in source order. */
 typedef enum {
@@ -38,10 +59,19 @@ typedef enum {
  * offset.
  */
 typedef struct RillNode {
-  RillNodeKind kind;               ///< Syntactic form.
-  size_t offset;                   ///< Source byte offset.
-  RillBuffer text;                 ///< Decoded literal or name.
-  int64_t integer;                 ///< Integer literal or redirection tag.
+  RillNodeKind kind; ///< Syntactic form.
+  size_t offset;     ///< Source byte offset.
+  RillBuffer text; ///< Decoded text; code preparation replaces String text with
+                   ///< a slot.
+  double real;     ///< Finite floating literal.
+  bool grouped;    ///< Explicit parentheses permit nested comparisons.
+  bool exported;   ///< Top-level export declaration.
+  bool repeated;   ///< Duplicate pattern names, set during code preparation.
+  struct RillNode *pattern; ///< Parameter or binding pattern.
+  union {
+    int64_t integer; ///< Integer literal, redirection tag, or module flag.
+    size_t constant; ///< String/key slot assigned after code consumes syntax.
+  }; ///< Kind selects the payload; the parser leaves constant slots unset.
   struct RillNode *children;       ///< Ordered operands.
   struct RillNode *next;           ///< Next sibling.
   struct RillNode *allocated_next; ///< Parse arena ownership chain.
@@ -53,8 +83,13 @@ typedef enum { RILL_COMPLETE, RILL_INCOMPLETE, RILL_INVALID } RillParseState;
  * storage.
  */
 typedef struct RillSyntax {
+  size_t
+      allocation; ///< Arena, owned source, and decoded-buffer allocation bytes.
+  RillBuffer name;           ///< Logical source identity retained by closures.
+  RillBuffer source;         ///< Owned input for code lifetime transfer.
   RillNode *first;           ///< First statement.
-  RillNode *allocated;       ///< All nodes, freed without recursive traversal.
+  RillNode *allocated;       ///< All nodes, traversed without recursion.
+  struct RillNodes *nodes;   ///< Stable node blocks owned by this parse.
   RillParseState state;      ///< Classification of the entire source.
   RillDiagnostic diagnostic; ///< Failure or incomplete-input explanation.
 } RillSyntax;
@@ -65,5 +100,5 @@ typedef struct RillSyntax {
  * state, including incomplete or invalid input.
  */
 RillSyntax rill_syntax_parse(const RillSource *source);
-/** @brief Release all nodes and decoded literals. */
+/** @brief Free nodes, text, and copied source, then reset the parse result. */
 void rill_syntax_clear(RillSyntax *syntax);

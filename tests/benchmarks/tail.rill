@@ -1,0 +1,2 @@
+fn loop(n) => if n == 0 then 0 else loop(n - 1)
+if loop(3000000) == 0 then () else raise(error("Benchmark", "tail result"))

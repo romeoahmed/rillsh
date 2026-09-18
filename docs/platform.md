@@ -1,25 +1,27 @@
 # Platform
 
-This document defines the target Linux/macOS boundary and first-release conventions. [Execution](execution.md) specifies job semantics;
-[architecture](architecture.md) specifies process and terminal mechanisms.
-[Current status](status.md) records verified platform support.
+This document defines the target Linux/macOS boundary and first-release conventions.
+[Execution](execution.md) specifies job semantics; [architecture](architecture.md)
+specifies process and terminal mechanisms. [Current status](status.md) records verified
+support. History storage, grapheme editing, full display width, and rich-terminal
+selection below remain stage-4 requirements.
 
 ## Standards and support boundary
 
 Use published standards and current supported Linux/glibc and macOS development
 environments. New code follows POSIX.1-2024 terminology and semantics, requiring the
 facilities it uses rather than full platform certification. Missing required facilities
-are build errors; Linux/macOS API differences belong in the platform adapter.
-Older compiler modes, obsolete terminal dialects, and speculative ports are outside scope.
+are build errors; Linux/macOS API differences belong in the platform adapter. Older
+compiler modes, obsolete terminal dialects, and speculative ports are outside scope.
 
-| Area                          | Baseline                                  | Project boundary                                                                                |
-| ----------------------------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| Implementation language       | GNU C23, based on ISO/IEC 9899:2024       | Standard facilities first, selected GCC/Clang extensions; no older-C fallback or C2y dependency |
-| Processes and system services | POSIX.1-2024 / Issue 8                    | Linux/macOS user-space APIs; no POSIX shell grammar claim                                       |
-| User directories              | XDG Base Directory 0.8                    | Same config/state policy on both platforms                                                      |
-| Text and segmentation         | Unicode 18.0.0; matching UAX #29 and data | UTF-8 language text; extended grapheme editing                                                  |
-| JSON                          | RFC 8259                                  | Stricter duplicate-key and numeric-range policy in execution                                    |
-| Terminal UI                   | Modern VT/xterm-compatible UTF-8 profile  | SGR, cursor control, bracketed paste; plain fallback                                            |
+| Area | Baseline | Project boundary |
+| --- | --- | --- |
+| Implementation language | GNU C23, based on ISO/IEC 9899:2024 | Standard facilities first, selected GCC/Clang extensions; no older-C fallback or C2y dependency |
+| Processes and system services | POSIX.1-2024 / Issue 8 | Linux/macOS user-space APIs; no POSIX shell grammar claim |
+| User directories | XDG Base Directory 0.8 | Same config/state policy on both platforms |
+| Text and segmentation | Unicode 18.0.0; matching UAX #29 and data | UTF-8 language text; extended grapheme editing |
+| JSON | RFC 8259 | Stricter duplicate-key and numeric-range policy in execution |
+| Terminal UI | Modern VT/xterm-compatible UTF-8 profile | SGR, cursor control, bracketed paste; plain fallback |
 
 `termios` controls a terminal device; `terminfo` describes capabilities. The shell uses
 the former and a fixed modern protocol profile, with no terminfo dependency or
@@ -53,8 +55,8 @@ with an unsupported executable format fails with ENOEXEC and never falls back to
 shell interpreter. Explicit script invocation still works normally.
 
 Installation provides `rillsh`. Automatic `/etc/shells` registration, `/bin/sh`
-replacement, login-shell configuration, and privileged/set-ID execution are outside scope.
-Do not read `.profile`, `.bashrc`, `.inputrc`, or `.editrc` implicitly.
+replacement, login-shell configuration, and privileged/set-ID execution are outside
+scope. Do not read `.profile`, `.bashrc`, `.inputrc`, or `.editrc` implicitly.
 
 ## Environment conventions
 
@@ -84,13 +86,13 @@ LANG, LC_ALL, and LC_* pass unchanged to children for their own locale policy.
 
 ## XDG storage
 
-| Purpose          | Base variable     | Default              | Use                                         |
-| ---------------- | ----------------- | -------------------- | ------------------------------------------- |
-| Configuration    | `XDG_CONFIG_HOME` | `$HOME/.config`      | `rillsh/init.rill`, interactive only        |
-| Persistent state | `XDG_STATE_HOME`  | `$HOME/.local/state` | `rillsh/history` and separate lock file     |
-| Disposable cache | `XDG_CACHE_HOME`  | `$HOME/.cache`       | Reserved; completion cache is in memory     |
-| User data        | `XDG_DATA_HOME`   | `$HOME/.local/share` | Reserved; no implicit module discovery      |
-| Session files    | `XDG_RUNTIME_DIR` | No general default   | Not needed; helper communication uses pipes |
+| Purpose | Base variable | Default | Use |
+| --- | --- | --- | --- |
+| Configuration | `XDG_CONFIG_HOME` | `$HOME/.config` | `rillsh/init.rill`, interactive only |
+| Persistent state | `XDG_STATE_HOME` | `$HOME/.local/state` | `rillsh/history` and separate lock file |
+| Disposable cache | `XDG_CACHE_HOME` | `$HOME/.cache` | Reserved; completion cache is in memory |
+| User data | `XDG_DATA_HOME` | `$HOME/.local/share` | Reserved; no implicit module discovery |
+| Session files | `XDG_RUNTIME_DIR` | No general default | Not needed; helper communication uses pipes |
 
 An unset, empty, or relative base value selects its default. If that default needs HOME
 and HOME is not absolute/nonempty, disable the optional facility with one diagnostic. A
@@ -135,8 +137,8 @@ layout operations rather than characters passed to this width formula.
 
 This is a deterministic terminal policy, not a claim that UAX #11 defines terminal width
 or every terminal/font agrees. Do not combine platform `wcwidth` results with another
-table in one layout. Source is edited in logical order; full bidirectional reordering
-is outside scope. Expose invisible directional controls in source diagnostics.
+table in one layout. Source is edited in logical order; full bidirectional reordering is
+outside scope. Expose invisible directional controls in source diagnostics.
 Unknown/newly assigned glyphs remain valid text even when terminal width is imperfect.
 
 Use one Unicode version for properties, algorithms, and test corpora. Data generation

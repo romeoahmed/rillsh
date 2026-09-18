@@ -1,0 +1,80 @@
+# Wrappers capture private primitives before the public prelude is frozen.
+enum Option {None, Some {value}}
+enum Result {Ok {value}, Err {error}}
+enum Termination {Exited {code}, Signaled {signal}}
+enum Completion {Finished, Cutoff {reason}, Cancelled {reason}}
+struct JobReport {id, stages, completion, failure}
+struct Error {kind, message, span, notes}
+fn some(value) => Option.Some({value: value})
+fn ok(value) => Result.Ok({value: value})
+fn err(error) => Result.Err({error: error})
+fn error(kind, message) => Error({kind: kind, message: message, span: null, notes: []})
+fn identity(value) => value
+fn compose(f, g, value) => f(g(value))
+fn add(a, b) => a + b
+fn subtract(a, b) => a - b
+fn multiply(a, b) => a * b
+fn divide(a, b) => a / b
+fn equal(a, b) => a == b
+fn less(a, b) => a < b
+fn div(a, b) => __pure(["div", a, b])
+fn rem(a, b) => __pure(["rem", a, b])
+fn int(value) => __pure(["int", value])
+fn float(value) => __pure(["float", value])
+fn text(value) => __pure(["text", value])
+fn length(items) => __pure(["length", items])
+fn byte_length(value) => __pure(["byte_length", value])
+fn scalars(value) => __pure(["scalars", value])
+fn encode_utf8(value) => __pure(["encode_utf8", value])
+fn decode_utf8(value) => __pure(["decode_utf8", value])
+fn starts_with(prefix, value) => __pure(["starts_with", prefix, value])
+fn ends_with(suffix, value) => __pure(["ends_with", suffix, value])
+fn concat(a, b) => __pure(["concat", a, b])
+fn reverse(items) => __pure(["reverse", items])
+fn take(count, items) => __pure(["take", count, items])
+fn drop(count, items) => __pure(["drop", count, items])
+fn record(pairs) => __pure(["record", pairs])
+fn extend(fields, base) => __pure(["extend", fields, base])
+fn to_record(value) => __pure(["to_record", value])
+fn lookup(key, fields) => match __pure(["lookup", key, fields]) {
+  [value] => some(value),
+  [] => Option.None
+}
+fn fold(f, initial, items) => match items {
+  [] => initial,
+  [head, ..tail] => fold(f, f(initial, head), tail)
+}
+fn each(f, items) => match items {
+  [] => (),
+  [head, ..tail] => do { f(head); each(f, tail) }
+}
+fn map(f, items) => do {
+  fn loop(rest, output) => match rest {
+    [] => __pure(["unroll", output]),
+    [head, ..tail] => loop(tail, [f(head), output])
+  }
+  loop(items, [])
+}
+fn filter(predicate, items) => do {
+  fn loop(rest, output) => match rest {
+    [] => __pure(["unroll", output]),
+    [head, ..tail] => if predicate(head) then loop(tail, [head, output]) else loop(tail, output)
+  }
+  loop(items, [])
+}
+fn sum(items) => match items { [] => 0, [head, ..tail] => fold(add, __pure(["number", head]), tail) }
+fn sort_by_with(options, key, items) => do {
+  let budget = __pure(["sort_input", options, items])
+  let decorated = map(fn(value) => [__pure(["sort_key", budget, key(value)]), value], items)
+  __pure(["sort", decorated])
+}
+fn sort_by(key, items) => sort_by_with({}, key, items)
+fn command(executable, arguments) => __process(["command", executable, arguments])
+fn pipe(left, right) => __process(["pipe", left, right])
+fn with_cwd(directory, plan) => __process(["with_cwd", directory, plan])
+fn with_env(environment, plan) => __process(["with_env", environment, plan])
+fn accept_exit(codes, plan) => __process(["accept_exit", codes, plan])
+fn set_env(name, value) => __process(["set_env", name, value])
+fn get_env(name) => match __process(["get_env", name]) { [value] => some(value), [] => Option.None }
+fn unset_env(name) => __process(["unset_env", name])
+fn args() => __process(["args"])

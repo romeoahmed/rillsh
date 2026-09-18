@@ -1,6 +1,12 @@
 #include "diagnostic.h"
 const char *rill_diagnostic_name(RillError k) {
   switch (k) {
+  case RILL_MATCH_ERROR:
+    return "MatchError";
+  case RILL_ARITHMETIC:
+    return "ArithmeticError";
+  case RILL_MISSING_FIELD:
+    return "MissingField";
   case RILL_OK:
     return "Success";
   case RILL_SYNTAX:

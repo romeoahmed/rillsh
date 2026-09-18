@@ -1,7 +1,9 @@
 # Language
 
-This document specifies the first-release target language. [Execution](execution.md) defines
-process and stream effects; [current status](status.md) identifies the implemented subset.
+This document specifies the first-release target language. [Execution](execution.md)
+defines process and stream effects. The non-Stream language is implemented; Stream
+lifetimes and cleanup scopes below belong to stage 3. [Current status](status.md)
+records coverage.
 
 ## Semantic core
 
@@ -11,28 +13,28 @@ matching, data construction/projection, and runtime error propagation. Richer sy
 lowers to these operations or to explicit runtime primitives.
 
 Evaluation is strict and ordered, bindings are immutable, and scope is lexical.
-Functions may perform effects; purity is a programming discipline. Evaluation has
-no implicit laziness, text coercion, truthiness, or string-to-code conversion.
+Functions may perform effects; purity is a programming discipline. Evaluation has no
+implicit laziness, text coercion, truthiness, or string-to-code conversion.
 
 ## Values
 
-| Kind          | Contract                                                               |
-| ------------- | ---------------------------------------------------------------------- |
-| Unit          | `()`; successful operations with no data result                        |
-| Null          | `null`; explicit absence in data, including JSON                       |
-| Bool          | `true` or `false`; the only accepted conditional values                |
-| Int           | Signed 64-bit integer; checked arithmetic                              |
-| Float         | IEEE binary64; finite results only                                     |
-| String        | Valid UTF-8, explicit byte length, possibly containing NUL             |
-| Bytes         | Arbitrary bytes with explicit length                                   |
-| Path          | POSIX path bytes without NUL; no automatic Unicode normalization       |
-| List          | Immutable, ordered sequence of values                                  |
-| Record        | Immutable mapping from unique String keys to values                    |
-| ADT value     | Nominal type identity, constructor identity, immutable payload         |
-| Function      | First-class unary callable, including native and constructor functions |
-| JobPlan       | Immutable external execution description                               |
-| Job handle    | Opaque, session-owned reference to a live or completed job             |
-| Stream handle | Opaque, scoped, single-consumer resource reference                     |
+| Kind | Contract |
+| --- | --- |
+| Unit | `()`; successful operations with no data result |
+| Null | `null`; explicit absence in data, including JSON |
+| Bool | `true` or `false`; the only accepted conditional values |
+| Int | Signed 64-bit integer; checked arithmetic |
+| Float | IEEE binary64; finite results only |
+| String | Valid UTF-8, explicit byte length, possibly containing NUL |
+| Bytes | Arbitrary bytes with explicit length |
+| Path | POSIX path bytes without NUL; no automatic Unicode normalization |
+| List | Immutable, ordered sequence of values |
+| Record | Immutable mapping from unique String keys to values |
+| ADT value | Nominal type identity, constructor identity, immutable payload |
+| Function | First-class unary callable, including native and constructor functions |
+| JobPlan | Immutable external execution description |
+| Job handle | Opaque, session-owned reference to a live or completed job |
+| Stream handle | Opaque, scoped, single-consumer resource reference |
 
 Resource handles do not expose OS handles. A Job handle may be retained in persistent
 session data; a Stream handle cannot outlive its execution scope. Stream escape rules
@@ -97,8 +99,8 @@ let operations = {transform: double, accept: fn(x) => x > 10}
 
 A Function is a first-class unary callable. It can be passed, returned, stored in data,
 or created as a lexical closure, independently of the names bound to it. User functions,
-native functions, and constructors with fields share one application protocol.
-Signature metadata supplies help without affecting dispatch.
+native functions, and constructors with fields share one application protocol. Planned
+help metadata describes callables without affecting dispatch.
 
 Application follows these lowerings:
 
@@ -139,7 +141,8 @@ Proper tail calls cover direct, mutual, and indirect calls, including calls rout
 through native higher-order functions. The chosen branch of a tail-position `if` or
 `match`, and the final expression of a tail-position `do`, inherit tail position. A call
 is not tail-positioned when work remains afterward. No C optimizer is required for this
-guarantee. Non-tail recursion may reach a documented evaluator limit.
+guarantee. The evaluator limits live continuations to 65,536; syntax nesting is limited
+to 256 levels. Exceeding either limit produces a diagnostic.
 
 ## Expressions, bindings, and effects
 
@@ -160,7 +163,8 @@ then binds. Binding failure raises MatchError and installs none of that binding'
 `if` requires both branches and evaluates only the selected branch. `and` and `or`
 short-circuit and require Bool operands; `not` accepts Bool. Sequential effects and
 `each(fn(x) => effect(x), items)` support imperative tasks. There are no mutable
-variables, user-defined setters, `return`, `break`, or assignment operators in the first release.
+variables, user-defined setters, `return`, `break`, or assignment operators in the first
+release.
 
 From tightest to loosest: field/index/call suffixes; unary `-` and `not`; `*` and `/`;
 `+` and `-`; comparisons; `and`; `or`; `with`; `|>`. Comparisons do not chain. Binary
@@ -269,20 +273,20 @@ match answer {
 
 Patterns include literals, `_`, bindings, list patterns, record patterns, nominal
 constructor patterns, and nesting. There are no view patterns, regex patterns, implicit
-pinning of existing variables, user-defined matchers, or pattern alternatives. The
-same pattern language serves `match`, `let`, and function parameters.
+pinning of existing variables, user-defined matchers, or pattern alternatives. The same
+pattern language serves `match`, `let`, and function parameters.
 
-| Pattern           | Meaning                                                 |
-| ----------------- | ------------------------------------------------------- |
-| `name`            | Bind a fresh local name, regardless of an outer binding |
-| `[a, b]`          | Exactly two elements                                    |
-| `[head, ..tail]`  | At least one element; bind the remaining list           |
-| `{name, size}`    | Anonymous record with exactly these keys                |
-| `{name, ..}`      | Anonymous record containing `name`; ignore other keys   |
-| `{name, ..rest}`  | Bind the remaining fields as an anonymous record        |
-| `{name: n}`       | Match the key `name`, bind `n`                          |
-| `Point {x, ..}`   | Point value containing the declared field `x`           |
-| `Outcome.Pending` | The fieldless constructor's singleton                   |
+| Pattern | Meaning |
+| --- | --- |
+| `name` | Bind a fresh local name, regardless of an outer binding |
+| `[a, b]` | Exactly two elements |
+| `[head, ..tail]` | At least one element; bind the remaining list |
+| `{name, size}` | Anonymous record with exactly these keys |
+| `{name, ..}` | Anonymous record containing `name`; ignore other keys |
+| `{name, ..rest}` | Bind the remaining fields as an anonymous record |
+| `{name: n}` | Match the key `name`, bind `n` |
+| `Point {x, ..}` | Point value containing the declared field `x` |
+| `Outcome.Pending` | The fieldless constructor's singleton |
 
 Only one rest pattern is allowed, at the end. Shorthand `name` in a record pattern means
 `name: name`. Nominal patterns reject keys not in their descriptor. Anonymous record
@@ -305,9 +309,11 @@ contract. Warning analysis must not evaluate guards or constructor expressions.
 Language errors travel through a dedicated evaluator outcome, separate from ordinary
 values. They carry stable kind, message, source span, and notes. The prelude exposes an
 Error product with `kind: String`, `message: String`, `span: Record or Null`, and
-`notes: List[String]`; `error(kind, message)` supplies the default absent span and empty
-notes. `raise` validates this shape before propagation. Type errors, failed matches,
-invalid arithmetic, I/O errors, and checked process failures use this channel.
+`notes: List[String]`. Evaluator-generated spans contain `source: String` and a
+zero-based byte `offset: Int`; `error(kind, message)` supplies the default absent span
+and empty notes. `raise` validates the Error shape before propagation. Type errors,
+failed matches, invalid arithmetic, I/O errors, and checked process failures use this
+channel.
 
 `attempt(thunk)` is a runtime primitive callable as an ordinary unary function:
 
@@ -352,10 +358,10 @@ import cycles, and removes failed loads from the cache. Top-level initializers e
 once in source order and may have ordinary effects; importing untrusted code is not a
 sandbox. Standard-library initialization must be effect-free.
 
-The standard library is bundled with the executable's installation and versioned with
-it. The prelude is a fixed set of imports, not a second function dispatch path. The
-initial library modules are `std:core`, `std:seq`, `std:text`, `std:fs`, `std:process`,
-and `std:json`. The prelude exports the names used in these documents; other helpers are
+The standard-library source is embedded in and versioned with the executable. The
+prelude is a fixed set of imports, not a second function dispatch path. The initial
+library modules are `std:core`, `std:seq`, `std:text`, `std:fs`, `std:process`, and
+`std:json`. The prelude exports the names used in these documents; other helpers are
 accessed through explicit module namespaces. It does not scan user directories for
 commands or replace missing language names with PATH lookup. Private native primitives
 are registered in a bootstrapping namespace, then wrapped or re-exported by library
@@ -365,13 +371,36 @@ Library signatures and materialization rules are in [execution](execution.md).
 Functions, constructors, module exports, and callbacks all use the same application
 machinery. There is no special command namespace for language functions.
 
+### Pure library surface
+
+`std:core`, `std:seq`, `std:text`, and `std:process` are bundled modules. The prelude
+also exposes their public operations directly. `std:fs` and `std:json` are planned for
+stage 3. The table below supplements the sequence/process contracts in
+[execution](execution.md#core-library-contracts).
+
+| Operations | Contract |
+| --- | --- |
+| `identity`, `compose(f, g, value)` | Ordinary unary functions; composition applies `g` before `f` |
+| `add`, `subtract`, `multiply`, `divide`, `equal`, `less` | Curried equivalents of the corresponding operators |
+| `int`, `float` | Numeric conversion; Float-to-Int truncates toward zero and checks range |
+| `text` | Explicit String conversion for String, Bool, Int, and Float |
+| `length` | List elements or anonymous Record fields; text requires explicit units |
+| `byte_length`, `scalars` | Encoded byte count; String to a List of one-scalar Strings |
+| `encode_utf8`, `decode_utf8` | String/Bytes conversion with strict UTF-8 validation |
+| `starts_with`, `ends_with` | String prefix/suffix predicates, configuration first |
+| `concat`, `reverse`, `drop` | Explicit List/Bytes concatenation; List reversal and shared suffix slicing |
+
+Sequence callbacks and currying are authored in Rill. C primitives handle checked
+numeric conversion, representation access, stable sorting, and OS effects. The private
+bootstrap namespace is unavailable to user code.
+
 ## Parsing contract
 
 The parser returns Complete, Incomplete, or Invalid with source ranges. The lexer has
 explicit expression and command modes; these modes are selected by syntax, never by
-whether a name happens to exist at runtime. Resolution establishes lexical references
-and constructor paths before evaluation; parsing does not need those values to classify
-source completeness.
+whether a name happens to exist at runtime. Closure construction resolves free bindings
+to fixed captures, including constructor paths used in patterns. Parsing does not need
+those values to classify source completeness.
 
 Function bodies and patterns retain source spans after lowering. A script or module is
 parsed completely before its statements execute; the REPL parses one submitted entry

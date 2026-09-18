@@ -27,8 +27,8 @@ RillPalette rill_style_palette(RillColorMode mode, bool tty, const char *term,
  * @brief Append trusted NUL-terminated text with the selected palette.
  *
  * Text must not alias out storage. Escape untrusted display bytes first.
- * Failure may leave a partial append;
- * discard the output instead of emitting an incomplete style sequence.
+ * Failure may leave a partial append; discard it rather than emit a broken
+ * style sequence.
  */
 [[nodiscard]] bool rill_style_append(RillBuffer *out, RillPalette palette,
                                      const char *text, bool error);

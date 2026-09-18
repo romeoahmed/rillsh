@@ -17,9 +17,6 @@ static void handler(int sig) {
   int saved = errno;
   unsigned char byte = 0;
   switch (sig) {
-  case SIGCHLD:
-    pending |= RILL_SIG_CHILD;
-    break;
   case SIGINT:
     pending |= RILL_SIG_INT;
     break;
@@ -98,11 +95,11 @@ bool rill_platform_init(RillPlatform *p, bool interactive) {
     p->tty = rill_platform_internal(open("/dev/tty", O_RDWR | O_CLOEXEC));
     if (p->tty < 0)
       return false;
-    pid_t foreground;
+    pid_t foreground = {};
     while ((foreground = tcgetpgrp(p->tty)) != p->group) {
       if (foreground < 0)
         goto fail;
-      struct sigaction action = {.sa_handler = SIG_DFL}, previous;
+      struct sigaction action = {.sa_handler = SIG_DFL}, previous = {};
       if (sigemptyset(&action.sa_mask) < 0 ||
           sigaction(SIGTTIN, &action, &previous) < 0)
         goto fail;
@@ -208,7 +205,7 @@ bool rill_platform_reclaim(RillPlatform *p, struct termios *modes) {
 bool rill_platform_suspend(RillPlatform *p) {
   if (!rill_platform_reclaim(p, nullptr))
     return false;
-  struct sigaction action = {.sa_handler = SIG_DFL}, old;
+  struct sigaction action = {.sa_handler = SIG_DFL}, old = {};
   if (sigemptyset(&action.sa_mask) < 0 || sigaction(SIGTSTP, &action, &old) < 0)
     return false;
   int result = raise(SIGTSTP);
@@ -217,7 +214,7 @@ bool rill_platform_suspend(RillPlatform *p) {
   return result == 0 && rill_platform_reclaim(p, nullptr);
 }
 int64_t rill_platform_now() {
-  struct timespec ts;
+  struct timespec ts = {};
   if (clock_gettime(CLOCK_MONOTONIC, &ts) < 0)
     return 0;
   return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;

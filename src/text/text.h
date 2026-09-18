@@ -56,7 +56,7 @@ void rill_text_clear(RillBuffer *buffer);
  */
 [[nodiscard]] bool rill_text_decode(const char *data, size_t size,
                                     size_t *offset, uint32_t *scalar);
-/** @brief Validate a borrowed span; empty input is valid. */
+/** @brief Validate UTF-8; nullptr is allowed only when size is zero. */
 [[nodiscard]] bool rill_text_valid(const char *data, size_t size);
 /**
  * @brief Append one Unicode scalar as UTF-8.

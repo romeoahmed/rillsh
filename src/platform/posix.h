@@ -11,11 +11,10 @@
 #include <termios.h>
 /** @brief Event bits exchanged while handlers are blocked. */
 enum {
-  RILL_SIG_CHILD = 1,
-  RILL_SIG_INT = 2,
-  RILL_SIG_TERM = 4,
-  RILL_SIG_HUP = 8,
-  RILL_SIG_STOP = 16
+  RILL_SIG_INT = 1,
+  RILL_SIG_TERM = 2,
+  RILL_SIG_HUP = 4,
+  RILL_SIG_STOP = 8
 };
 /** @brief One session's signal channel and optional controlling terminal. */
 typedef struct {
@@ -34,8 +33,12 @@ typedef struct {
  * descriptors and leaves both outputs at -1.
  */
 [[nodiscard]] bool rill_platform_pipe(int fds[2], bool nonblocking);
-/** @brief Move an owned FD above 2 and mark close-on-exec; closes it on
- * failure. */
+/**
+ * @brief Consume an FD and return a close-on-exec descriptor above 2.
+ *
+ * The original may be closed even on success. Failure returns -1 and retains
+ * no descriptor; a negative input returns -1 unchanged.
+ */
 int rill_platform_internal(int fd);
 /**
  * @brief Close an owned descriptor, set it to -1, and preserve errno.
@@ -45,16 +48,24 @@ void rill_platform_close(int *fd);
  * @brief Initialize the process-wide signal owner and optional controlling
  * terminal.
  *
- * Only one initialized owner may exist. Interactive setup waits for foreground
- * ownership. Failure releases acquired resources and restores dispositions.
+ * Only one initialized owner may exist; the destination must own no resources.
+ * Interactive setup waits for foreground ownership. Failure releases acquired
+ * resources and restores dispositions.
  */
 [[nodiscard]] bool rill_platform_init(RillPlatform *platform, bool interactive);
-/** @brief Restore terminal/dispositions and close internal descriptions. */
+/** @brief Restore terminal/dispositions and close descriptors after init. */
 void rill_platform_clear(RillPlatform *platform);
-/** @brief Drain notifications and atomically exchange pending event bits. */
+/**
+ * @brief Drain notifications and atomically exchange pending event bits.
+ *
+ * SIGCHLD only wakes the supervisor; child state comes from waitpid.
+ */
 unsigned rill_platform_signals(RillPlatform *platform);
-/** @brief Restore child signal defaults and unblock all signals;
- * async-signal-safe. */
+/**
+ * @brief Reset shell-managed signal dispositions and unblock all signals.
+ *
+ * Async-signal-safe; used in the child before exec.
+ */
 [[nodiscard]] bool rill_platform_child_signals();
 /** @brief Block supervisor signals, saving the caller's mask. */
 [[nodiscard]] bool rill_platform_block(sigset_t *previous);
@@ -85,7 +96,7 @@ typedef struct {
  */
 [[nodiscard]] bool rill_platform_env_init(RillEnvironment *env,
                                           char *const *entries);
-/** @brief Release the environment map. */
+/** @brief Free all entries and reset the map; an empty map is valid. */
 void rill_platform_env_clear(RillEnvironment *env);
 /** @brief Borrow a value until the next map mutation; nullptr means unset. */
 const char *rill_platform_env_get(const RillEnvironment *env, const char *name);

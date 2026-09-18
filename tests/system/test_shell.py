@@ -40,8 +40,31 @@ class ShellTests(ShellCase):
             )
         return self.execute(command, status=status, environment=environment)
 
+    def test_invocation(self) -> None:
+        for option, marker in (
+            ("--help", b"Usage: rillsh"),
+            ("--version", b"Rill Shell "),
+        ):
+            with self.subTest(option=option):
+                result = self.execute((self.shell, option))
+                self.assertIn(marker, result.stdout)
+                self.assertEqual(result.stderr, b"")
+        for arguments in (
+            ("-c",),
+            ("-c", "()", "extra"),
+            ("-i", "-c", "()"),
+            ("--color=invalid",),
+            ("--unknown",),
+        ):
+            with self.subTest(arguments=arguments):
+                result = self.execute((self.shell, *arguments), status=2)
+                self.assertEqual(result.stdout, b"")
+                self.assertIn(b"invalid options", result.stderr)
+        result = self.invoke("")
+        self.assertEqual((result.stdout, result.stderr), (b"", b""))
+
     def test_argument_bytes(self) -> None:
-        words = ("", "a b", "a\nb", "*", "~", "--flag", "界")
+        words = ("", "a b", "a\nb", "*", "~", "--flag", "\u754c")
         result = self.invoke("^./child args " + " ".join(map(quote, words)))
         self.assertEqual(result.stdout, encoded_arguments(words))
         result = self.invoke("^./child args $(bytes([255, 254]))")
@@ -131,6 +154,18 @@ class ShellTests(ShellCase):
         result = self.execute((self.shell, "--", "-script"))
         self.assertEqual(result.stdout, b"6:script\n")
 
+    def test_scripts_do_not_load_interactive_configuration(self) -> None:
+        directory = self.work / "config" / "rillsh"
+        directory.mkdir()
+        (directory / "init.rill").write_text(
+            "^./child mark forbidden\n", encoding="utf-8"
+        )
+        self.invoke("()")
+        self.execute((self.shell,), input=b"()")
+        (self.work / "script").write_text("()", encoding="utf-8")
+        self.execute((self.shell, "script"))
+        self.assertFalse((self.work / "forbidden").exists())
+
     def test_executable_shebang(self) -> None:
         script = self.work / "script"
         script.write_text(
@@ -195,33 +230,31 @@ class ShellTests(ShellCase):
         source = self.work / "source"
         source.unlink(missing_ok=True)
         os.mkfifo(source)
-        with subprocess.Popen(
+        process = subprocess.Popen(
             (self.shell, "source"), cwd=self.work, env=self.environment
-        ) as process:
-            try:
-                deadline = time.monotonic() + 5
-                while True:
-                    try:
-                        writer = os.open(source, os.O_WRONLY | os.O_NONBLOCK)
-                        break
-                    except OSError as error:
-                        if error.errno != errno.ENXIO:
-                            raise
-                        self.assertIsNone(
-                            process.poll(), "shell exited before opening source"
-                        )
-                        self.assertLess(
-                            time.monotonic(), deadline, "source-open deadline"
-                        )
-                        time.sleep(0.01)
-                # Connecting the FIFO proves initialization has installed signal handlers.
-                with os.fdopen(writer, "wb"):
-                    process.send_signal(event)
-                    self.assertEqual(process.wait(timeout=5), status)
-            finally:
-                if process.poll() is None:
-                    process.kill()
-                process.wait(timeout=3)
+        )
+        try:
+            deadline = time.monotonic() + 5
+            while True:
+                try:
+                    writer = os.open(source, os.O_WRONLY | os.O_NONBLOCK)
+                    break
+                except OSError as error:
+                    if error.errno != errno.ENXIO:
+                        raise
+                    self.assertIsNone(
+                        process.poll(), "shell exited before opening source"
+                    )
+                    self.assertLess(time.monotonic(), deadline, "source-open deadline")
+                    time.sleep(0.01)
+            # Connecting the FIFO proves initialization has installed signal handlers.
+            with os.fdopen(writer, "wb"):
+                process.send_signal(event)
+                self.assertEqual(process.wait(timeout=5), status)
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=3)
 
 
 if __name__ == "__main__":

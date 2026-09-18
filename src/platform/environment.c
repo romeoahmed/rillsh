@@ -34,7 +34,7 @@ bool rill_platform_env_set(RillEnvironment *e, const char *name,
     }
     return true;
   }
-  size_t value_size = strlen(value), length;
+  size_t value_size = strlen(value), length = {};
   if (ckd_add(&length, n, value_size) || ckd_add(&length, length, 2)) {
     errno = ENOMEM;
     return false;
@@ -48,7 +48,7 @@ bool rill_platform_env_set(RillEnvironment *e, const char *name,
   entry[n] = '=';
   memcpy(entry + n + 1, value, value_size + 1);
   if (i == e->count) {
-    size_t bytes;
+    size_t bytes = {};
     if (ckd_add(&bytes, e->count, 2) ||
         ckd_mul(&bytes, bytes, sizeof(char *))) {
       free(entry);

@@ -9,7 +9,7 @@
 #include <string.h>
 
 static bool reserve(RillBuffer *b, size_t n) {
-  size_t needed;
+  size_t needed = {};
   if (ckd_add(&needed, b->size, n) || ckd_add(&needed, needed, 1)) {
     errno = ENOMEM;
     return false;
@@ -125,7 +125,7 @@ bool rill_text_decode(const char *s, size_t n, size_t *at, uint32_t *cp) {
 }
 bool rill_text_valid(const char *s, size_t n) {
   size_t at = 0;
-  uint32_t c;
+  uint32_t c = {};
   while (at < n)
     if (!rill_text_decode(s, n, &at, &c))
       return false;
@@ -133,7 +133,7 @@ bool rill_text_valid(const char *s, size_t n) {
 }
 bool rill_text_encode(RillBuffer *b, uint32_t c) {
   unsigned char s[4];
-  size_t n;
+  size_t n = {};
   if (c <= 0x7f) {
     s[0] = (unsigned char)c;
     n = 1;
@@ -180,7 +180,7 @@ static unsigned property(uint32_t cp, const Range *table, size_t size) {
 #define PROP(c, table)                                                         \
   property((c), (table), sizeof(table) / sizeof((table)[0]))
 size_t rill_text_next(const char *s, size_t n, size_t at) {
-  uint32_t c;
+  uint32_t c = {};
   if (!rill_text_decode(s, n, &at, &c))
     return n;
   unsigned prev = PROP(c, gcb), ri = prev == G_RI ? 1U : 0U;
@@ -230,7 +230,7 @@ size_t rill_text_next(const char *s, size_t n, size_t at) {
 }
 unsigned rill_text_width(const char *s, size_t n) {
   size_t at = 0;
-  uint32_t c;
+  uint32_t c = {};
   unsigned width = 0;
   bool emoji = false, text = false;
   while (at < n && rill_text_decode(s, n, &at, &c)) {
@@ -248,3 +248,4 @@ unsigned rill_text_width(const char *s, size_t n) {
   }
   return emoji && !text ? 2 : (width ? width : 1);
 }
+#undef PROP

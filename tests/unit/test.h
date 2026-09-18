@@ -7,6 +7,6 @@
   do {                                                                         \
     if (!(condition)) {                                                        \
       (void)fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #condition);    \
-      exit(1);                                                                 \
+      exit(EXIT_FAILURE);                                                      \
     }                                                                          \
   } while (0)

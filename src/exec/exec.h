@@ -28,8 +28,12 @@ typedef struct {
 } RillExecRedirect;
 /** @brief Borrowed stage specification; launch copies all data it retains. */
 typedef struct {
-  const RillBytes *argv;             ///< Borrowed argument vector.
-  size_t argc;                       ///< Argument count, including argv[0].
+  const char *cwd; ///< Optional absolute directory override, borrowed.
+  const RillEnvironment *environment; ///< Optional complete stage environment.
+  const bool
+      *accepted_codes;   ///< Optional 256-code policy; nullptr means only zero.
+  const RillBytes *argv; ///< Borrowed argument vector.
+  size_t argc;           ///< Argument count, including argv[0].
   const RillExecRedirect *redirects; ///< Borrowed descriptor actions.
   size_t redirect_count;             ///< Number of descriptor actions.
 } RillExecStage;
@@ -55,11 +59,12 @@ typedef enum {
 } RillJobState;
 /** @brief Raw stage termination retained after aggregation. */
 typedef struct {
-  pid_t pid;          ///< Owned child identity until done.
-  bool done;          ///< Reaped termination, not merely pipe EOF.
-  bool stopped;       ///< Latest wait observation.
-  bool signaled;      ///< Status denotes a signal instead of exit code.
-  bool expected_pipe; ///< Connected downstream success permits SIGPIPE.
+  bool accepted_codes[256]; ///< Copied accepted exit policy.
+  pid_t pid;                ///< Owned child identity until done.
+  bool done;                ///< Reaped termination, not merely pipe EOF.
+  bool stopped;             ///< Latest wait observation.
+  bool signaled;            ///< Status denotes a signal instead of exit code.
+  bool expected_pipe;       ///< Connected downstream success permits SIGPIPE.
   int status; ///< Exit code, terminating signal, or current stop signal.
 } RillExecStatus;
 /**
@@ -79,9 +84,9 @@ typedef struct RillExec RillExec;
  *
  * Copies retained specification data before returning. Preparation may perform
  * blocking filesystem operations and truncate redirection files.
- * @return nullptr with error on preparation failure; otherwise a borrowed job.
  * A returned job may still fail launch: poll it, inspect its diagnostic, and
- * reap its children. It is not proof that exec succeeded.
+ * reap its children. Registration alone does not establish successful exec.
+ * @return A borrowed job, or nullptr with error on preparation failure.
  */
 [[nodiscard]] RillJob *rill_exec_launch(RillExec *exec,
                                         const RillExecSpec *spec,
@@ -122,8 +127,9 @@ RillDiagnostic rill_exec_error(const RillJob *job);
 /**
  * @brief Return aggregate shell status; zero means completed successfully.
  *
- * Incomplete or erroneous jobs return failure. Cancellation returns 130;
- * otherwise the rightmost failure wins, excluding expected downstream SIGPIPE.
+ * Diagnostics take precedence and return 1. Otherwise cancellation returns 130,
+ * incomplete jobs return 1, and the rightmost unacceptable stage wins,
+ * excluding expected downstream SIGPIPE.
  */
 int rill_exec_result(const RillJob *job);
 /** @brief Whether cancellation was requested, even if all children exited zero.
@@ -132,7 +138,8 @@ bool rill_exec_cancelled(const RillJob *job);
 /**
  * @brief Borrow stdout (1) or stderr (2) capture.
  *
- * The buffer lasts until job destruction; polling may move its byte storage.
+ * stream must be 1 or 2. The buffer lasts until job destruction; polling may
+ * move its byte storage. An uncaptured stream has an empty buffer.
  */
 const RillBuffer *rill_exec_output(const RillJob *job, int stream);
 /**

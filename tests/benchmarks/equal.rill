@@ -1,0 +1,2 @@
+fn loop(n) => if n == 0 then true else if [1, {x: [2, 3]}] == [1, {x: [2, 3]}] then loop(n - 1) else false
+if loop(500000) then () else raise(error("Benchmark", "equality result"))

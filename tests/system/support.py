@@ -4,7 +4,7 @@ import os
 import signal
 import subprocess
 import unittest
-from contextlib import suppress
+from contextlib import ExitStack, suppress
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -50,34 +50,32 @@ class ShellCase(unittest.TestCase):
             stderr=subprocess.PIPE,
             start_new_session=True,
         )
-        try:
-            stdout, stderr = process.communicate(input, timeout=15)
-        except subprocess.TimeoutExpired:
-            # Give the shell time to cancel/reap its jobs before forced termination.
-            process.terminate()
+        # Close pipes separately: Popen.__exit__ would wait without a deadline.
+        with ExitStack() as pipes:
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream is not None:
+                    pipes.enter_context(stream)
             try:
-                process.communicate(timeout=3)
+                stdout, stderr = process.communicate(input, timeout=15)
             except subprocess.TimeoutExpired:
-                with suppress(ProcessLookupError):
-                    os.killpg(process.pid, signal.SIGKILL)
-                # Descendants may still hold pipe writers; closing avoids an unbounded drain.
-                if process.stdout is not None:
-                    process.stdout.close()
-                if process.stderr is not None:
-                    process.stderr.close()
+                process.terminate()
+                try:
+                    process.communicate(timeout=3)
+                except subprocess.TimeoutExpired:
+                    # Only a still-owned leader authorizes signaling its group.
+                    if process.poll() is None:
+                        with suppress(ProcessLookupError):
+                            os.killpg(process.pid, signal.SIGKILL)
+                self.fail(f"command exceeded its deadline: {arguments!r}")
+            finally:
+                if process.poll() is None:
+                    process.kill()
                 process.wait(timeout=3)
-            self.fail("command exceeded the process-test deadline")
-        finally:
-            if process.poll() is None:
-                process.kill()
-                process.wait(timeout=3)
-            if process.stdin is not None:
-                process.stdin.close()
-            if process.stdout is not None:
-                process.stdout.close()
-            if process.stderr is not None:
-                process.stderr.close()
-        self.assertEqual(process.returncode, status, stderr.decode(errors="replace"))
+        self.assertEqual(
+            process.returncode,
+            status,
+            f"command: {arguments!r}\nstdout: {stdout[-4096:]!r}\nstderr: {stderr[-4096:]!r}",
+        )
         return subprocess.CompletedProcess(
             arguments, process.returncode, stdout, stderr
         )

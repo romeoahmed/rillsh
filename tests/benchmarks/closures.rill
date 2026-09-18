@@ -1,0 +1,8 @@
+fn make(x) => fn(y) => do {
+  let a = x + y
+  let b = a + x
+  let c = b + y
+  c - a
+}
+fn loop(n, total) => if n == 0 then total else loop(n - 1, total + make(n)(1))
+if loop(200000, 0) == 20000300000 then () else raise(error("Benchmark", "closure result"))

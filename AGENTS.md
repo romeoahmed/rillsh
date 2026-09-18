@@ -1,9 +1,9 @@
 # Working on Rill Shell
 
 Rill Shell (`rillsh`) is a GNU C23 shell for Linux and macOS. Read
-[docs/status.md](docs/status.md) before assuming a feature exists. The four-stage scope
-and dependency boundaries are in [docs/implementation-plan.md](docs/implementation-plan.md);
-[docs/development.md](docs/development.md) owns implementation and tool conventions.
+[status](docs/status.md) before assuming a feature exists. The [implementation
+plan](docs/implementation-plan.md) owns scope and dependency boundaries;
+[development](docs/development.md) owns code and tool conventions.
 
 ## Build and verify
 
@@ -11,28 +11,35 @@ and dependency boundaries are in [docs/implementation-plan.md](docs/implementati
 meson subprojects download
 meson setup build/dev --buildtype=debugoptimized --wrap-mode=nodownload
 meson compile -C build/dev
-meson test -C build/dev --print-errorlogs
 python3 tools/check.py build/dev
 ```
 
-The last command requires clang-format, clang-tidy, and Doxygen in PATH. For sanitizer
-work, use a separate Clang build with `-Db_sanitize=address,undefined`. Run affected
-Meson suites during development and the relevant full gate before reporting completion.
-For Python changes, run `uvx ruff check tools tests/system`,
-`uvx ruff format --check tools tests/system`, and `uvx ty check tools tests/system`.
-Report actual results and any checks not run.
+The gate requires clang-format, clang-tidy, and Doxygen in PATH and runs Meson tests.
+During development, select affected suites with `meson test -C build/dev --suite NAME
+--print-errorlogs`. Use a separate Clang build with `-Db_sanitize=address,undefined`
+for sanitizer checks. Run the relevant full gate before reporting completion. For Python
+changes, also run:
 
-## Change conventions
+```sh
+uvx ruff check tools tests/system
+uvx ruff format --check tools tests/system
+uvx ty check tools tests/system
+```
 
-- Prefer native C23, libc/POSIX, and Meson facilities. Support GCC and Clang; add no
-  older-C fallbacks or speculative platform branches.
-- Keep allocation sizes checked, borrowed lifetimes explicit, and live C references
-  rooted across GC safepoints. OS resources have explicit cleanup, never GC finalizers.
-- Put concise Doxygen contracts in boundary headers and reasoning beside implementation.
-  Keep comments and documentation in English; synchronize the owning specification.
+Report actual results and checks not run. Passing tests do not establish planned
+features.
+
+## Changes
+
+- Prefer native C23, libc/POSIX, and Meson facilities; support GCC and Clang without
+  older-C fallbacks or speculative compatibility branches.
+- Check allocation sizes, state borrowed lifetimes, and root live C references across
+  GC safepoints. Clean up OS resources explicitly; never use GC finalizers for them.
+- Write concise English Doxygen contracts in boundary headers and reasoning beside
+  implementation. Update the owning specification; link instead of duplicating policy.
 - Keep yyjson private. Do not edit downloaded dependencies or generated Unicode tables;
-  update pinned inputs and regenerate with `python3 tools/unicode.py` when required.
+  update pinned inputs and regenerate with `python3 tools/unicode.py`.
 - Keep personal paths, credentials, machine details, and host-specific container tooling
-  out of tracked files. Build output belongs in ignored build directories.
-- Preserve unrelated work. Do not add dependencies, abstractions, or compatibility
-  layers merely to simplify a local edit.
+  out of tracked files. Put build output and local evidence in ignored build directories.
+- Preserve unrelated work. Add dependencies, abstractions, or configuration only when
+  the project needs them, not to work around a local environment.

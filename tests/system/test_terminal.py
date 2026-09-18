@@ -86,6 +86,13 @@ class Terminal(AbstractContextManager["Terminal"]):
         if b"rill> " not in self.expect(marker):
             self.expect(b"rill> ")
 
+    def wait_for_shell_foreground(self) -> None:
+        deadline = time.monotonic() + 8
+        while os.tcgetpgrp(self.fd) != self.pid:
+            if time.monotonic() >= deadline:
+                raise AssertionError("shell did not reclaim the terminal")
+            time.sleep(0.01)
+
     def reap(self, deadline: float) -> int:
         while True:
             pid, status = os.waitpid(self.pid, os.WNOHANG)
@@ -134,6 +141,90 @@ class TerminalTests(ShellCase):
         super().setUp()
         self.environment.pop("NO_COLOR")
         self.environment |= {"TERM": "xterm-256color", "COLORTERM": "truecolor"}
+
+    def test_functional_entries_and_failed_publication(self) -> None:
+        terminal = self.open_terminal()
+        terminal.send("let x=4; fn saved(y)=>x+y")
+        terminal.expect(b"rill> ")
+        terminal.send("let x=90; saved(2)")
+        self.assertIn(b"6\r\n", terminal.expect(b"rill> "))
+        terminal.send('let x=8; set_env("RILL_EFFECT","kept"); missing')
+        self.assertIn(b"TypeError", terminal.expect(b"rill> "))
+        terminal.send(
+            'exit(if x==90 and get_env("RILL_EFFECT")==some(bytes([107,101,112,116])) then 0 else 1)'
+        )
+        terminal.wait_for_exit()
+
+    def test_startup_configuration_and_opt_out(self) -> None:
+        directory = self.work / "config" / "rillsh"
+        directory.mkdir()
+        (directory / "init.rill").write_text("let configured=42\n", encoding="utf-8")
+        terminal = self.enterContext(
+            Terminal(self.shell, self.work, self.environment, arguments=())
+        )
+        terminal.expect(b"rill> ")
+        terminal.send("exit(configured-42)")
+        terminal.wait_for_exit()
+        terminal = self.open_terminal()
+        terminal.send("configured")
+        self.assertIn(b"TypeError", terminal.expect(b"rill> "))
+        terminal.finish()
+
+    def test_failed_module_can_be_retried(self) -> None:
+        module = self.work / "retry.rill"
+        module.write_text("export let value=missing\n", encoding="utf-8")
+        terminal = self.open_terminal()
+        terminal.send('import "./retry.rill" as retry')
+        self.assertIn(b"TypeError", terminal.expect(b"rill> "))
+        module.write_text("export let value=7\n", encoding="utf-8")
+        terminal.send('import "./retry.rill" as retry; exit(retry.value-7)')
+        terminal.wait_for_exit()
+
+    def test_configuration_path_policy(self) -> None:
+        default = self.work / ".config" / "rillsh"
+        explicit = self.work / "config" / "rillsh"
+        for directory, value in ((default, 7), (explicit, 42)):
+            directory.mkdir(parents=True)
+            (directory / "init.rill").write_text(
+                f"let configured={value}\n", encoding="utf-8"
+            )
+        for xdg, value in (
+            (None, 7),
+            ("", 7),
+            ("config", 7),
+            (str(explicit.parent), 42),
+        ):
+            with self.subTest(xdg=xdg):
+                environment = self.environment.copy()
+                if xdg is None:
+                    environment.pop("XDG_CONFIG_HOME")
+                else:
+                    environment["XDG_CONFIG_HOME"] = xdg
+                with Terminal(
+                    self.shell, self.work, environment, arguments=()
+                ) as terminal:
+                    terminal.expect(b"rill> ")
+                    terminal.send(f"exit(configured-{value})")
+                    terminal.wait_for_exit()
+        environment = self.environment | {"HOME": "", "XDG_CONFIG_HOME": "config"}
+        with Terminal(self.shell, self.work, environment, arguments=()) as terminal:
+            self.assertIn(b"configuration disabled", terminal.expect(b"rill> "))
+            terminal.send("configured")
+            self.assertIn(b"TypeError", terminal.expect(b"rill> "))
+            terminal.finish()
+
+    def test_attempt_cannot_catch_interrupt(self) -> None:
+        terminal = self.open_terminal()
+        terminal.send(
+            "fn loop(n)=>loop(n+1); attempt(fn()=>do { ^./child args ready; loop(0) })"
+        )
+        terminal.expect(b"\r\n5:ready\r\n")
+        terminal.wait_for_shell_foreground()
+        terminal.write(b"\x03")
+        terminal.expect(b"rill> ")
+        terminal.send("loop")
+        self.assertIn(b"TypeError", terminal.expect(b"rill> "))
+        terminal.finish()
 
     def open_terminal(self) -> Terminal:
         self.terminal = self.enterContext(
@@ -219,13 +310,15 @@ class TerminalTests(ShellCase):
         terminal = self.open_terminal()
         terminal.send("let j = start(job { ^./child ignore-term })")
         terminal.prompt_after(b"ready\r\n")
-        terminal.send("wait(j)")
-        terminal.expect(b"wait(j)\r\n")
-        # A blocked wait must not return a prompt before interruption.
+        terminal.send("^./child args waiting; wait(j)")
+        terminal.expect(b"\r\n7:waiting\r\n")
+        terminal.wait_for_shell_foreground()
+        # Inspect already buffered bytes as well as the descriptor.
+        self.assertNotIn(b"rill> ", terminal.pending)
         self.assertFalse(select.select([terminal.fd], [], [], 0.1)[0])
         terminal.write(b"\x03")
         terminal.expect(b"rill> ")
-        terminal.send("jobs()[0].state")
+        terminal.send("length(filter(fn(item)=>item.state=='Running',jobs()))")
         terminal.expect(b"\r\n1\r\n")
         terminal.expect(b"rill> ")
         terminal.send("cancel(j)")

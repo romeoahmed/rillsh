@@ -46,7 +46,7 @@ static RillJob *launch(const char *mode) {
                        .environment = &environment,
                        .capture = true,
                        .capture_limit = 8'388'608};
-  RillDiagnostic error;
+  RillDiagnostic error = {};
   RillJob *job = rill_exec_launch(supervisor, &spec, &error);
   CHECK(job);
   return job;
@@ -70,7 +70,7 @@ static void streaming() {
   int aliases[] = {fcntl(0, F_DUPFD_CLOEXEC, 3), fcntl(1, F_DUPFD_CLOEXEC, 3)};
   CHECK(aliases[0] >= 0 && aliases[1] >= 0);
   int flags[] = {fcntl(aliases[0], F_GETFL), fcntl(aliases[1], F_GETFL)};
-  RillDiagnostic error;
+  RillDiagnostic error = {};
   RillJob *job = rill_exec_launch(supervisor, &spec, &error);
   CHECK(job);
   memset(input, 0xff, size);
@@ -98,6 +98,15 @@ static void streaming() {
     CHECK(fcntl(aliases[i], F_GETFD) == FD_CLOEXEC);
     CHECK(close(aliases[i]) == 0);
   }
+  // Empty feed must still close its pipe; the child waits for EOF.
+  args[1] = (RillBytes){"echo", 4};
+  spec.input = (RillBytes){};
+  job = rill_exec_launch(supervisor, &spec, &error);
+  CHECK(job);
+  finish(job);
+  CHECK(rill_exec_result(job) == 0);
+  CHECK(rill_exec_output(job, 1)->size == 0 &&
+        rill_exec_output(job, 2)->size == 0);
 }
 
 static void child_state() {
@@ -123,7 +132,7 @@ static void child_state() {
   RillExecStage stage = {.argv = args, .argc = 2};
   RillExecSpec spec = {
       .stages = &stage, .count = 1, .environment = &environment};
-  RillDiagnostic error;
+  RillDiagnostic error = {};
   job = rill_exec_launch(supervisor, &spec, &error);
   CHECK(dup2(saved, 0) == 0 && close(saved) == 0);
   rill_platform_close(&input[0]);
@@ -133,7 +142,7 @@ static void child_state() {
     CHECK(rill_platform_now() < deadline);
     (void)rill_exec_poll(supervisor, 10, -1);
   }
-  size_t count;
+  size_t count = {};
   const RillExecStatus *status = rill_exec_status(job, &count);
   CHECK(count == 1 && kill(status[0].pid, SIGCONT) == 0);
   while (rill_exec_state(job) != RILL_JOB_RUNNING) {
@@ -158,7 +167,7 @@ static void cancellation(const char *mode) {
   rill_exec_cancel(job);
   finish(job);
   CHECK(rill_exec_cancelled(job) && rill_exec_result(job) == 130);
-  size_t count;
+  size_t count = {};
   const RillExecStatus *status = rill_exec_status(job, &count);
   CHECK(count == 1 && status[0].done);
   bool escalate = !strcmp(mode, "ignore-term");
@@ -178,7 +187,21 @@ static void limits() {
                        .environment = &environment,
                        .capture = true,
                        .capture_limit = 128};
-  RillDiagnostic error;
+  RillDiagnostic error = {};
+  spec.count = 0;
+  CHECK(!rill_exec_launch(supervisor, &spec, &error));
+  CHECK(error.kind == RILL_LIMIT);
+  spec.count = RILL_EXEC_MAX_STAGES + 1;
+  CHECK(!rill_exec_launch(supervisor, &spec, &error));
+  CHECK(error.kind == RILL_LIMIT);
+  spec.count = 1;
+  stage.argc = 0;
+  CHECK(!rill_exec_launch(supervisor, &spec, &error));
+  CHECK(error.kind == RILL_LAUNCH && error.code == EINVAL);
+  stage.argc = RILL_EXEC_MAX_ARGUMENTS + 1;
+  CHECK(!rill_exec_launch(supervisor, &spec, &error));
+  CHECK(error.kind == RILL_LAUNCH && error.code == EINVAL);
+  stage.argc = 2;
   RillJob *job = rill_exec_launch(supervisor, &spec, &error);
   CHECK(job);
   finish(job);
@@ -202,7 +225,7 @@ static void limits() {
 static void exhaustion() {
   int baseline = descriptor_count(0);
   CHECK(baseline >= 0);
-  struct rlimit original;
+  struct rlimit original = {};
   CHECK(getrlimit(RLIMIT_NOFILE, &original) == 0);
   struct rlimit low = original;
   low.rlim_cur = (rlim_t)baseline + 10;
@@ -213,7 +236,7 @@ static void exhaustion() {
     stages[i] = (RillExecStage){.argv = args, .argc = 2};
   RillExecSpec spec = {
       .stages = stages, .count = 8, .environment = &environment};
-  RillDiagnostic error;
+  RillDiagnostic error = {};
   for (size_t i = 0; i < 2; ++i) {
     CHECK(!rill_exec_launch(supervisor, &spec, &error));
     CHECK(error.code == EMFILE);
@@ -229,11 +252,11 @@ static void statuses() {
                             {.argv = right, .argc = 3}};
   RillExecSpec spec = {
       .stages = stages, .count = 2, .environment = &environment};
-  RillDiagnostic error;
+  RillDiagnostic error = {};
   RillJob *job = rill_exec_launch(supervisor, &spec, &error);
   CHECK(job);
   finish(job);
-  size_t count;
+  size_t count = {};
   const RillExecStatus *status = rill_exec_status(job, &count);
   CHECK(count == 2 && status[0].done && status[1].done);
   CHECK(!status[0].signaled && !status[1].signaled);
@@ -258,8 +281,8 @@ int main(int argc, char **argv) {
     cancellation(argv[2]);
   else if (!strcmp(argv[2], "cleanup")) {
     CHECK(launch("ignore-term"));
-    exit(42); // Meson expects 42 here; assertion and cleanup failures use other
-              // statuses.
+    // Meson distinguishes this deliberate exit from assertion/cleanup failure.
+    exit(42);
   } else if (!strcmp(argv[2], "limits"))
     limits();
   else if (!strcmp(argv[2], "exhaustion"))

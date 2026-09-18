@@ -56,7 +56,7 @@ int main(int argc, char **argv) {
   if (!strcmp(mode, "exit")) {
     if (argc != 3)
       return 2;
-    char *end;
+    char *end = {};
     errno = 0;
     long n = strtol(argv[2], &end, 10);
     return errno || end == argv[2] || *end || n < 0 || n > 255 ? 2 : (int)n;
@@ -69,6 +69,12 @@ int main(int argc, char **argv) {
           !put(1, argv[i], strlen(argv[i])) || !put(1, "\n", 1))
         return 3;
     }
+    return 0;
+  }
+  if (!strcmp(mode, "write")) {
+    for (int i = 2; i < argc; ++i)
+      if (!put(1, argv[i], strlen(argv[i])))
+        return 3;
     return 0;
   }
   if (!strcmp(mode, "echo")) {
@@ -114,7 +120,7 @@ int main(int argc, char **argv) {
     return size == 2097152 ? 0 : 4;
   }
   if (!strcmp(mode, "signals")) {
-    struct sigaction a;
+    struct sigaction a = {};
     sigset_t mask;
     if (sigprocmask(SIG_SETMASK, nullptr, &mask) < 0)
       return 3;
@@ -151,11 +157,11 @@ int main(int argc, char **argv) {
   if (!strcmp(mode, "stop-echo")) {
     if (raise(SIGSTOP))
       return 3;
-    char byte;
+    char byte = {};
     return read(0, &byte, 1) == 1 && put(1, &byte, 1) ? 0 : 3;
   }
   if (!strcmp(mode, "stop")) {
-    struct termios t;
+    struct termios t = {};
     if (tcgetattr(0, &t) < 0)
       return 3;
     t.c_lflag &= ~(tcflag_t)ECHO;
@@ -187,7 +193,7 @@ int main(int argc, char **argv) {
     return 3;
   }
   if (!strcmp(mode, "take")) {
-    char byte;
+    char byte = {};
     return read(0, &byte, 1) == 1 ? 0 : 3;
   }
   if (!strcmp(mode, "term-zero") || !strcmp(mode, "ignore-term")) {

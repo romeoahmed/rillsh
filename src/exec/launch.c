@@ -22,6 +22,8 @@ static_assert(sizeof(LaunchError) <= _POSIX_PIPE_BUF);
 typedef struct {
   char **argv, **paths;
   size_t argc, path_count;
+  RillEnvironment env;
+  int cwd;
   int streams[3];
   int pipe_input, pipe_output;
 } Prepared;
@@ -30,8 +32,6 @@ typedef struct {
   size_t count, capacity;
   Prepared *stages;
   size_t count_stages;
-  RillEnvironment env;
-  int cwd;
 } Launch;
 static char *copy_bytes(RillBytes b) {
   if (b.size == SIZE_MAX ||
@@ -51,7 +51,7 @@ static int own(Launch *l, int fd) {
   if (fd < 0)
     return -1;
   if (l->count == l->capacity) {
-    size_t cap = 32, bytes;
+    size_t cap = 32, bytes = {};
     if ((l->capacity && ckd_mul(&cap, l->capacity, 2)) ||
         ckd_mul(&bytes, cap, sizeof(*l->fds))) {
       (void)close(fd);
@@ -92,9 +92,9 @@ static void release(Launch *l) {
     for (size_t a = 0; a < s->path_count; ++a)
       free(s->paths[a]);
     free(s->paths);
+    rill_platform_env_clear(&s->env);
   }
   free(l->stages);
-  rill_platform_env_clear(&l->env);
 }
 static int detach(Launch *l, int fd) {
   for (size_t i = 0; i < l->count; ++i)
@@ -139,9 +139,7 @@ static bool paths(Prepared *s, const char *path) {
   return true;
 }
 [[noreturn]] static void child_error(int fd, size_t stage, int code) {
-  LaunchError e = {};
-  e.stage = stage;
-  e.code = code;
+  LaunchError e = {.stage = stage, .code = code};
   const char *p = (const char *)&e;
   size_t n = sizeof(e);
   while (n) {
@@ -160,7 +158,7 @@ static bool paths(Prepared *s, const char *path) {
 [[noreturn]] static void child(Launch *l, size_t index, int gate,
                                int error_fd) {
   Prepared *s = &l->stages[index];
-  if (fchdir(l->cwd) < 0)
+  if (fchdir(s->cwd) < 0)
     child_error(error_fd, index, errno);
   for (int i = 0; i < 3; ++i) {
     if (s->streams[i] < 0) {
@@ -173,8 +171,8 @@ static bool paths(Prepared *s, const char *path) {
   for (size_t i = 0; i < l->count; ++i)
     if (l->fds[i] != gate && l->fds[i] != error_fd)
       (void)close(l->fds[i]);
-  char byte;
-  ssize_t got;
+  char byte = {};
+  ssize_t got = {};
   do {
     got = read(gate, &byte, 1);
   } while (got < 0 && errno == EINTR);
@@ -187,7 +185,7 @@ static bool paths(Prepared *s, const char *path) {
     child_error(error_fd, index, errno);
   int denied = 0;
   for (size_t i = 0; i < s->path_count; ++i) {
-    execve(s->paths[i], s->argv, l->env.entries);
+    execve(s->paths[i], s->argv, s->env.entries);
     if (errno == EACCES)
       denied = EACCES;
     else if (errno != ENOENT && errno != ENOTDIR)
@@ -198,39 +196,35 @@ static bool paths(Prepared *s, const char *path) {
 RillJob *rill_exec_launch(RillExec *e, const RillExecSpec *spec,
                           RillDiagnostic *error) {
   *error = (RillDiagnostic){};
+  const size_t stage_count = spec->count;
   size_t stage = 0;
-  if (!spec->count || spec->count > RILL_EXEC_MAX_STAGES ||
+  if (!stage_count || stage_count > RILL_EXEC_MAX_STAGES ||
       e->count >= RILL_EXEC_MAX_JOBS || e->next_id == INT64_MAX) {
     *error = (RillDiagnostic){.kind = RILL_LIMIT,
                               .message = "job or pipeline limit exceeded"};
     return nullptr;
   }
-  RillJob *j = calloc(1, sizeof(*j));
+  RillJob *j = malloc(sizeof(*j));
   Launch l = {};
   if (!j)
     goto fail;
-  j->errors = j->input = j->output[0] = j->output[1] = -1;
-  j->platform = e->platform;
-  j->count = spec->count;
-  j->background = spec->background;
-  j->limit = spec->capture_limit;
-  j->stages = calloc(j->count, sizeof(*j->stages));
-  j->connected = calloc(j->count, sizeof(bool));
-  l.count_stages = spec->count;
-  l.stages = calloc(l.count_stages, sizeof(*l.stages));
+  *j = (RillJob){.errors = -1,
+                 .input = -1,
+                 .output = {-1, -1},
+                 .count = stage_count,
+                 .background = spec->background,
+                 .limit = spec->capture_limit};
+  j->stages = calloc(stage_count, sizeof(*j->stages));
+  j->connected = calloc(stage_count, sizeof(bool));
+  l.count_stages = stage_count;
+  l.stages = calloc(stage_count, sizeof(*l.stages));
   if (!j->stages || !j->connected || !l.stages)
     goto fail;
   struct pollfd *polls =
-      realloc(e->polls, (2 + (e->count + 1) * 4) * sizeof(*polls));
+      realloc(e->polls, (1 + (e->count + 1) * 4) * sizeof(*polls));
   if (!polls)
     goto fail;
   e->polls = polls;
-  if (!rill_platform_env_init(&l.env, spec->environment->entries))
-    goto fail;
-  l.cwd = own(&l, rill_platform_internal(
-                      open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC)));
-  if (l.cwd < 0)
-    goto fail;
   int defaults[3];
   for (int i = 0; i < 3; ++i) {
     defaults[i] = fcntl(i, F_DUPFD_CLOEXEC, 3);
@@ -245,13 +239,27 @@ RillJob *rill_exec_launch(RillExec *e, const RillExecSpec *spec,
     if (defaults[0] < 0)
       goto fail;
   }
-  for (stage = 0; stage < j->count; ++stage) {
+  for (stage = 0; stage < stage_count; ++stage) {
     const RillExecStage *in = &spec->stages[stage];
     Prepared *out = &l.stages[stage];
     if (!in->argc || in->argc > RILL_EXEC_MAX_ARGUMENTS) {
       errno = EINVAL;
       goto fail;
     }
+    if (!rill_platform_env_init(
+            &out->env,
+            (in->environment ? in->environment : spec->environment)->entries))
+      goto fail;
+    out->cwd = own(
+        &l, rill_platform_internal(open(in->cwd ? in->cwd : ".",
+                                        O_RDONLY | O_DIRECTORY | O_CLOEXEC)));
+    if (out->cwd < 0)
+      goto fail;
+    if (in->accepted_codes)
+      memcpy(j->stages[stage].accepted_codes, in->accepted_codes,
+             sizeof(j->stages[stage].accepted_codes));
+    else
+      j->stages[stage].accepted_codes[0] = true;
     out->argc = in->argc;
     out->argv = calloc(in->argc + 1, sizeof(char *));
     if (!out->argv)
@@ -264,12 +272,12 @@ RillJob *rill_exec_launch(RillExec *e, const RillExecSpec *spec,
         goto fail;
       }
     }
-    if (!paths(out, rill_platform_env_get(&l.env, "PATH")))
+    if (!paths(out, rill_platform_env_get(&out->env, "PATH")))
       goto fail;
     memcpy(out->streams, defaults, sizeof(defaults));
     out->pipe_input = out->pipe_output = -1;
   }
-  for (stage = 0; stage + 1 < j->count; ++stage) {
+  for (stage = 0; stage + 1 < stage_count; ++stage) {
     int fds[2];
     if (!pipe_owned(&l, fds))
       goto fail;
@@ -289,7 +297,7 @@ RillJob *rill_exec_launch(RillExec *e, const RillExecSpec *spec,
       if (i == 0)
         l.stages[j->count - 1].streams[1] = fds[1];
       else
-        for (stage = 0; stage < j->count; ++stage)
+        for (stage = 0; stage < stage_count; ++stage)
           l.stages[stage].streams[2] = fds[1];
     }
   if (spec->feed) {
@@ -302,7 +310,7 @@ RillJob *rill_exec_launch(RillExec *e, const RillExecSpec *spec,
       goto fail;
     l.stages[0].streams[0] = fds[0];
   }
-  for (stage = 0; stage < j->count; ++stage) {
+  for (stage = 0; stage < stage_count; ++stage) {
     const RillExecStage *in = &spec->stages[stage];
     Prepared *out = &l.stages[stage];
     for (size_t a = 0; a < in->redirect_count; ++a) {
@@ -323,8 +331,8 @@ RillJob *rill_exec_launch(RillExec *e, const RillExecSpec *spec,
       int flags = r->target == 0
                       ? O_RDONLY
                       : O_WRONLY | O_CREAT | (r->append ? O_APPEND : O_TRUNC);
-      int fd =
-          rill_platform_internal(openat(l.cwd, path, flags | O_CLOEXEC, 0666));
+      int fd = rill_platform_internal(
+          openat(out->cwd, path, flags | O_CLOEXEC, 0666));
       int saved = errno;
       free(path);
       errno = saved;
@@ -333,7 +341,7 @@ RillJob *rill_exec_launch(RillExec *e, const RillExecSpec *spec,
         goto fail;
     }
   }
-  for (size_t i = 0; i + 1 < j->count; ++i) {
+  for (size_t i = 0; i + 1 < stage_count; ++i) {
     Prepared *left = &l.stages[i], *right = &l.stages[i + 1];
     j->connected[i] = (left->streams[1] == left->pipe_output ||
                        left->streams[2] == left->pipe_output) &&
@@ -350,7 +358,7 @@ RillJob *rill_exec_launch(RillExec *e, const RillExecSpec *spec,
     goto fail;
   j->state = RILL_JOB_LAUNCHING;
   j->id = ++e->next_id;
-  for (stage = 0; stage < j->count; ++stage) {
+  for (stage = 0; stage < stage_count; ++stage) {
     pid_t pid = fork();
     if (pid == 0)
       child(&l, stage, gate[0], errors[1]);
@@ -374,7 +382,7 @@ RillJob *rill_exec_launch(RillExec *e, const RillExecSpec *spec,
       break;
     }
   }
-  for (size_t i = stage; i < j->count; ++i)
+  for (size_t i = stage; i < stage_count; ++i)
     j->stages[i].done = true;
   j->next = e->jobs;
   e->jobs = j;
@@ -398,7 +406,7 @@ RillJob *rill_exec_launch(RillExec *e, const RillExecSpec *spec,
     // The gate prevents exec while the parent alone registers process groups.
     // The stage limit keeps all permits in one atomic pipe write.
     char permits[RILL_EXEC_MAX_STAGES] = {};
-    ssize_t wrote;
+    ssize_t wrote = {};
     do {
       wrote = write(gate[1], permits, j->count);
     } while (wrote < 0 && errno == EINTR);

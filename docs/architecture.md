@@ -2,9 +2,9 @@
 
 This document defines the implementation strategy and ownership model for the first
 release. Behavior is specified in [language](language.md), [execution](execution.md),
-[interaction](interaction.md), and [platform](platform.md). The
-[implementation plan](implementation-plan.md) maps components to delivery stages;
-[current status](status.md) records what is implemented. Representations may evolve while
+[interaction](interaction.md), and [platform](platform.md). The [implementation
+plan](implementation-plan.md) maps components to delivery stages; [current
+status](status.md) records what is implemented. Representations may evolve while
 preserving these contracts.
 
 ## Design principles
@@ -18,16 +18,16 @@ Parsing and presentation never execute user code. Evaluation preserves effect or
 proper tail calls and streaming bound live state where the semantics permit. OS cleanup
 is explicit and independent of garbage collection.
 
-The first release excludes POSIX-shell syntax compatibility, implicit expansion,
-mutable bindings, classes, macros, static typing, native plugins, a package manager,
-JIT compilation, Windows support, and configurable editor modes.
+The first release excludes POSIX-shell syntax compatibility, implicit expansion, mutable
+bindings, classes, macros, static typing, native plugins, a package manager, JIT
+compilation, Windows support, and configurable editor modes.
 
 ## Cohesive components
 
-The session coordinates `syntax`, `runtime`, `exec`, `platform`, `editor`, `text`, and
-`library`. These internal components define responsibility and ownership. Introduce
-interfaces where ownership, reuse, or independent testing requires them; no public C ABI
-is provided.
+The session coordinates `syntax`, `runtime`, `exec`, `platform`, `text`, and `library`;
+stage 4 adds `editor`. These internal components define responsibility and ownership.
+Introduce interfaces where ownership, reuse, or independent testing requires them; no
+public C ABI is provided.
 
 The editor consumes parser services and materialized metadata without invoking the
 evaluator; the parser has no editor dependency. The process supervisor receives
@@ -42,15 +42,25 @@ supervised helper processes; no user evaluator runs in them.
 
 ## Syntax and evaluation
 
-Retain owned UTF-8 source, stable SourceIds, and byte-based spans. Derive line and
+Retain owned UTF-8 source, logical source identities, and byte offsets. Derive line and
 display coordinates only for presentation. NUL in source is invalid; NUL produced by a
 valid string escape is data until an OS boundary rejects it.
 
 A compact recursive-descent/Pratt parser suits the fixed grammar and explicit command
 mode. Patterns have their own nodes. Share token kinds, spelling, precedence, and syntax
 metadata between parsing, highlighting, and help; do not maintain parallel lexers for
-presentation. Parsing has a 256-construct nesting limit and never executes code.
-Resolution establishes lexical slots and constructor paths before lowering.
+presentation. Parsing has a 256-construct nesting limit and never executes code. Nodes
+occupy stable, typed blocks growing from 8 to at most 128 nodes per block; individual
+decoded-text buffers retain their own ownership. Clearing a parse frees buffers and
+blocks iteratively, including incomplete and failed parses. Block slack is included in
+code's retained-byte accounting. Code preparation computes each function's free-name
+layout once and records duplicate pattern names for later diagnosis. Matching does not
+rebuild a name-validation list on every call; subject/argument effects still precede
+pattern errors. Preparation assigns String literals and Record keys dense slots in the
+code object's traced Value array. These annotations reuse node padding and kind-specific
+payload storage; the syntax component depends on no runtime type. Closure creation
+resolves those names to fixed captured bindings. Local environments and constructor
+paths remain lexical; no evaluation consults a later REPL scope.
 
 Lower multi-parameter functions to unary functions, pipelines to ordered bindings and
 applications, and ADT construction to shared primitives. User functions, native
@@ -61,6 +71,10 @@ cancellation. A native higher-order function cannot hide a recursive C evaluator
 Evaluation is a loop over explicit continuation frames for calls, bindings,
 conditionals, matching, sequencing, native resumption, and error/resource boundaries.
 Tail calls replace the active expression/environment and reuse the caller continuation.
+Atomic operand literals and name references write directly into the parent's rooted
+operand array. They cannot suspend or execute user code, so they need no separate frame;
+String literals read a prepared constant slot without allocating; unknown names retain
+the operand's source offset. Other expressions keep the ordinary continuation protocol.
 Abandoned arguments, pattern bindings, and environments lose roots promptly. Keep
 backtraces proportional to live continuations; a tail-call summary is bounded. The
 non-tail continuation limit is 65,536 frames, reported as LimitExceeded.
@@ -74,55 +88,128 @@ access, resource ownership, and operations that need efficient representation ac
 
 Represent values with a C tagged union: immediate Int/Float/Bool/Null/Unit and pointers
 to typed heap objects. Do not introduce NaN boxing or pointer-tag assumptions. Objects
-carry allocation size, mark state, and trace metadata. Trace with an explicit worklist.
+carry allocation size, allocation kind, mark state, and trace metadata. A tagged union
+shares mutually exclusive byte/name views, code/budget/slice state, closure layouts,
+Record indexes, and stage policies. Only stages have a traced metadata Value; other
+union members must never be interpreted as edges. The header occupies 64 bytes on the
+validated AArch64 ABIs; this is a measured layout, not a portable ABI promise. Non-text
+objects do not reserve a byte terminator. Collector links, kind/mark state, sizes, and
+edge counts precede the kind-specific payload. Values and immutable byte payloads follow
+the header. Compile-time assertions check flexible-array placement and interior
+pointer-index alignment; each index uses the size of its actual pointer type.
+
+Known-size aggregates are built directly in private heap payloads initialized to Unit.
+Root the owner before allocating children, then finish Record indexes before publishing
+the value. This avoids temporary C arrays and a second copy. Borrowed inputs still need
+roots across the initial allocation, and any failure must discard the partial result.
 
 Lists use immutable backing arrays with offset/length views, so recursive suffix
 patterns do not copy every tail. A small retained slice can keep a large backing array;
-account for that storage and compact only at a measured materialization boundary.
-Anonymous records use a shape with unique names, a key index, and values in presentation
-order. Shape/intern caches must be collectible or bounded.
+account for that storage and compact only at a measured materialization boundary. A
+whole-range slice reuses its input; an empty slice has no backing-array edge. Discarded
+rest patterns construct neither a slice nor a remainder record. Anonymous records store
+unique, length-aware String keys and values in presentation order. Records with at least
+16 fields reserve one interior key pointer per field in the same allocation.
+Finalization sorts this index with libc `qsort`; lookup uses binary search, including
+embedded-NUL keys. Small records use linear lookup and no index storage. The index adds
+no GC edges or separate lifetime, and the object header does not grow. Builders finalize
+after filling or shrinking their arrays; immutable updates preserve keys and change only
+values in a new record. Dynamic construction validates adjacent sorted keys rather than
+comparing every pair. Libc may use temporary sorting storage; no allocation-free sorting
+guarantee is made.
 
-Nominal products and sum variants share a descriptor, constructor index, and field
-array. Fieldless variants are descriptor-owned singletons. Constructor functions carry
+Nominal products and sum variants use unique constructor descriptors and immutable
+payload records. Fieldless variants are singleton values. Constructor functions carry
 descriptor metadata and implement ordinary unary application. No C type or bespoke
 evaluator branch is generated for each user ADT.
 
-Closures retain code and exactly the resolved captures specified by the language.
-Recursive function groups allocate slots before installing closures. Native partial
-applications retain their native identifier and bound arguments. Code objects own
-source/constants for as long as reachable closures need them; entry-scoped scratch
-storage cannot own code used by later entries.
+Closures contain one code edge followed by a contiguous array of exactly the resolved
+captures specified by the language. They also borrow a capture layout from that code;
+there is no separately allocated environment node or copied name per capture. Layouts
+with at least eight captures sort names once for binary lookup; smaller layouts use
+linear lookup. The closure itself terminates a local environment chain. Recursive
+function groups allocate traced binding cells before installing closures.
+Standard-library wrappers express native currying through ordinary closures. Code
+objects consume and reset parse results, including on failure, instead of reparsing
+source. They own source, syntax blocks, fixed capture-analysis tables, and a String
+constant pool until the code becomes unreachable. The pool is completed under an
+explicit root before execution; it also serves literal patterns. Lowered String nodes
+release their redundant decoded buffers with matching accounting updates. Record keys
+retain decoded text for pattern field lookup. Constants do not point back to code, so an
+escaped String retains only its own allocation. The pool neither interns across code
+owners nor caches closures, nominal descriptors, or mutable builders. Analysis stores
+names, never captured values; instances still resolve their own bindings, including
+recursive cells and nominal constructor paths. Analysis diagnostics are deferred to
+closure creation, so dead branches do not acquire new runtime errors. All analysis
+storage is charged before code publication; it cannot silently grow after a
+materialization budget has charged that code. The module wrapper is part of the code
+owner. Entry-scoped scratch cannot own code used by later entries. A module completion
+event carries a fully constructed export Record; construction failure returns an error
+before the session can cache it.
 
 REPL publication updates the visible binding map. Shadowed bindings survive only when
 retained by closures or other reachable values; an ever-growing chain of entry scopes
-must not keep every replaced value alive. History owns source text, not evaluation
-environments.
+must not keep every replaced value alive. Entries without new bindings reuse the
+committed environment. An entry with bindings sorts candidate names with explicit
+recency tie-breaking, keeps the newest value of each name, and constructs a single
+immutable snapshot. Values, name pointers, and terminated names share its allocation.
+Lookup is binary for at least eight bindings and linear below that threshold. Sorting
+uses libc; the remaining work is linear in candidate count and copied name bytes.
+Scratch borrows the rooted input until the finished snapshot can be published
+atomically. The snapshot retains no preceding environment; an explicitly frozen prelude
+remains independently rooted. Local scope chains still enforce same-scope duplicate
+checks. Single-name function parameters need no empty scope object or pattern-name
+scratch list. Compound patterns use their prepared duplicate-name flag and still perform
+all shape, nominal-identity, and value checks at matching time. Tail replacement also
+drops the previous result root. These changes preserve lexical shadowing, effect order,
+and transactional publication. History owns source text, not evaluation environments.
 
 A precise non-moving mark-and-sweep collector traces values, code, closures, modules,
-continuations, and references held by live execution contexts. Every allocating
-operation is a potential safepoint. C references needed afterward must be in explicit
-native root frames. Test collection at every safepoint. Parsing/lowering scratch may use
-arenas; long-lived stream items and tail-call environments must be collectible before
-the top-level command ends.
+continuations, and references held by live execution contexts. Marking is iterative and
+uses an intrusive worklist without allocating scratch storage. Leaf objects are marked
+without entering the worklist. A one-bit heap epoch flips at each collection; fresh
+objects carry the heap epoch at allocation and become unmarked when it next flips.
+Tracing records the new epoch. Sweeping need not clear survivors' mark bits. This
+removes one store per live object, not a graph traversal or a pause bound. Sweeping
+releases owned syntax and budget storage by allocation kind. The next threshold is twice
+retained bytes, with a 64 KiB floor and saturating arithmetic; stress mode collects
+before every object allocation. Every language-heap allocation is a potential safepoint.
+C references needed afterward must be in explicit native root frames. Test collection at
+every safepoint. Syntax blocks follow code lifetime; long-lived stream items and
+tail-call environments must be collectible before the top-level command ends.
 
 Use the system allocator with checked sizes. Editor buffers and OS bookkeeping have
 explicit C lifetimes; they are not language heap objects and need no GC integration
 unless they retain a rooted language reference. Avoid a general allocator abstraction
-until measurement or fault-injection boundaries justify one.
+until measurement or fault-injection boundaries justify one. The evaluator caches at
+most 32 inactive frames of 16 Value slots each. Larger frames return directly to libc;
+all cached frames are freed with the evaluator. Reuse avoids allocator traffic on
+ordinary calls without retaining an unbounded stack high-water mark. Only Lists,
+Records, enums, plans, and stages size frames by retained operand count; sequential
+blocks, branches, and matches do not reserve storage proportional to syntax width.
+Unused slots are neither read nor registered as roots; only initialized live slots
+participate in GC.
 
-The initial heap stores each object's value array and terminated immutable bytes in
-one allocation; its `RillBytes` view cannot grow or be freed separately. Continuation
-frames likewise carry their operand array in a flexible member. Borrowed byte spans are
-shared across text/runtime/exec interfaces, while `RillBuffer` alone owns growable text.
+Borrowed `RillBytes` views never grow or own storage; `RillBuffer` owns growable bytes.
+Continuation frames carry their operands in a flexible array. Sequence materialization
+and sorting fill rooted private builders directly, avoiding an intermediate Value array.
+These writes are construction, not language-visible mutation.
 
-| Owner                | Resources                                                              |
-| -------------------- | ---------------------------------------------------------------------- |
-| Session              | Terminal, signal channel, history, background jobs, active editor      |
-| Execution context    | Continuations, launch snapshots, resource scopes                       |
-| Job                  | Child identities, process group, launch channels, captured descriptors |
-| Stream control block | Producer, queues, generation, transferred upstream ownership           |
-| Editor state         | Text, undo records, revision, completion view, layout caches           |
-| Codec invocation     | yyjson document and temporary conversion storage                       |
+Materialization budgets retain a private set of charged backing objects. Incremental
+charging counts shared graphs once, including captured code, and rejects excess before
+the next callback. The set is traced and its storage is accounted by the heap; it owns
+no OS resources. Nested materializations use independent budgets.
+
+The ownership map includes the planned stream, codec, and editor components:
+
+| Owner | Resources |
+| --- | --- |
+| Session | Terminal, signal channel, history, background jobs, active editor |
+| Execution context | Continuations, launch snapshots, resource scopes |
+| Job | Child identities, process group, launch channels, captured descriptors |
+| Stream control block | Producer, queues, generation, transferred upstream ownership |
+| Editor state | Text, undo records, revision, completion view, layout caches |
+| Codec invocation | yyjson document and temporary conversion storage |
 
 Codec invocations own their yyjson documents and copy decoded values into the runtime
 heap. They never parse in-situ over immutable String/Bytes storage or retain document
@@ -137,16 +224,16 @@ recoverable Result. Ordinary failures use explicit status values and cleanup blo
 
 ## Expression editor
 
-The editor is project code with six narrow responsibilities:
+Stage 4 adds an editor implemented in project code with six narrow responsibilities:
 
-| Part               | Input and output                                              | Excludes                         |
-| ------------------ | ------------------------------------------------------------- | -------------------------------- |
-| Terminal adapter   | Device reads/writes, dimensions, saved modes                  | Grammar, editing decisions       |
-| Input decoder      | Byte chunks and deadlines to typed input events               | Evaluation and filesystem access |
-| Edit state         | Events to text/cursor/undo changes and requested actions      | Syscalls and terminal escapes    |
-| Syntax integration | Buffer revision to parse status, indentation, highlight spans | Running user code                |
-| Layout             | Text, styles, viewport to rows/cells and cursor coordinates   | Terminal I/O                     |
-| Renderer           | Previous/next layout to bounded output bytes                  | Parsing or modifying source      |
+| Part | Input and output | Excludes |
+| --- | --- | --- |
+| Terminal adapter | Device reads/writes, dimensions, saved modes | Grammar, editing decisions |
+| Input decoder | Byte chunks and deadlines to typed input events | Evaluation and filesystem access |
+| Edit state | Events to text/cursor/undo changes and requested actions | Syscalls and terminal escapes |
+| Syntax integration | Buffer revision to parse status, indentation, highlight spans | Running user code |
+| Layout | Text, styles, viewport to rows/cells and cursor coordinates | Terminal I/O |
+| Renderer | Previous/next layout to bounded output bytes | Parsing or modifying source |
 
 Use explicit events such as Text, Key, PasteBegin/Chunk/End, Resize, Interrupt, Suspend,
 and CompletionReady. The session routes signal/process events and calls editor steps;
@@ -207,8 +294,8 @@ Prepare argv/envp, cwd, descriptor topology, redirection paths, and bookkeeping 
 fork. Use close-on-exec channels and validated descriptor actions. Keep signal handlers
 from opening descriptors or launching children. One platform helper creates pipes with
 the required flags using `pipe` and `fcntl`. The single-threaded supervisor and
-descriptor-free signal handlers prevent a concurrent fork during this setup; no
-platform feature probe or duplicate backend is needed.
+descriptor-free signal handlers prevent a concurrent fork during this setup; no platform
+feature probe or duplicate backend is needed.
 
 1. Allocate bookkeeping/control channels; block job-state signals during registration.
 2. Fork stages; the parent establishes each child's intended process group.
@@ -287,13 +374,78 @@ reaping.
 
 ## Optimization policy
 
-Prioritize bounded streams, efficient lexical slots, shared immutable data, in-process
-transforms, a gap buffer, and derived metadata reused within one revision. Maintain
-incremental unique-object accounting for materialization budgets instead of rescanning
-all collected data after every item. Stable sort may use the C library by decorating
-keys with original indices, preserving equal-key order without another sorting engine.
+Measure release workloads separately from sanitizer tests and external-program costs.
+Prioritize fewer allocations and edges, bounded live state, contiguous traversal, and
+reuse of immutable metadata. Tail calls bound live continuations, not total allocation
+traffic. Do not infer cache misses or latency bounds from object size or throughput.
 
-Measure before adding a custom allocator, persistent-tree collection, thread pool,
-bytecode, specialized platform fast path, or LTO requirement. Compare release builds
-separately from sanitizer runs; separate external-program/container time from shell
-cost. Tail recursion and streams must exhibit bounded live heap where semantics allow.
+### Graph equality
+
+Equality validates both inputs before identity or mismatch shortcuts, so unsupported
+leaves cannot be hidden by field order or sharing. A tree walk first tries validation
+and comparison within 64 iterations and 64 local frames. Exhaustion restarts with graph
+validation; it is internal, not a language error. This bounded prefix avoids memo setup
+for small data without expanding a large shared DAG indefinitely.
+
+Graph validation registers each aggregate and stores subtree height, enforcing the
+65,536-frame depth limit even when a shared node is reached along a longer path. An
+active entry denotes a cycle and returns LimitExceeded. User data is acyclic; recursive
+closures are unsupported equality operands regardless of GC support for their cycles.
+
+Comparison reuses the completed table for union by rank and path halving. The table no
+longer grows, so interior parent pointers stay stable; height storage becomes rank
+storage. A union records child-comparison obligations, not unconditional success. All
+scheduled children must agree. Transitivity avoids enumerating every possible pair when
+equal DAGs have different sharing. This follows the bounded pre-check and equivalence
+ideas in [Adams and Dybvig](references.md#runtime-memory-design), without Chez Scheme's
+randomized interleaving or cyclic-data semantics.
+
+For `V` aggregates and `U` union/find operations, disjoint-set work is amortized `O(U
+α(V))`. Hashing, graph edges, key lookup, and byte comparisons are separate costs;
+expected hash lookup is not an adversarial worst-case guarantee. Two indexed Records zip
+their sorted keys and values in linear field work. Small Records use bounded linear
+lookup; String comparison still costs its byte length.
+
+Scratch starts with 64 local frames and hash slots and grows with checked sizes. Tables
+stay at most half full. No GC or user callback runs while scratch borrows objects.
+Scratch is discarded on every outcome and uses space proportional to distinct objects
+plus traversal depth, independently of the number of encountered pairs. Do not cache
+comparability on objects that a private builder can still change.
+
+### Collection and allocation
+
+Trace and sweep cost `O(roots + live objects + live edges + allocated objects)`,
+excluding owned-storage disposal. Compact headers, flat captures, and kind-specific
+tracing reduce storage and visits without changing that complexity. A closure with `k`
+captures uses one allocation with `k + 1` traced slots; captured objects and recursive
+cells keep their own lifetimes. Exact captures matter: a syntactic recursive group need
+not be a strongly connected component, and sharing its entire environment can retain
+unrelated data.
+
+Keep the nonmoving collector and libc allocation until profiles justify a different
+ownership contract. Moving collection must update interior byte/Value pointers as well
+as roots. Generational or incremental collection needs barriers for recursive cells,
+private builders, stage metadata, and growing budgets. Immutable public data does not
+remove those writes. Reference counting still needs cycle handling. Full collection has
+no bounded pause guarantee; evaluator quanta do not bound GC or native-call latency.
+
+Typed syntax blocks share code lifetime; arbitrary closure pools tied to entry
+completion would defeat bounded live space during tail recursion. A slab or region
+allocator also needs reclamation, size/line metadata, and a fragmentation policy.
+Persistent trees and ropes trade contiguous traversal for indirection and different
+amortized costs across versions. Add these mechanisms only for measured workloads that
+need them.
+
+### Remaining costs
+
+Local scope chains, native names, module identities, environment names, and pattern-name
+validation still have linear scans. Large scopes, source-record duplicate checks, and
+Record-rest matching can do quadratic work. Snapshot compaction does not remove those
+costs. Lexical slots, interning, record shapes, and bytecode would change resolution or
+ownership boundaries and need supporting profiles.
+
+Code preparation analyzes unexecuted functions and builds constants, including unused
+literals. It trades cold-code work and allocation for cheap repeated reads and runs
+outside evaluator quanta. Do not extend caching to expressions whose failures, effects,
+nominal identity, or capture lifetime are observable. Process supervision is bounded by
+job/stage limits; profile its OS work separately from in-process traversal.

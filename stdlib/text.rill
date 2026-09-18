@@ -1,0 +1,6 @@
+export let byte_length = byte_length
+export let scalars = scalars
+export let encode_utf8 = encode_utf8
+export let decode_utf8 = decode_utf8
+export let starts_with = starts_with
+export let ends_with = ends_with

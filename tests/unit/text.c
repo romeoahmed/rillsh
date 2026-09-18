@@ -27,6 +27,12 @@ static void utf8() {
     CHECK(!rill_text_decode(invalid[i], strlen(invalid[i]), &at, &scalar));
     CHECK(at == 0 && scalar == 123);
     CHECK(!rill_text_valid(invalid[i], strlen(invalid[i])));
+    [[gnu::cleanup(rill_text_clear)]] RillBuffer prefixed = {};
+    CHECK(rill_text_append(&prefixed, "a", 1));
+    CHECK(rill_text_append(&prefixed, invalid[i], strlen(invalid[i])));
+    at = 1;
+    CHECK(!rill_text_decode(prefixed.data, prefixed.size, &at, &scalar));
+    CHECK(at == 1 && scalar == 123);
   }
   CHECK(rill_text_valid(nullptr, 0));
   // Known encodings are an independent oracle at each UTF-8 length boundary.
@@ -61,6 +67,10 @@ static void utf8() {
   CHECK(!rill_text_encode(&b, 0xdfff));
   CHECK(!rill_text_encode(&b, 0x110000));
   CHECK(!b.data && !b.size);
+  CHECK(rill_text_append(&b, "kept", 4));
+  CHECK(!rill_text_encode(&b, 0x110000));
+  CHECK(b.size == 4 && !strcmp(b.data, "kept"));
+  rill_text_clear(&b);
 }
 
 static void buffers() {
@@ -83,11 +93,11 @@ static void buffers() {
 }
 
 static void sources() {
-  char name[] = "entry", data[] = "界";
-  RillSource source;
+  char name[] = "entry", data[] = "\u754c";
+  RillSource source = {};
   CHECK(rill_source_init(&source, name, data, sizeof(data) - 1) == RILL_OK);
   name[0] = data[0] = 'X';
-  CHECK(!strcmp(source.name, "entry") && !strcmp(source.bytes.data, "界"));
+  CHECK(!strcmp(source.name, "entry") && !strcmp(source.bytes.data, "\u754c"));
   rill_source_clear(&source);
   const RillBytes invalid[] = {{"\xff", 1}, {"a\0b", 3}};
   for (size_t i = 0; i < sizeof(invalid) / sizeof(*invalid); ++i) {
@@ -105,8 +115,12 @@ int main() {
   const struct {
     const char *text;
     unsigned cells;
-  } widths[] = {{"a", 1},           {"界", 2}, {"é", 1},
-                {"👩‍💻", 2}, {"❤︎", 1},  {"❤️", 2}};
+  } widths[] = {{"a", 1},
+                {"\u754c", 2},
+                {"e\u0301", 1},
+                {"\U0001f469\u200d\U0001f4bb", 2},
+                {"\u2764\ufe0e", 1},
+                {"\u2764\ufe0f", 2}};
   for (size_t i = 0; i < sizeof(widths) / sizeof(*widths); ++i)
     CHECK(rill_text_width(widths[i].text, strlen(widths[i].text)) ==
           widths[i].cells);
