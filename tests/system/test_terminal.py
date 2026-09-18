@@ -194,6 +194,130 @@ class TerminalTests(ShellCase):
         )
         terminal.wait_for_exit()
 
+    def test_pure_evaluation_stop_and_publication(self) -> None:
+        terminal = self.open_terminal()
+        terminal.send(
+            'let answer=do {let captured=42; fn loop()=>if get_env("GO")==some(encode_utf8("yes")) then captured else loop(); ^./child args ready; loop()}'
+        )
+        terminal.expect(b"5:ready\r\n")
+        terminal.wait_for_shell_foreground()
+        terminal.write(b"\x1a")
+        terminal.expect(b"evaluation stopped")
+        terminal.expect(b"rill> ")
+        terminal.send(
+            'let saved=jobs()[0].handle; let intervening=9; set_env("GO","yes")'
+        )
+        terminal.expect(b"rill> ")
+        terminal.send("bg(saved)")
+        self.assertIn(b"requires foreground", terminal.expect(b"rill> "))
+        terminal.send("fg(saved)")
+        terminal.expect(b"rill> ")
+        terminal.send("exit(if answer==42 and intervening==9 then 0 else 1)")
+        terminal.wait_for_exit()
+
+    def test_mixed_evaluation_resume_and_display(self) -> None:
+        terminal = self.open_terminal()
+        terminal.send(
+            'let result=stream(job { ^./child selfstop }) |> lines |> map(fn(x)=>x+"!") |> collect'
+        )
+        terminal.expect(b"evaluation stopped")
+        terminal.expect(b"rill> ")
+        terminal.send("let saved=jobs()[0].handle; wait(saved)")
+        self.assertIn(b"requires foreground", terminal.expect(b"rill> "))
+        terminal.send("fg(jobs()[0].handle)")
+        terminal.expect(b"rill> ")
+        terminal.send('if result==["selfstop!","continued!"] then 42 else 0')
+        self.assertIn(b"42\r\n", terminal.expect(b"rill> "))
+        terminal.send('chunks(encode_utf8("first\\nsecond\\n")) |> lines')
+        rendered = terminal.expect(b"rill> ")
+        self.assertIn(b"first\r\nsecond\r\n", rendered)
+        self.assert_restored()
+        terminal.finish()
+
+    def test_stream_interrupt_and_tostop_relay(self) -> None:
+        terminal = self.open_terminal()
+        modes = termios.tcgetattr(terminal.fd)
+        modes[3] |= termios.TOSTOP
+        termios.tcsetattr(terminal.fd, termios.TCSANOW, modes)
+        terminal.send(
+            'collect_bytes(stream(job { ^./child both }))==encode_utf8("out\\n")'
+        )
+        output = terminal.expect(b"rill> ")
+        self.assertIn(b"err\r\n", output)
+        self.assertIn(b"true\r\n", output)
+        terminal.send(
+            "let unpublished=attempt(fn()=>stream(job { ^./child rows }) |> lines |> each(fn(x)=>()))"
+        )
+        terminal.expect(b"stream-ready\r\n")
+        terminal.write(b"\x03")
+        terminal.expect(b"rill> ")
+        terminal.send("unpublished")
+        self.assertIn(b"TypeError", terminal.expect(b"rill> "))
+        terminal.finish()
+
+    def test_suspended_errors_conflicts_and_cancellation(self) -> None:
+        terminal = self.open_terminal()
+        terminal.send('do { ^./child selfstop; raise(error("Example","retained")) }')
+        terminal.expect(b"evaluation stopped")
+        terminal.expect(b"rill> ")
+        terminal.send(
+            'match attempt(fn()=>fg(jobs()[0].handle)) {Result.Err {error}=>error.kind=="Example" and error.message=="retained", _=>false}'
+        )
+        self.assertIn(b"true\r\n", terminal.expect(b"rill> "))
+        terminal.send("struct Shared {value}; ^./child selfstop")
+        terminal.expect(b"evaluation stopped")
+        terminal.expect(b"rill> ")
+        terminal.send("struct Shared {other}")
+        terminal.expect(b"rill> ")
+        terminal.send("fg(jobs()[0].handle)")
+        self.assertIn(b"TypeError", terminal.expect(b"rill> "))
+        terminal.send("let abandoned=do { ^./child selfstop; 42 }")
+        terminal.expect(b"evaluation stopped")
+        terminal.expect(b"rill> ")
+        terminal.send("exit(0)")
+        self.assertIn(b"ProcessError", terminal.expect(b"rill> "))
+        terminal.send("cancel(jobs()[0].handle); abandoned")
+        self.assertIn(b"TypeError", terminal.expect(b"rill> "))
+        terminal.finish()
+
+    def test_multiple_suspended_contexts_and_force_exit(self) -> None:
+        terminal = self.open_terminal()
+        for name in ("first", "second"):
+            terminal.send(f"let {name}=do {{ ^./child selfstop; 42 }}")
+            terminal.expect(b"evaluation stopped")
+            terminal.expect(b"rill> ")
+        terminal.send(
+            'let saved=map(fn(j)=>j.handle,filter(fn(j)=>j.kind=="evaluation",jobs())); length(saved)'
+        )
+        self.assertIn(b"2\r\n", terminal.expect(b"rill> "))
+        terminal.send("fg(saved[1]); fg(saved[0])")
+        terminal.expect(b"rill> ")
+        terminal.send("first+second")
+        self.assertIn(b"84\r\n", terminal.expect(b"rill> "))
+        terminal.send("stream(job { ^./child selfstop }) |> lines |> collect")
+        terminal.expect(b"evaluation stopped")
+        terminal.expect(b"rill> ")
+        terminal.send("exit_force(0)")
+        terminal.wait_for_exit()
+
+    def test_stopped_files_keep_directory_identity(self) -> None:
+        source = self.work / "source"
+        source.mkdir()
+        (source / "data").write_bytes(b"abc")
+        (self.work / "other").mkdir()
+        terminal = self.open_terminal()
+        terminal.send(
+            'let sizes=files(path("source")) |> map(fn(e)=>do {^./child selfstop; e.size}) |> collect'
+        )
+        terminal.expect(b"evaluation stopped")
+        terminal.expect(b"rill> ")
+        terminal.send('cd(path("other"))')
+        terminal.expect(b"rill> ")
+        terminal.send("fg(jobs()[0].handle)")
+        terminal.expect(b"rill> ")
+        terminal.send("exit(if sizes==[3] then 0 else 1)")
+        terminal.wait_for_exit()
+
     def test_startup_configuration_and_opt_out(self) -> None:
         directory = self.work / "config" / "rillsh"
         directory.mkdir()

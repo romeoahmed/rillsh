@@ -1,10 +1,22 @@
+/**
+ * @file
+ * @brief Bridge unary evaluator requests to session and process services.
+ *
+ * Translate rooted JobPlans into owned launch data, construct reports, and
+ * route stream work through its cooperative adapter. Pending operations resume
+ * through the session; display never evaluates a function or launches a plan.
+ */
 #include "library.h"
 #include "diagnostic.h"
 #include "exec/exec.h"
+#include "fs.h"
+#include "json.h"
 #include "platform/posix.h"
 #include "pure.h"
 #include "runtime/runtime.h"
+#include "stream.h"
 #include "text/text.h"
+#include "value.h"
 #include <assert.h>
 #include <errno.h>
 #include <inttypes.h>
@@ -32,9 +44,15 @@ enum {
   N_CHECK,
   N_PURE,
   N_RAISE,
-  N_PROCESS
+  N_PROCESS,
+  N_DATA,
+  N_STREAM,
+  N_CAPTURE,
+  N_PRESENT
 };
-static const RillNative natives[] = {{"__pure", N_PURE},
+static const RillNative natives[] = {{"__data", N_DATA},
+                                     {"__stream", N_STREAM},
+                                     {"__pure", N_PURE},
                                      {"raise", N_RAISE},
                                      {"__process", N_PROCESS},
                                      {"run", N_RUN},
@@ -80,38 +98,6 @@ static bool env_name(RillValue v) {
   return v.kind == RILL_V_STRING && v.as.object->bytes.size &&
          !memchr(v.as.object->bytes.data, 0, v.as.object->bytes.size) &&
          !memchr(v.as.object->bytes.data, '=', v.as.object->bytes.size);
-}
-static RillValue record_fields(RillHeap *h, const char *const *keys,
-                               const RillValue *values, size_t count) {
-  size_t slots = {};
-  if (ckd_mul(&slots, count, 2))
-    return (RillValue){};
-  RillRoot input_root = {};
-  rill_runtime_root(h, &input_root, values, count);
-  RillValue out = rill_runtime_record(h, nullptr, slots);
-  if (out.kind == RILL_V_UNIT) {
-    rill_runtime_unroot(h, &input_root);
-    return out;
-  }
-  RillRoot root = {};
-  rill_runtime_root(h, &root, &out, 1);
-  RillValue *pairs = out.as.object->values;
-  for (size_t i = 0; i < count; ++i)
-    pairs[i * 2 + 1] = values[i];
-  bool ok = true;
-  for (size_t i = 0; i < count; ++i) {
-    pairs[i * 2] = rill_runtime_object(h, RILL_V_STRING, nullptr, 0, keys[i],
-                                       strlen(keys[i]), 0);
-    if (pairs[i * 2].kind == RILL_V_UNIT) {
-      ok = false;
-      break;
-    }
-  }
-  if (!ok || !rill_runtime_record_finish(out))
-    out = (RillValue){};
-  rill_runtime_unroot(h, &root);
-  rill_runtime_unroot(h, &input_root);
-  return out;
 }
 static bool process_value(RillLibrary *l, RillValue request) {
   RillHeap *h = rill_runtime_heap(l->eval);
@@ -328,7 +314,7 @@ static bool process_value(RillLibrary *l, RillValue request) {
               break;
             }
             // The request roots both inputs; finishing this private builder
-            // cannot collect. record_fields roots the result before allocating.
+            // cannot collect. rill_library_record roots the result on entry.
             RillValue *pairs = fields[1].as.object->values;
             size_t used = 0;
             for (size_t j = 0; j + 1 < old->count; j += 2) {
@@ -350,7 +336,7 @@ static bool process_value(RillLibrary *l, RillValue request) {
             }
           } else
             fields[cwd ? 0 : env ? 1 : 2] = override;
-          RillValue meta = record_fields(h, keys, fields, 3);
+          RillValue meta = rill_library_record(h, keys, fields, 3);
           RillRoot mr = {};
           rill_runtime_root(h, &mr, &meta, 1);
           RillValue copy =
@@ -376,8 +362,9 @@ static bool process_value(RillLibrary *l, RillValue request) {
     return fail(l, RILL_MEMORY, "allocation failed");
   return finish(l, out, (RillDiagnostic){});
 }
-static RillJob *launch(RillLibrary *l, RillValue plan, bool background,
-                       RillDiagnostic *error) {
+RillJob *rill_library_launch(RillLibrary *l, RillValue plan, RillExecSpec mode,
+                             RillDiagnostic *error) {
+  rill_library_collect(l);
   RillObject *o = plan.as.object;
   if (!o->count || o->count > RILL_EXEC_MAX_STAGES) {
     *error = (RillDiagnostic){.kind = RILL_LIMIT,
@@ -464,10 +451,10 @@ static RillJob *launch(RillLibrary *l, RillValue plan, bool background,
   }
   RillJob *job = nullptr;
   if (valid) {
-    RillExecSpec spec = {.stages = stages,
-                         .count = o->count,
-                         .environment = l->environment,
-                         .background = background};
+    RillExecSpec spec = mode;
+    spec.stages = stages;
+    spec.count = o->count;
+    spec.environment = l->environment;
     job = rill_exec_launch(l->exec, &spec, error);
   } else if (!error->kind)
     *error = (RillDiagnostic){
@@ -510,7 +497,7 @@ static RillValue tagged_field(RillLibrary *l, const char *type,
                               const char *variant, const char *key,
                               RillValue value) {
   RillHeap *heap = rill_runtime_heap(l->eval);
-  RillValue record = record_fields(heap, &key, &value, 1);
+  RillValue record = rill_library_record(heap, &key, &value, 1);
   if (record.kind == RILL_V_UNIT)
     return record;
   return nominal(l, type, variant, record);
@@ -555,7 +542,7 @@ static RillValue report(RillLibrary *l, RillJob *job) {
     static const char *const keys[] = {"index", "termination", "accepted_codes",
                                        "expected_cutoff"};
     if (values[1].kind != RILL_V_UNIT && values[2].kind != RILL_V_UNIT)
-      stages[i] = record_fields(h, keys, values, 4);
+      stages[i] = rill_library_record(h, keys, values, 4);
     rill_runtime_unroot(h, &vr);
     if (stages[i].kind == RILL_V_UNIT) {
       valid = false;
@@ -566,12 +553,15 @@ static RillValue report(RillLibrary *l, RillJob *job) {
       failure = i;
   }
   if (valid) {
-    if (rill_exec_cancelled(job)) {
-      RillValue reason =
-          rill_runtime_object(h, RILL_V_STRING, nullptr, 0, "cancelled", 9, 0);
+    if (rill_exec_cancelled(job) || rill_exec_cutoff_requested(job)) {
+      const char *why =
+          rill_exec_cancelled(job) ? "cancelled" : "consumer cutoff";
+      RillValue reason = rill_runtime_object(h, RILL_V_STRING, nullptr, 0, why,
+                                             strlen(why), 0);
       if (reason.kind != RILL_V_UNIT)
-        fields[2] =
-            tagged_field(l, "Completion", "Cancelled", "reason", reason);
+        fields[2] = tagged_field(
+            l, "Completion", rill_exec_cancelled(job) ? "Cancelled" : "Cutoff",
+            "reason", reason);
     } else
       fields[2] = nominal(l, "Completion", "Finished", (RillValue){});
     fields[3] = failure == count
@@ -583,7 +573,7 @@ static RillValue report(RillLibrary *l, RillJob *job) {
   RillValue out = {};
   if (valid && fields[2].kind != RILL_V_UNIT && fields[3].kind != RILL_V_UNIT) {
     static const char *const keys[] = {"id", "stages", "completion", "failure"};
-    RillValue payload = record_fields(h, keys, fields, 4);
+    RillValue payload = rill_library_record(h, keys, fields, 4);
     if (payload.kind != RILL_V_UNIT)
       out = nominal(l, "JobReport", nullptr, payload);
   }
@@ -600,9 +590,15 @@ static bool check_report(RillLibrary *l, RillValue value) {
       !rill_runtime_field(value, (RillBytes){"failure", 7}, &failure))
     return fail(l, RILL_TYPE, "check requires JobReport");
   RillValue finished = nominal(l, "Completion", "Finished", (RillValue){});
+  RillValue completion_type = {}, cutoff = {};
+  bool has_cutoff =
+      rill_runtime_builtin(l->eval, "Completion", &completion_type) &&
+      rill_runtime_field(completion_type, (RillBytes){"Cutoff", 6}, &cutoff);
   if (completion.kind != RILL_V_ADT ||
-      completion.as.object->values[0].as.object !=
-          finished.as.object->values[0].as.object)
+      (completion.as.object->values[0].as.object !=
+           finished.as.object->values[0].as.object &&
+       (!has_cutoff || completion.as.object->values[0].as.object !=
+                           cutoff.as.object->values[0].as.object)))
     return fail(l, RILL_PROCESS, "job did not finish normally");
   RillValue none = nominal(l, "Option", "None", (RillValue){});
   if (failure.kind == RILL_V_ADT && failure.as.object->values[0].as.object ==
@@ -657,6 +653,26 @@ bool rill_library_progress(RillLibrary *l, RillNativePending *p) {
   rill_exec_acknowledge(j);
   if (d.kind)
     return finish(l, (RillValue){}, d);
+  if (p->operation == N_CAPTURE) {
+    RillValue fields[3] = {};
+    RillRoot root = {};
+    rill_runtime_root(rill_runtime_heap(l->eval), &root, fields, 3);
+    fields[2] = report(l, j);
+    for (int i = 0; i < 2; ++i) {
+      const RillBuffer *bytes = rill_exec_output(j, i + 1);
+      fields[i] = rill_runtime_object(rill_runtime_heap(l->eval), RILL_V_BYTES,
+                                      nullptr, 0, bytes->data, bytes->size, 0);
+    }
+    const char *keys[] = {"stdout", "stderr", "report"};
+    RillValue result = {};
+    if (fields[0].kind != RILL_V_UNIT && fields[1].kind != RILL_V_UNIT &&
+        fields[2].kind != RILL_V_UNIT)
+      result = rill_library_record(rill_runtime_heap(l->eval), keys, fields, 3);
+    rill_runtime_unroot(rill_runtime_heap(l->eval), &root);
+    return result.kind == RILL_V_UNIT
+               ? fail(l, RILL_MEMORY, "capture allocation failed")
+               : finish(l, result, d);
+  }
   if (p->operation == N_WAIT) {
     RillValue v = report(l, j);
     if (v.kind == RILL_V_UNIT)
@@ -678,6 +694,56 @@ bool rill_library_call(RillLibrary *l, RillNativePending *p,
   RillHeap *h = rill_runtime_heap(l->eval);
   RillDiagnostic d = {};
   switch (event.native) {
+  case N_PRESENT:
+    return l->present && l->present(l->context, v)
+               ? finish(l, (RillValue){}, d)
+               : fail(l, RILL_IO, "cannot display stream item");
+  case N_STREAM:
+    return rill_stream_call(l, v);
+  case N_DATA: {
+    if (v.kind != RILL_V_LIST || !v.as.object->count ||
+        v.as.object->values[0].kind != RILL_V_STRING)
+      return fail(l, RILL_TYPE, "invalid data request");
+    const char *op = v.as.object->values[0].as.object->bytes.data;
+    RillValue a = v.as.object->count > 1 ? v.as.object->values[1]
+                                         : (RillValue){},
+              b = v.as.object->count > 2 ? v.as.object->values[2]
+                                         : (RillValue){},
+              out = {};
+    if (!strcmp(op, "from_json") || !strcmp(op, "to_json"))
+      out = rill_library_json(h, !strcmp(op, "to_json"), a, b, &d);
+    else if (!strcmp(op, "read_text"))
+      out = rill_library_read_text(h, a, b, &d);
+    else if (!strcmp(op, "glob"))
+      out = rill_library_glob(h, a, &d);
+    else if (!strcmp(op, "display_path")) {
+      if (a.kind != RILL_V_PATH)
+        return fail(l, RILL_TYPE, "display_path requires Path");
+      RillBytes bytes = a.as.object->bytes;
+      [[gnu::cleanup(rill_text_clear)]] RillBuffer text = {};
+      if (!rill_text_escape(&text, bytes))
+        return fail(l, RILL_MEMORY, "path display allocation failed");
+      out = rill_runtime_object(h, RILL_V_STRING, nullptr, 0, text.data,
+                                text.size, 0);
+      if (out.kind == RILL_V_UNIT)
+        return fail(l, RILL_MEMORY, "path display allocation failed");
+    } else if (!strcmp(op, "capture")) {
+      RillLimit limit = {"max_bytes", (size_t)64 * 1024 * 1024, 0};
+      if (!rill_library_limits(a, &limit, 1, &d))
+        return finish(l, (RillValue){}, d);
+      if (b.kind != RILL_V_PLAN)
+        return fail(l, RILL_TYPE, "capture requires JobPlan");
+      p->job = rill_library_launch(
+          l, b, (RillExecSpec){.capture = true, .capture_limit = limit.value},
+          &d);
+      p->operation = N_CAPTURE;
+      return p->job ? false : finish(l, (RillValue){}, d);
+    } else
+      return fail(l, RILL_TYPE, "unknown data operation");
+    return finish(l, out, d);
+  }
+  case N_CAPTURE:
+    return fail(l, RILL_TYPE, "invalid direct capture request");
   case N_PURE: {
     RillValue out = rill_library_pure(h, v, &d);
     return finish(l, out, d);
@@ -712,10 +778,10 @@ bool rill_library_call(RillLibrary *l, RillNativePending *p,
     return process_value(l, v);
   case N_RUN:
   case N_START:
-    rill_library_collect(l);
     if (v.kind != RILL_V_PLAN)
       return fail(l, RILL_TYPE, "expected JobPlan");
-    p->job = launch(l, v, event.native == N_START, &d);
+    p->job = rill_library_launch(
+        l, v, (RillExecSpec){.background = event.native == N_START}, &d);
     p->operation = event.native;
     if (!p->job)
       return finish(l, (RillValue){}, d);
@@ -726,6 +792,12 @@ bool rill_library_call(RillLibrary *l, RillNativePending *p,
   case N_CANCEL: {
     if (v.kind != RILL_V_JOB)
       return fail(l, RILL_TYPE, "expected session Job handle");
+    RillControl action = event.native == N_FG     ? RILL_CONTROL_FG
+                         : event.native == N_BG   ? RILL_CONTROL_BG
+                         : event.native == N_WAIT ? RILL_CONTROL_WAIT
+                                                  : RILL_CONTROL_CANCEL;
+    if (l->control && l->control(l->context, action, v))
+      return true;
     RillJob *j = rill_exec_find(l->exec, (size_t)v.as.integer);
     if (!j)
       return fail(l, RILL_TYPE, "invalid session Job handle");
@@ -747,11 +819,31 @@ bool rill_library_call(RillLibrary *l, RillNativePending *p,
   case N_JOBS: {
     if (v.kind != RILL_V_UNIT)
       return fail(l, RILL_TYPE, "jobs expects Unit");
-    RillValue handles[RILL_EXEC_MAX_JOBS] = {};
-    size_t n = 0;
+    RillValue contexts =
+        l->context_jobs ? l->context_jobs(l->context) : (RillValue){};
+    if (l->context_jobs && contexts.kind == RILL_V_UNIT)
+      return fail(l, RILL_MEMORY, "context snapshot allocation failed");
+    RillRoot context_root = {};
+    rill_runtime_root(h, &context_root, &contexts, 1);
+    size_t n = contexts.kind == RILL_V_UNIT ? 0 : rill_runtime_count(contexts),
+           count = n;
+    for (RillJob *j = rill_exec_first(l->exec); j; j = rill_exec_next(j))
+      if (!l->owned_job || !l->owned_job(l->context, j))
+        ++count;
+    RillValue list =
+        rill_runtime_object(h, RILL_V_LIST, nullptr, count, nullptr, 0, 0);
+    if (list.kind == RILL_V_UNIT) {
+      rill_runtime_unroot(h, &context_root);
+      return fail(l, RILL_MEMORY, "job snapshot allocation failed");
+    }
     RillRoot root = {};
-    rill_runtime_root(h, &root, handles, 0);
+    rill_runtime_root(h, &root, &list, 1);
+    RillValue *handles = list.as.object->values;
+    for (size_t i = 0; i < n; ++i)
+      handles[i] = rill_runtime_at(contexts, i);
     for (RillJob *j = rill_exec_first(l->exec); j; j = rill_exec_next(j)) {
+      if (l->owned_job && l->owned_job(l->context, j))
+        continue;
       size_t id = rill_exec_id(j);
       RillValue fields[4] = {{.kind = RILL_V_INT, .as.integer = (int64_t)id},
                              {.kind = RILL_V_JOB, .as.integer = (int64_t)id}};
@@ -767,20 +859,17 @@ bool rill_library_call(RillLibrary *l, RillNativePending *p,
       static const char *const keys[] = {"id", "handle", "kind", "state"};
       handles[n] =
           fields[2].kind != RILL_V_UNIT && fields[3].kind != RILL_V_UNIT
-              ? record_fields(h, keys, fields, 4)
+              ? rill_library_record(h, keys, fields, 4)
               : (RillValue){};
       rill_runtime_unroot(h, &fr);
       if (handles[n++].kind == RILL_V_UNIT) {
         rill_runtime_unroot(h, &root);
+        rill_runtime_unroot(h, &context_root);
         return fail(l, RILL_MEMORY, "allocation failed");
       }
-      root.count = n;
     }
-    RillValue list =
-        rill_runtime_object(h, RILL_V_LIST, handles, n, nullptr, 0, 0);
     rill_runtime_unroot(h, &root);
-    if (list.kind == RILL_V_UNIT)
-      return fail(l, RILL_MEMORY, "allocation failed");
+    rill_runtime_unroot(h, &context_root);
     return finish(l, list, d);
   }
   case N_CD: {
@@ -812,6 +901,9 @@ bool rill_library_call(RillLibrary *l, RillNativePending *p,
   case N_EXIT_FORCE:
     if (v.kind != RILL_V_INT || v.as.integer < 0 || v.as.integer > 255)
       return fail(l, RILL_TYPE, "exit expects an integer from 0 through 255");
+    if (event.native == N_EXIT && l->control &&
+        l->control(l->context, RILL_CONTROL_EXIT, v))
+      return true;
     if (event.native == N_EXIT && rill_exec_outstanding(l->exec, false))
       return fail(l, RILL_PROCESS,
                   "live jobs remain; wait, cancel, or exit_force");
@@ -877,6 +969,7 @@ bool rill_library_display(RillValue v, RillBuffer *out) {
   case RILL_V_CELL:
   case RILL_V_DESCRIPTOR:
   case RILL_V_BUDGET:
+  case RILL_V_STREAM:
     return false;
   case RILL_V_UNIT:
     return true;
@@ -904,7 +997,7 @@ bool rill_library_display(RillValue v, RillBuffer *out) {
 }
 
 static void retain_job(RillExec *exec, RillValue value) {
-  if (value.kind == RILL_V_JOB)
+  if (value.kind == RILL_V_JOB && value.as.integer > 0)
     rill_exec_retain(exec, (size_t)value.as.integer);
 }
 void rill_library_collect(RillLibrary *l) {
@@ -919,4 +1012,29 @@ void rill_library_collect(RillLibrary *l) {
     for (size_t i = 0; i < object->count; ++i)
       retain_job(l->exec, object->values[i]);
   rill_exec_prune(l->exec);
+}
+
+bool rill_library_pending_owned(const RillNativePending *pending) {
+  return pending->job && pending->operation != N_WAIT &&
+         pending->operation != N_START;
+}
+void rill_library_present(RillLibrary *l, RillValue stream) {
+  RillValue values[3] = {
+      {}, {.kind = RILL_V_FUNCTION, .as.integer = N_PRESENT}, stream};
+  RillRoot root = {};
+  rill_runtime_root(rill_runtime_heap(l->eval), &root, values, 3);
+  values[0] = rill_runtime_object(rill_runtime_heap(l->eval), RILL_V_STRING,
+                                  nullptr, 0, "each", 4, 0);
+  RillValue request = {};
+  if (values[0].kind != RILL_V_UNIT)
+    request = rill_runtime_object(rill_runtime_heap(l->eval), RILL_V_LIST,
+                                  values, 3, nullptr, 0, 0);
+  RillRoot request_root = {};
+  rill_runtime_root(rill_runtime_heap(l->eval), &request_root, &request, 1);
+  if (request.kind == RILL_V_UNIT)
+    (void)fail(l, RILL_MEMORY, "display allocation failed");
+  else
+    (void)rill_stream_call(l, request);
+  rill_runtime_unroot(rill_runtime_heap(l->eval), &request_root);
+  rill_runtime_unroot(rill_runtime_heap(l->eval), &root);
 }

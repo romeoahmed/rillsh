@@ -1,4 +1,5 @@
-/** @file
+/**
+ * @file
  * @brief Traced values and resumable unary evaluation, independent of OS
  * services.
  */
@@ -35,7 +36,8 @@ typedef enum {
   RILL_V_CONSTRUCTOR,
   RILL_V_ADT,
   RILL_V_SLICE,
-  RILL_V_BUDGET
+  RILL_V_BUDGET,
+  RILL_V_STREAM
 } RillValueKind;
 /** @brief Evaluated plan actions, independent of syntax representation. */
 typedef enum {
@@ -69,10 +71,12 @@ typedef struct {
  */
 struct RillObject {
   RillObject *next; ///< Private collector ownership chain.
-  RillObject *gray; ///< Private intrusive marking worklist.
+  RillObject
+      *gray; ///< Temporary intrusive link for mutually exclusive graph walks.
   RillValueKind
-      kind;    ///< Allocation kind, including during tracing and disposal.
-  bool marked; ///< Private last-reached collection epoch.
+      kind;      ///< Allocation kind, including during tracing and disposal.
+  bool marked;   ///< Private last-reached collection epoch.
+  bool visiting; ///< Private temporary reachability mark; clear outside walks.
   size_t allocation; ///< Bytes charged to the heap, including owned storage.
   size_t count;      ///< Number of traced values.
   union {
@@ -96,13 +100,15 @@ struct RillObject {
   RillValue values[]; ///< Values traced as outgoing references.
 };
 /**
- * @brief Stack-owned root frame borrowing initialized Values.
+ * @brief Caller-owned root registration borrowing initialized Values.
  *
- * Pop in reverse registration order before the frame or Values leave scope.
+ * Unregister before the frame or Values leave scope. Stable asynchronous owners
+ * may unregister independently of evaluator frame order.
  * Tracing borrows a read-only view; the owner may update initialized slots.
  */
 typedef struct RillRoot {
-  struct RillRoot *previous; ///< Previous frame.
+  struct RillRoot *previous; ///< Older registered root.
+  struct RillRoot *next;     ///< Newer registered root.
   const RillValue *values;   ///< Borrowed contiguous values.
   size_t count;              ///< Number of initialized Values to trace.
 } RillRoot;
@@ -110,6 +116,7 @@ typedef struct RillRoot {
 typedef struct {
   RillObject *objects; ///< Collector list.
   RillRoot *roots;     ///< Borrowed root chain.
+  size_t scoped;       ///< Allocated scoped tokens, including unreachable ones.
   size_t bytes;        ///< Charged bytes; includes garbage until collection.
   size_t threshold;    ///< Next normal collection threshold.
   bool epoch;  ///< Alternates each full collection; survivors need no reset.
@@ -140,13 +147,18 @@ void rill_runtime_collect(RillHeap *heap);
 void rill_runtime_heap_clear(RillHeap *heap);
 /** @brief Whether a value has a traced heap payload. */
 bool rill_runtime_is_object(RillValue value);
-/** @brief Push a stack-owned root frame; no allocation. */
+/**
+ * @brief Register initialized Values without allocating.
+ *
+ * The root and Value storage must stay at stable addresses until unregistered.
+ * A root must not already be registered, on this heap or another.
+ */
 void rill_runtime_root(RillHeap *heap, RillRoot *root, const RillValue *values,
                        size_t count);
 /**
- * @brief Pop a root frame.
+ * @brief Unregister a root independently of registration order.
  *
- * @pre root is the most recently registered frame on this heap.
+ * @pre root is registered on this heap.
  */
 void rill_runtime_unroot(RillHeap *heap, RillRoot *root);
 /** @brief Native callable metadata; IDs are interpreted by the library adapter.
@@ -165,7 +177,10 @@ typedef enum {
   RILL_EVAL_ERROR,
   RILL_EVAL_YIELD,
   RILL_EVAL_IMPORT,
-  RILL_EVAL_MODULE
+  RILL_EVAL_MODULE,
+  RILL_EVAL_CALLBACK,
+  RILL_EVAL_STREAM,
+  RILL_EVAL_CLEANUP
 } RillEvalState;
 /**
  * @brief Rooted result or request borrowed from the evaluator.
@@ -177,7 +192,7 @@ typedef struct {
   const char *source;     ///< Borrowed source identity.
   RillBytes source_bytes; ///< Borrowed source for diagnostic coordinates.
   RillEvalState state;    ///< Scheduling outcome.
-  int64_t native;         ///< Function identifier for a unary request.
+  int64_t native; ///< Native function ID or CLEANUP resource checkpoint.
   RillValue
       value; ///< Argument or completed value, borrowed from evaluator roots.
   RillDiagnostic diagnostic; ///< Failure with source offset.
@@ -189,6 +204,8 @@ typedef struct {
  */
 [[nodiscard]] RillEval *rill_runtime_new(const RillNative *natives,
                                          size_t count);
+/** @brief Reserve a monotonic resource identity; zero means exhaustion. */
+int64_t rill_runtime_resource_id(RillEval *eval);
 /** @brief Access the heap for adapter allocations with explicit roots. */
 RillHeap *rill_runtime_heap(RillEval *eval);
 /**
@@ -201,9 +218,9 @@ void rill_runtime_begin(RillEval *eval, RillSyntax *syntax);
 /**
  * @brief Execute a step-limited quantum and return a result or host request.
  *
- * Native/import/module requests require host service before evaluation
- * advances. The step limit does not bound collection or individual operation
- * latency.
+ * Native/import/module/callback/cleanup requests require host service before
+ * evaluation advances. The step limit does not bound collection or individual
+ * operation latency.
  */
 RillEvalEvent rill_runtime_step(RillEval *eval);
 /**
@@ -214,7 +231,11 @@ RillEvalEvent rill_runtime_step(RillEval *eval);
  */
 void rill_runtime_resume(RillEval *eval, RillValue value,
                          RillDiagnostic diagnostic);
-/** @brief Discard pending work and collect; committed entries remain rooted. */
+/**
+ * @brief Discard pending work and diagnostics, then collect.
+ *
+ * Committed entries remain rooted. Borrowed event views become invalid.
+ */
 void rill_runtime_abort(RillEval *eval);
 /** @brief Free frames, bindings, and heap; nullptr is allowed. No OS cleanup.
  */
@@ -250,6 +271,14 @@ bool rill_runtime_field(RillValue value, RillBytes key, RillValue *out);
  */
 RillValue rill_runtime_record(RillHeap *heap, const RillValue *pairs,
                               size_t count);
+/**
+ * @brief Copy a finalized Record into private storage, preserving key order.
+ *
+ * May collect; root the input and retain a root for the result before further
+ * allocation. Returns Unit on allocation failure. The copy is already indexed;
+ * only its field values may change before publication, never keys or count.
+ */
+RillValue rill_runtime_record_copy(RillHeap *heap, RillValue record);
 /**
  * @brief Validate and index a private Record builder without a GC safepoint.
  *
@@ -331,3 +360,41 @@ RillValue rill_runtime_budget(RillHeap *heap, size_t limit);
  */
 RillError rill_runtime_charge(RillHeap *heap, RillValue budget,
                               RillValue value);
+
+/**
+ * @brief Invoke a language callback for a suspended native operation.
+ *
+ * Arguments must be rooted. The result is returned as Result in a CALLBACK
+ * event; cancellation and allocation failure remain uncatchable. The original
+ * native request remains suspended until the host resumes it.
+ */
+void rill_runtime_callback(RillEval *eval, RillValue function,
+                           RillValue argument);
+/**
+ * @brief Check a rooted graph for scoped handles, including closure captures.
+ *
+ * Handles sharing and cycles without allocation, collection, or callbacks.
+ */
+RillError rill_runtime_persistent(RillHeap *heap, RillValue value);
+
+/** @brief Owned suspended continuation, rooted in its original evaluator heap.
+ */
+typedef struct RillEvaluation RillEvaluation;
+/**
+ * @brief Detach active work without publishing it.
+ *
+ * The saved context remains rooted in this evaluator's heap and must be
+ * restored or discarded before freeing the evaluator. Allocation failure
+ * returns nullptr and leaves active work unchanged. No OS cleanup occurs.
+ */
+RillEvaluation *rill_runtime_suspend(RillEval *eval);
+/** @brief Restore and consume suspended work; the evaluator must have no active
+ * work. */
+void rill_runtime_restore(RillEval *eval, RillEvaluation *evaluation);
+/** @brief Discard suspended work and unregister roots; never performs OS
+ * cleanup. */
+void rill_runtime_discard(RillEval *eval, RillEvaluation *evaluation);
+
+/** @brief Charge non-object retained storage to a budget; no allocation or
+ * collection. */
+RillError rill_runtime_charge_storage(RillValue budget, size_t bytes);

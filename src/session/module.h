@@ -1,4 +1,5 @@
-/** @file
+/**
+ * @file
  * @brief Session-owned module identity cache and in-flight import stack.
  */
 #pragma once

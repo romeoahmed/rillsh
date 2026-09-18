@@ -1,5 +1,13 @@
+/**
+ * @file
+ * @brief Pure standard-library behavior under stress collection.
+ *
+ * Each expression has an independent local scope. Cases check results and
+ * error categories through the real evaluator and bundled library.
+ */
 #include "diagnostic.h"
 #include "library/bundle.h"
+#include "library/json.h"
 #include "library/pure.h"
 #include "runtime/runtime.h"
 #include "source.h"
@@ -7,6 +15,7 @@
 #include "test.h"
 #include "text/text.h"
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -65,9 +74,57 @@ static void records(RillEval *eval) {
     expect(eval, source.data, RILL_OK);
   }
 }
+static void json_builders() {
+  RillHeap heap = {.stress = true};
+  RillValue values[4] = {};
+  RillRoot root = {};
+  rill_runtime_root(&heap, &root, values, 4);
+  values[0] = rill_runtime_record(&heap, nullptr, 0);
+  CHECK(values[0].kind == RILL_V_RECORD);
+  const size_t widths[] = {0, 1, 15, 16, 17, 128};
+  for (size_t k = 0; k < sizeof(widths) / sizeof(*widths); ++k) {
+    [[gnu::cleanup(rill_text_clear)]] RillBuffer input = {};
+    CHECK(rill_text_append(&input, "{", 1));
+    for (size_t i = 0; i < widths[k]; ++i)
+      CHECK(rill_text_format(&input, "%s\"key%zu\":[%zu,{\"text\":\"kept\"}]",
+                             i ? "," : "", i, i));
+    CHECK(rill_text_append(&input, "}", 1));
+    values[1] = rill_runtime_object(&heap, RILL_V_STRING, nullptr, 0,
+                                    input.data, input.size, 0);
+    CHECK(values[1].kind == RILL_V_STRING);
+    RillDiagnostic error = {};
+    values[2] = rill_library_json(&heap, false, values[0], values[1], &error);
+    CHECK(!error.kind && values[2].kind == RILL_V_RECORD);
+    CHECK(values[2].as.object->count == widths[k] * 2);
+    for (size_t i = 0; i < widths[k]; ++i) {
+      char name[32];
+      int size = snprintf(name, sizeof(name), "key%zu", i);
+      CHECK(size > 0 && (size_t)size < sizeof(name));
+      RillValue field = {}, text = {};
+      CHECK(rill_runtime_field(values[2], (RillBytes){name, (size_t)size},
+                               &field));
+      CHECK(rill_runtime_count(field) == 2 &&
+            rill_runtime_at(field, 0).as.integer == (int64_t)i);
+      CHECK(rill_runtime_field(rill_runtime_at(field, 1),
+                               (RillBytes){"text", 4}, &text));
+      CHECK(!strcmp(text.as.object->bytes.data, "kept"));
+    }
+    values[3] = rill_library_json(&heap, true, values[0], values[2], &error);
+    CHECK(!error.kind && values[3].kind == RILL_V_BYTES);
+    values[3] = rill_library_json(&heap, false, values[0], values[3], &error);
+    bool equal = false;
+    CHECK(!error.kind &&
+          rill_runtime_equal(values[2], values[3], &equal) == RILL_OK && equal);
+  }
+  rill_runtime_unroot(&heap, &root);
+  rill_runtime_heap_clear(&heap);
+}
 int main() {
-  const RillNative primitives[] = {{"__pure", 1}, {"__process", 2}};
-  RillEval *eval = rill_runtime_new(primitives, 2);
+  json_builders();
+  const RillNative primitives[] = {
+      {"__pure", 1}, {"__process", 2}, {"__stream", 3}, {"__data", 4}};
+  RillEval *eval =
+      rill_runtime_new(primitives, sizeof(primitives) / sizeof(*primitives));
   CHECK(eval);
   rill_runtime_heap(eval)->stress = true;
   CHECK(run(eval, rill_library_source("std:prelude")).state == RILL_EVAL_DONE);

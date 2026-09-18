@@ -1,8 +1,12 @@
+/**
+ * @file
+ * @brief Always-active assertions that preserve process cleanup handlers.
+ */
 #pragma once
 #include <stdio.h>
 #include <stdlib.h>
-// Always active, evaluates once, and reaches atexit cleanup on failure.
-// Sanitizer signal handling remains intact; no longjmp bypasses cleanup.
+// Evaluate once even under NDEBUG. exit reaches atexit cleanup without
+// intercepting sanitizer signals or unwinding through longjmp.
 #define CHECK(condition)                                                       \
   do {                                                                         \
     if (!(condition)) {                                                        \

@@ -1,3 +1,10 @@
+/**
+ * @file
+ * @brief Palette selection and safe style emission.
+ *
+ * Cases cover destination capability, color overrides, and deterministic
+ * escape sequences without requiring a live terminal.
+ */
 #include "text/style.h"
 #include "test.h"
 #include "text/text.h"

@@ -1,3 +1,10 @@
+/**
+ * @file
+ * @brief Buffer guarantees and Unicode boundary fixtures.
+ *
+ * Known UTF-8 encodings and malformed byte sequences provide independent
+ * checks; grapheme and width cases exercise the implemented text policy.
+ */
 #include "text/text.h"
 #include "diagnostic.h"
 #include "source.h"
@@ -75,6 +82,8 @@ static void utf8() {
 
 static void buffers() {
   RillBuffer b = {};
+  rill_text_truncate(&b, 0);
+  CHECK(!b.data && !b.size);
   CHECK(rill_text_append(&b, nullptr, 0));
   CHECK(b.size == 0 && b.data[0] == 0);
   CHECK(rill_text_append(&b, "a\0b", 3));
@@ -87,6 +96,12 @@ static void buffers() {
   size_t size = b.size;
   CHECK(!rill_text_append(&b, nullptr, SIZE_MAX));
   CHECK(errno == ENOMEM && b.data == storage && b.size == size);
+  rill_text_truncate(&b, 2);
+  CHECK(b.data == storage && b.size == 2 && !memcmp(b.data, "a\0\0", 3));
+  rill_text_truncate(&b, 0);
+  CHECK(b.data == storage && b.size == 0 && !*b.data);
+  CHECK(rill_text_append(&b, "reused", 6));
+  CHECK(b.size == 6 && !strcmp(b.data, "reused"));
   rill_text_clear(&b);
   CHECK(!b.data && !b.size && !b.capacity);
   rill_text_clear(&b);

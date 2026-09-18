@@ -1,7 +1,17 @@
+/**
+ * @file
+ * @brief Immutable List/Record operations and graph-aware equality.
+ *
+ * Slices retain backing Lists; Record indexes borrow keys in their own payload.
+ * Equality validates supported data before identity or mismatch shortcuts. A
+ * bounded tree walk handles small values; graph validation and union/find avoid
+ * repeated expansion of shared data. Scratch never crosses a GC safepoint.
+ */
 #include "diagnostic.h"
 #include "private.h"
 #include "runtime.h"
 #include "text/text.h"
+#include <assert.h>
 #include <stdckdint.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -108,6 +118,21 @@ RillValue rill_runtime_record(RillHeap *heap, const RillValue *pairs,
                               size_t count) {
   return rill_runtime_object(heap, RILL_V_RECORD, pairs, count, nullptr, 0, 0);
 }
+RillValue rill_runtime_record_copy(RillHeap *heap, RillValue record) {
+  assert(record.kind == RILL_V_RECORD);
+  RillObject *source = record.as.object;
+  RillValue copy = rill_runtime_record(heap, nullptr, source->count);
+  if (copy.kind == RILL_V_UNIT)
+    return copy;
+  RillObject *out = copy.as.object;
+  memcpy(out->values, source->values, source->count * sizeof(RillValue));
+  if (source->fields) {
+    out->fields = (void *)(out->values + out->count);
+    for (size_t i = 0; i < out->count / 2; ++i)
+      out->fields[i] = out->values + (source->fields[i] - source->values);
+  }
+  return copy;
+}
 // Per-comparison scratch never survives the call or crosses a GC safepoint.
 // A completed validation memo stores subtree height, preserving the depth limit
 // when the same DAG node is reached through a longer path.
@@ -182,7 +207,7 @@ static bool equated(Seen *seen, const RillObject *a, const RillObject *b) {
     if (x->height == y->height)
       ++x->height;
   }
-  // This union records an obligation: the caller must compare its children
+  // Joining equivalence classes obliges the caller to compare their children
   // before reporting equality. Transitivity avoids a Cartesian product of
   // pairs when equal DAGs have different sharing shapes.
   return false;

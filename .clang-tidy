@@ -12,14 +12,17 @@ Checks:
   - bugprone-command-processor
   - bugprone-float-loop-counter
   - bugprone-implicit-widening-of-multiplication-result
+  - bugprone-inc-dec-in-conditions
   - bugprone-infinite-loop
   - bugprone-integer-division
+  - bugprone-invalid-enum-default-initialization
   - bugprone-macro-parentheses
   - bugprone-macro-repeated-side-effects
   - bugprone-misplaced-operator-in-strlen-in-alloc
   - bugprone-misplaced-pointer-arithmetic-in-alloc
   - bugprone-misplaced-widening-cast
   - bugprone-multiple-statement-macro
+  - bugprone-non-zero-enum-to-bool-conversion
   - bugprone-not-null-terminated-result
   - bugprone-posix-return
   - bugprone-redundant-branch-condition
@@ -46,6 +49,7 @@ Checks:
   - cert-err33-c
   - misc-header-include-cycle
   - misc-misleading-bidirectional
+  - misc-misplaced-const
   - misc-redundant-expression
   - misc-static-assert
   - modernize-redundant-void-arg

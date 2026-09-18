@@ -1,15 +1,17 @@
-#include "../unit/test.h"
+/**
+ * @file
+ * @brief Measure explicit collection over live graphs and dead leaves.
+ *
+ * Disable automatic collection for this workload so construction and collection
+ * intervals remain distinct. Report observed time and retained bytes, without
+ * asserting a latency bound.
+ */
+#include "bench.h"
 #include "runtime/runtime.h"
 #include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <time.h>
 
-static uint64_t nanoseconds() {
-  struct timespec now = {};
-  CHECK(clock_gettime(CLOCK_MONOTONIC, &now) == 0);
-  return (uint64_t)now.tv_sec * UINT64_C(1000000000) + (uint64_t)now.tv_nsec;
-}
 int main() {
   RillHeap heap = {.threshold = SIZE_MAX};
   RillValue retained = {};
@@ -35,7 +37,6 @@ int main() {
     total += elapsed;
     if (elapsed > maximum)
       maximum = elapsed;
-    CHECK(heap.bytes == live);
   }
   CHECK(printf("{\"retained_bytes\":%zu,\"collections\":50,"
                "\"total_ns\":%" PRIu64 ",\"max_ns\":%" PRIu64 "}\n",

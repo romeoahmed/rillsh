@@ -1,3 +1,12 @@
+/**
+ * @file
+ * @brief Load modules by identity and track unfinished imports.
+ *
+ * Completed exports are runtime-rooted; the cache owns paths and load state.
+ * Relative imports use the importing directory, cycles fail explicitly, and
+ * failed entries are removed so a later import can retry. Loading resumes the
+ * evaluator without running it recursively.
+ */
 #include "module.h"
 #include "diagnostic.h"
 #include "library/bundle.h"
@@ -33,6 +42,12 @@ void rill_module_event(RillModules *m, RillEval *eval, RillEvalEvent event) {
     RillModule *entry = m->active;
     if (!entry) {
       resume_error(eval, RILL_TYPE, "module completion without import");
+      return;
+    }
+    RillError escape =
+        rill_runtime_persistent(rill_runtime_heap(eval), event.value);
+    if (escape) {
+      resume_error(eval, escape, "module cannot export a scoped Stream");
       return;
     }
     entry->value = event.value;
@@ -176,18 +191,17 @@ void rill_module_event(RillModules *m, RillEval *eval, RillEvalEvent event) {
   rill_runtime_module(eval, &syntax);
 }
 void rill_module_abort(RillModules *m) {
-  RillModule **link = &m->entries;
-  while (*link) {
-    RillModule *entry = *link;
-    if (entry->complete)
-      link = &entry->next;
-    else {
+  while (m->active) {
+    RillModule *entry = m->active;
+    m->active = entry->parent;
+    RillModule **link = &m->entries;
+    while (*link && *link != entry)
+      link = &(*link)->next;
+    if (*link)
       *link = entry->next;
-      free(entry->name);
-      free(entry);
-    }
+    free(entry->name);
+    free(entry);
   }
-  m->active = nullptr;
 }
 void rill_module_clear(RillModules *m) {
   while (m->entries) {

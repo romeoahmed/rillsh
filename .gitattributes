@@ -1,6 +1,9 @@
 # Normalize text to LF while preserving binary files.
 * text=auto eol=lf
 
+# Fuzz seeds are exact byte inputs, including CRLF and malformed text.
+tests/fuzz/corpus/** -text
+
 # These shared extensions contain C in this repository.
 *.h linguist-language=C
 *.inc linguist-language=C

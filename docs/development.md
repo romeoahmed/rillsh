@@ -32,11 +32,13 @@ macOS, supply `SDKROOT` from `xcrun --show-sdk-path` when analysis needs the act
 do not store the resolved path in project files.
 
 ASan/UBSan is the default correctness profile. Meson supplies frame-pointer flags;
-undefined-behavior recovery is disabled in the project configuration. Preserve Meson's
-sanitizer test environment and provide the matching symbolizer. Verify leak-checking
-support per platform. Planned fuzz targets use a separate libFuzzer build; production
-binaries do not link it. MSan requires an instrumented environment; TSan is not a
-default for this single-threaded runtime. Measure release performance separately.
+undefined-behavior recovery is disabled for direct runs and fuzzing as well as tests.
+Preserve Meson's sanitizer test environment and provide the matching symbolizer. Verify
+leak-checking support per platform. The fuzz targets use a separate libFuzzer build with
+`-Db_sanitize=address,undefined,fuzzer-no-link`, so linked libraries receive coverage
+instrumentation through Meson; only the fuzz executable links the driver. MSan requires
+an instrumented environment; TSan is not a default for this single-threaded runtime.
+Measure release performance separately.
 
 ### Optional Fedora environment
 
@@ -57,14 +59,17 @@ reconfiguration. If added later, run `meson setup --reconfigure build/asan` to d
 their native targets. Then run from the repository root:
 
 ```sh
-python3 tools/check.py build/asan
+meson format --check-only --recursive meson.build meson.options \
+  subprojects/packagefiles/yyjson/meson.build
+meson compile -C build/asan api-docs
+ninja -C build/asan clang-format-check clang-tidy
+meson test -C build/asan --print-errorlogs
 ```
 
-The driver checks repository privacy, Markdown links/table structure, component include
-boundaries, deterministic Unicode generation, clang-tidy configuration, formatting,
-static analysis, API documentation, and the Meson tests. It uses Meson's native tool
-targets and compile database. Review Markdown anchors and runnable examples as well; the
-lightweight checks do not establish semantic correctness.
+Meson owns build/test scheduling, results, timeouts, and tool targets. Unicode
+regeneration is a Meson test. Formatting, clang-tidy, and API documentation use their
+native targets directly. Review component dependencies, Markdown links, tables,
+examples, and accidental local information in the diff; these remain review duties.
 
 For Python changes:
 
@@ -75,26 +80,28 @@ uvx ty check tools tests/system
 ```
 
 Format locally with `uvx ruff format tools tests/system` and `ninja -C build/asan
-clang-format`. Checks must not rewrite sources. Use the relevant test suites while
-developing; [testing](testing.md) describes selection, repetition, fixtures, and final
-gates.
+clang-format`. Use `meson format --inplace --recursive meson.build meson.options` for
+project build files; format the tracked yyjson overlay separately. Keep Meson's
+formatter defaults without a project style file. Checks must not rewrite sources. Use
+the relevant test suites while developing; [testing](testing.md) describes selection,
+repetition, fixtures, and final gates.
 
 ## GNU C23, standard facilities first
 
 Prefer ISO/IEC 9899:2024 facilities and selected GNU extensions that express intent
 clearly. Require the facilities actually used, without older-C fallbacks or C2y syntax.
 
-| Need                               | Convention                                                              |
-| ---------------------------------- | ----------------------------------------------------------------------- |
-| Boolean/null values and assertions | `bool`, `true`, `false`, `nullptr`, `static_assert`                     |
-| Interface annotations              | `[[nodiscard]]`, `[[maybe_unused]]`, `[[fallthrough]]`                  |
-| Checked integer arithmetic         | `<stdckdint.h>`: `ckd_add`, `ckd_sub`, `ckd_mul`                        |
-| Constants and local inference      | `constexpr`, `auto`, `typeof` when clearer                              |
-| Bit operations                     | `<stdbit.h>` when needed                                                |
-| Initialization and representation  | `{}`, designated initializers, compound literals, tagged unions         |
-| Headers and no-argument functions  | `#pragma once`; `f()` declarations and definitions                      |
-| Variadic formatting                | C23 `va_start(args)` and `[[gnu::format(printf, ...)]]`                 |
-| Simple scope-owned storage         | `[[gnu::cleanup(function)]]` with an exactly typed, infallible callback |
+| Need | Convention |
+| --- | --- |
+| Boolean/null values and assertions | `bool`, `true`, `false`, `nullptr`, `static_assert` |
+| Interface annotations | `[[nodiscard]]`, `[[maybe_unused]]`, `[[fallthrough]]` |
+| Checked integer arithmetic | `<stdckdint.h>`: `ckd_add`, `ckd_sub`, `ckd_mul` |
+| Constants and local inference | `constexpr`, `auto`, `typeof` when clearer |
+| Bit operations | `<stdbit.h>` when needed |
+| Initialization and representation | `{}`, designated initializers, compound literals, tagged unions |
+| Headers and no-argument functions | `#pragma once`; `f()` declarations and definitions |
+| Variadic formatting | C23 `va_start(args)` and `[[gnu::format(printf, ...)]]` |
+| Simple scope-owned storage | `[[gnu::cleanup(function)]]` with an exactly typed, infallible callback |
 
 Use libc for allocation, copying, formatting, and sorting when its contract fits. A
 helper should add ownership, bounds, or meaningful errors rather than rename libc.
@@ -145,7 +152,9 @@ The sole third-party runtime library is yyjson, private and static through Meson
 notice; its types never cross component interfaces. `force_fallback_for=yyjson` keeps
 the dependency instrumented with the selected build. The current release has no upstream
 Meson file, so a small overlay declares the library and overrides the dependency. Review
-its warning settings on upgrades instead of patching it for unrelated checks.
+its warning settings on upgrades instead of patching it for unrelated checks. Meson's
+`include_type: 'system'` keeps vendor headers outside project diagnostics without
+weakening checks on the adapter or removing sanitizer instrumentation.
 
 Track both `data/unicode/` and `src/text/unicode_tables.inc`. The former contains the
 pinned official inputs, manifest, license, and independent conformance corpus; the
@@ -163,7 +172,11 @@ standard library; no Python package is needed by the installed shell.
 Start from upstream defaults or a named preset, retaining only project-specific choices.
 Meson owns language mode, build type, sanitizers, optimization, LTO, dependency wiring,
 and the compile database. Keep default undefined-symbol checking. Add custom options
-only for real optional products, such as future fuzz binaries.
+only for real optional products, such as `-Dfuzz=true` for fuzz targets and seed replay.
+Use `find_program` with a version constraint for build-time Python; no Python extension
+module is built. Static-library link dependencies propagate through Meson: only targets
+compiling the JSON adapter need yyjson headers. Keep the boundary-header list as Meson
+file objects so missing documentation inputs fail during setup.
 
 `warning_level=3` and `werror=true` establish the compiler baseline. The root Meson file
 owns additional warnings; `.clang-tidy` owns analyzer and C safety checks. Avoid
@@ -202,13 +215,18 @@ language behavior. Document what names and types cannot express: ownership, life
 units, empty inputs, failure guarantees, effects, and GC or blocking boundaries.
 
 Use [Doxygen blocks](https://www.doxygen.nl/manual/docblocks.html) beside declarations,
-with a one-sentence `@brief` and a blank line before details. Each documented C header
-has an `@file` block. Use `///<` for short member contracts. Keep one authoritative
-comment per declaration; do not repeat signatures with `@fn` or duplicate contracts in
-source files. Use `@pre`, `@return`, or complete `@param` lists only when they add
-clarity. Do not put multi-paragraph contracts into `@brief` or add tags that repeat
-parameter names. State whether failure leaves outputs unchanged, partially written, or
-invalid; never promise rollback unless the implementation provides it.
+with a one-sentence `@brief` and a blank line before details. Each authored C file and
+header starts with an `@file` block. An implementation introduction explains its
+responsibility, main flow, and important ownership boundary in a few sentences; a tiny
+entry point needs only a short description. Use an ASCII diagram inside `@verbatim` /
+`@endverbatim` when it clarifies a state machine or ownership graph. Keep algorithms and
+exceptional paths beside the code they explain. Use `///<` for short member contracts.
+Keep one authoritative comment per declaration; do not repeat signatures with `@fn` or
+duplicate contracts in source files. Use `@pre`, `@return`, or complete `@param` lists
+only when they add clarity. Do not put multi-paragraph contracts into `@brief` or add
+tags that repeat parameter names. State whether failure leaves outputs unchanged,
+partially written, or invalid; never promise rollback unless the implementation provides
+it.
 
 ```c
 /**
@@ -236,9 +254,9 @@ Output is under the build directory's `api/html/`. Meson owns one boundary-heade
 and configures `docs/Doxyfile.in`; private representations, tests, generated tables, and
 dependencies are excluded. Ordinary compilation does not require Doxygen, but the
 quality gate does. `EXTRACT_STATIC=YES` includes boundary-header `static constexpr`
-limits; the input list still excludes implementation files. Keep default HTML styling
-and warning checks. `EXTRACT_ALL` would hide missing documentation and stays off;
-warnings fail the target.
+limits. Source-file introductions orient readers of the code; this target deliberately
+extracts only boundary headers. Keep default HTML styling and warning checks.
+`EXTRACT_ALL` would hide missing documentation and stays off; warnings fail the target.
 
 Review rendered C23 signatures, links, and contracts as well as the exit status.
 Generated configuration and HTML stay in the build tree; published artifacts must not
@@ -255,8 +273,8 @@ distinguishes implementation from design. Update these when scope changes.
 Keep personal paths, account names, hostnames, credentials, environment dumps, and
 host-specific container tooling out of repository files and published evidence. Use
 relative paths, standard OS paths, or portable placeholders. Versions and hashes are
-appropriate validation identifiers. The quality gate checks tracked and non-ignored
-untracked files; ignored logs are local artifacts, not publication-ready evidence.
+appropriate validation identifiers. Review tracked and newly added files before
+publication; ignored logs are local artifacts, not publication-ready evidence.
 
 Escape literal pipes even inside Markdown table code spans. Check links, anchors,
 fences, tables, and examples. Record actual pass/fail/unavailable results; a written

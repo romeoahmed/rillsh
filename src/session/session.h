@@ -1,4 +1,5 @@
-/** @file
+/**
+ * @file
  * @brief CLI and canonical-input session composition.
  */
 #pragma once

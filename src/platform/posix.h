@@ -1,4 +1,5 @@
-/** @file
+/**
+ * @file
  * @brief POSIX mechanisms, process-local signal ownership and terminal handoff.
  */
 #pragma once

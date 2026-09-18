@@ -1,3 +1,11 @@
+/**
+ * @file
+ * @brief Supervisor contracts using controlled child processes.
+ *
+ * Scenarios exercise launch, byte transport, descriptor inheritance, signals,
+ * cutoff, and cleanup. Each runs in a separate Meson process; harness cleanup
+ * retains responsibility for every unreaped helper child.
+ */
 #include "../helpers/fds.h"
 #include "../helpers/supervisor.h"
 #include "diagnostic.h"
@@ -107,6 +115,24 @@ static void streaming() {
   CHECK(rill_exec_result(job) == 0);
   CHECK(rill_exec_output(job, 1)->size == 0 &&
         rill_exec_output(job, 2)->size == 0);
+
+  spec.capture = false;
+  spec.streaming = true;
+  job = rill_exec_launch(supervisor, &spec, &error);
+  CHECK(job);
+  // Consuming an untouched queue must not pass null storage to memmove.
+  rill_exec_consume(job, 0);
+  CHECK(rill_exec_feed(job, (RillBytes){"a\0bc", 4}));
+  rill_exec_feed_end(job);
+  finish(job);
+  CHECK(rill_exec_result(job) == 0);
+  const RillBuffer *output = rill_exec_output(job, 1);
+  CHECK(output->size == 4 && !memcmp(output->data, "a\0bc\0", 5));
+  rill_exec_consume(job, 1);
+  CHECK(output->size == 3 && !memcmp(output->data, "\0bc\0", 4));
+  rill_exec_consume(job, 3);
+  CHECK(!output->size && !*output->data);
+  rill_exec_consume(job, 0);
 }
 
 static void child_state() {

@@ -1,148 +1,146 @@
 # Implementation status
 
-Stages 1 and 2 are complete: Rill Shell executes external commands and provides its
-functional language, reusable job plans, and bundled pure library. The language,
-execution, interaction, and platform specifications describe the **first-release
-target**; structured streams and the editor remain in stages 3 and 4 of the
-[implementation plan](implementation-plan.md).
+Stages 1–3 are complete. Rill Shell combines external pipelines with its functional
+language, reusable job plans, scoped structured streams, filesystem/JSON adapters, and
+resumable foreground evaluations. The [implementation plan](implementation-plan.md)
+reserves rich editing, completion, persistent history, and final delivery work for stage
+4. The specifications describe the full first-release target; this page separates
+implemented behavior from that remaining scope.
 
 ## Available surface
 
 The executable accepts `-c SOURCE`, a source file with arguments, redirected stdin, or
 interactive canonical input. Complete entries are parsed before evaluation; incomplete
-entries continue at the prompt. `--`, `-i`, `--help`, `--version`, color overrides, and
-`--no-config` are supported. Interactive startup loads the XDG configuration file;
-scripts expose arguments as Bytes through `args()`.
+entries continue at the prompt. Invocation supports `--`, `-i`, `--help`, `--version`,
+color overrides, and `--no-config`. Interactive startup loads XDG configuration; scripts
+receive argument Bytes through `args()`.
 
-The language includes checked Int/Float arithmetic, Bool, Null, Unit, String, Bytes,
-Path, immutable Lists and Records, first-class curried closures, proper tail calls,
-nominal structs/enums, nested patterns and guards, immutable updates, and explicit
-errors with `attempt`. Closures retain only resolved free bindings. Later REPL shadowing
-preserves earlier captures; a failed entry publishes no bindings while preserving
-effects already performed.
+The language provides checked arithmetic, distinct String/Bytes/Path values, immutable
+Lists and Records, first-class curried closures, proper tail calls, nominal structs and
+enums, nested patterns and guards, immutable updates, and explicit errors. Closures
+retain resolved free bindings. Failed entries publish no bindings but preserve completed
+effects. Imports cache file identity, preserve nominal identity across aliases, reject
+cycles, and permit retry after failure. Relative imports use the importing directory.
 
-Imports produce immutable export namespaces. File identity caching preserves nominal
-identity across aliases, rejects cycles, and permits retrying failed loads. Relative
-imports use the importing source directory, independently of later `cd` effects.
-`std:core`, `std:seq`, `std:text`, and `std:process` are bundled through C23 `#embed`.
-Their public operations and defaults use ordinary Rill functions over private
-primitives. The installed executable needs neither library source files nor Python.
+The prelude and `std:core`, `std:seq`, `std:text`, `std:fs`, `std:process`, and
+`std:json` are embedded through C23 `#embed`. Composition and defaults use ordinary Rill
+functions over private primitives; the installed shell needs no library source files or
+Python.
 
-Commands support literal/quoted words, scalar and list-spread substitutions, byte
-pipelines, and ordered redirection. `job { ... }`, `command`, and `pipe` construct
-reusable plans without launching processes or opening redirection files. `with_cwd`,
-`with_env`, and `accept_exit` attach explicit per-stage policies.
+| Surface | Implemented behavior |
+| --- | --- |
+| Commands and plans | Literal/quoted words, scalar/list-spread substitutions, byte pipelines, ordered redirection, reusable and programmatic plans |
+| Job policies | Launch snapshots, explicit cwd/environment overrides, accepted exit codes, stage reports, expected cutoff, cancellation |
+| Process APIs | `run`, `start`, `wait`, `check`, `capture`, `stream`, `through`, `fg`, `bg`, `cancel`, `jobs` |
+| Streams | Single-consumer ownership, lazy `map`/`filter`/`take`, explicit close, checked producer completion, bounded byte queues |
+| Consumers | `collect`, `collect_bytes`, `fold`, `each`, `sum`, stable `sort_by`, `write_stdout`; explicit materialization limits |
+| Text and JSON | UTF-8 line decoding across chunks; strict document conversion with duplicate-key, numeric-range, depth, and byte checks |
+| Filesystem | Directory records, byte-sorted explicit globbing, bounded regular-file text reads, safe Path display |
+| Session | Explicit cwd/environment effects; suspended pure/mixed evaluations, foreground resumption, shutdown cleanup |
 
-| Operations                        | Current behavior                                                        |
-| --------------------------------- | ----------------------------------------------------------------------- |
-| `run`, `start`                    | Run a plan in the foreground or create an independent background job    |
-| `wait`, `check`                   | Inspect a nominal JobReport or raise its selected failure               |
-| `fg`, `bg`, `cancel`              | Control external jobs; mixed suspended evaluations belong to stage 3    |
-| `jobs`                            | Return records containing `id`, `handle`, `kind`, and named `state`     |
-| `cd`, `pwd`                       | Change directory transactionally; return the physical directory as Path |
-| `get_env`, `set_env`, `unset_env` | Read and update the session environment explicitly                      |
-| `exit`, `exit_force`              | Refuse live jobs or explicitly clean them up before exit                |
+Returned streams display incrementally at the prompt. Scalars use escaped display and
+containers currently use summaries; Unicode-aware tables belong to stage 4. The prompt
+uses canonical terminal editing. RGB, 256-color, 16-color, and plain styles are
+available. Unicode 18.0.0 grapheme segmentation is implemented; full terminal-width
+validation, rich editing, completion, and history remain pending.
 
-The prompt still uses canonical terminal editing. Rich editing, completion, persistent
-history, and Unicode-aware value presentation are pending. Current display escapes
-non-ASCII bytes and controls; RGB, 256-color, 16-color, and plain styles are available.
-Pinned Unicode 18.0.0 grapheme segmentation is implemented; complete display-width
-validation belongs to stage 4.
+## Runtime boundaries
 
-## Ownership and limits
+The prepared-AST evaluator uses exact lexical captures, proper tail calls, immutable
+binding snapshots, and a precise nonmoving collector. Native roots also retain stopped
+contexts. OS resources have explicit scopes and never rely on GC finalizers.
 
-- A precise, nonmoving collector uses explicit roots and iterative marking. Owned code,
-  syntax storage, captures, and shared list-tail views participate in lifetime accounting.
-  Unreachable recursive closures and shadowed bindings are collectible.
-- Continuations are explicit; direct, mutual, and indirect tail calls replace frames.
-  Non-tail evaluation is limited to 65,536 live continuations and syntax to 256 levels.
-- Sorting evaluates each key once in source order, preserves ties, and checks item and
-  retained-byte budgets. No structured Stream values exist yet.
-- Each launch owns its argv/environment/cwd snapshot. A launch gate and separate error
-  channel distinguish launch failure from a program that exits 127. Stage policies
-  participate in rightmost-failure and expected-SIGPIPE handling.
-- One cooperative loop handles signals, child state, bounded I/O work, and cancellation.
-  Capture/feed pumps are tested through the C supervisor API; public streams and codecs
-  remain stage 3 work.
-- Cancellation cannot become success when children exit zero. TERM/CONT precedes timed
-  KILL escalation and reaping. Interrupting `wait` leaves an independent job alive.
-- Completed, acknowledged jobs are pruned when no reachable handle retains them.
-  The supervisor permits 1,024 retained jobs and 256 stages per pipeline.
-- The session owns the terminal through a separate open file description. Foreground
-  handoff, stop/resume, and restoration preserve inherited descriptor flags.
+One cooperative loop advances the active evaluator, jobs, and bounded transport.
+Suspended contexts resume only in the foreground. Stream aliases are invalidated on
+transfer; escaping resource tokens are rejected even after close. Cleanup finishes
+before error recovery resumes. See [architecture](architecture.md) for storage and
+scheduling, and [execution](execution.md) for limits and observable policies.
 
 ## Acceptance evidence
 
-The suite registers 29 Meson tests. C language tests exercise the evaluator directly;
-Python tests exercise scripts, module files, real processes, and controlling PTYs.
-Counts are a snapshot, not a coverage target. [Testing](testing.md) defines the
-contracts.
+There are 31 ordinary Meson tests and three optional fuzz seed-replay tests. C component
+and fault tests and Python script/process/PTY tests exercise the production
+implementation. Counts describe the current suite, not coverage percentages.
+[Testing](testing.md) owns the detailed contracts and reproduction commands.
 
-| Contracts                 | Evidence and boundary                                                                                                                             |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| L01–L04                   | Syntax matrices; application and value-pipe effect-order scripts                                                                                  |
-| L05–L08                   | Retained closures, lexical capture semantics, three million-call tail scenarios, continuation limits, stress GC, and retained-heap plateau checks |
-| L09–L12                   | Arithmetic/conversion/index failures, distinct data values, Result conversion, script/REPL behavior, and uncaught Ctrl-C; Stream branches pending |
-| L13–L14                   | Cached module identities/cycles, retry after failed import, nominal redeclaration, and atomic REPL publication with preserved effects             |
-| A01–A06                   | Nominal identity, first-class constructors, payload validation, nested/exact/open/rest patterns, and curried parameter checks                     |
-| A07–A12                   | Subject/guard order, failed-guard scope, repeated names, immutable updates, equality validation, and shared list tails under GC                   |
-| E01–E02                   | Reusable/programmatic plans, prelaunch validation, argument spreading, per-stage policies, and distinct launch snapshots                          |
-| E03–E08, E14–E16, E18–E20 | Retained command/supervisor regressions; direct feed/capture tests; codec and Stream branches pending                                             |
-| P01–P03, P07, P13–P14     | PATH/environment bytes, directory transactions, UTF-8 boundaries, invocation, signal and terminal ownership                                       |
-| P04, P08–P09              | XDG startup matrix and color selection; history storage and rich-terminal selection pending                                                       |
-| I02                       | All 853 official grapheme cases and deterministic regeneration; no full display-width claim                                                       |
+| Contracts | Evidence |
+| --- | --- |
+| L01–L04 | Syntax matrices, unary application, value-pipe evaluation order |
+| L05–L08 | Lexical captures, retained closures, million-call tail scenarios, stress GC, retained-heap plateau checks |
+| L09–L12 | Checked arithmetic/conversions, distinct empty values, Result conversion, script/REPL boundaries, uncaught cancellation |
+| L13–L16 | Module identity/cycles/retry, atomic publication, exact captures around local Streams, callback/session effect order |
+| A01–A12 | Nominal identity, first-class constructors, patterns and guards, immutable updates, equality, shared List tails |
+| E01–E08 | Plan reuse/snapshots, argument bytes, redirections, launch distinction, large concurrent stdin/stdout/stderr transport |
+| E09–E14 | Cutoff, failure after byte EOF, alias/reentrancy rejection, resource escape, limits, checkpoint cleanup, failed launches/codecs |
+| E15–E20 | Descriptor/signal contracts, pure and mixed stop/resume, multiple contexts, cancellation, rejected background execution, forced shutdown |
+| P01–P04, P07, P13–P14 | PATH/environment, directory transactions, XDG startup, UTF-8 boundaries, invocation, terminal ownership |
+| P08–P09 | Color selection and canonical-input fallback; rich-terminal selection remains stage 4 |
+| I02 | All 853 official grapheme cases and deterministic regeneration; no full display-width claim |
 
-Allocation-budget tests exercise production parser/runtime code, including closures,
-ADTs, patterns, and equality. Single-failure library sweeps cover rooted builders and
-error propagation after the allocator recovers. Other fault tests retain directory
-rollback, partial launch, and children stopped or terminated before exec. Test aliases
-stay outside production interfaces. Cleanup coverage is limited to owned children and
-descriptors; it does not establish containment of descendants that leave the group.
+Stream regressions include no callback lookahead after `take`, nested consumers,
+repeated scope release, strict JSON round trips, UTF-8 across transport boundaries,
+directory identity across suspension and `cd`, resumed errors and nominal conflicts,
+TOSTOP stderr relay, and cleanup before caught-error recovery. Allocation sweeps fail
+one allocation at a time under stress GC, including stream callbacks/checkpoints and
+JSON conversion. Separate fuzz targets check JSON conversion, line-decoder
+content/errors, and syntax preparation without executing arbitrary input, launching
+processes, or touching user files.
 
-Stream-dependent L10–L11 and L15–L16 cases, remaining E-series cases, and rich
-interaction contracts remain pending. No editor, codec, or Stream coverage is implied by
-a passing language suite.
+Cleanup evidence concerns owned children and descriptors. It does not establish
+containment of descendants that leave the process group. Cooperative scheduling does not
+bound blocking filesystem calls, inherited-destination writes, GC pauses, or kernel
+termination latency.
 
 ## Validation checkpoint
 
-The 2026-09-18 C audit passed **29/29** Meson tests in each profile below.
-Versions identify tested configurations, not compiler or platform requirements.
+The 2026-09-18 C-audit checkpoint passed **31/31** ordinary Meson tests in each profile
+below. Versions identify tested configurations, not requirements.
 
-| Platform             | Profiles                                    |
-| -------------------- | ------------------------------------------- |
+| Platform | Profiles |
+| --- | --- |
 | Linux/glibc, AArch64 | Clang 23.1.0 ASan/UBSan; GCC 16.2.1 release |
-| macOS, arm64         | Clang 23.1.1 ASan/UBSan and release         |
+| macOS, arm64 | Clang 23.1.1 ASan/UBSan and release |
 
-Both sanitizer quality gates passed formatting, clang-tidy, Doxygen, generated-data,
-repository checks, and tests. Ruff lint/format and ty passed for Python tools and system
-tests. The system suites contain 12 language, 19 process/invocation, and 17 PTY methods.
+Both ordinary sanitizer builds passed clang-format, clang-tidy, Doxygen, Unicode
+regeneration, and tests. System coverage includes 12 language, 19 process/invocation, 14
+stream/process, four codec, and 23 PTY methods. Python sources are unchanged since the
+test-review checkpoint, when Ruff formatting/lint and ty passed. Linux sanitizer runs
+include leak checking.
 
-Regressions cover inherited blocked and pending signals, signal-state restoration after
-initialization failure and cleanup, noninteractive terminal ownership, nonregular module
-rejection, and all six redirection operations. Terminal input and EOF work with inherited
-high-numbered descriptors. Low-limit fixtures adapt without raising the inherited limit;
-the high-FD PTY case reports a skip if its setup cannot fit.
+All 24 authored headers also compile independently on macOS. The three optional fuzz
+seed tests pass on macOS and Linux. ASan/UBSan mutation campaigns completed without a
+finding:
 
-Earlier checkpoints also passed unoptimized syntax/runtime/language tests (**12/12**),
-release benchmark result checks (**13/13**), repeated PTY runs, README examples, and
-cooperative/forced timeout cleanup probes. These were not rerun for this audit and do not
-establish performance gains. Linux leak checking was exercised; x86-64, macOS
-LeakSanitizer, rich-editor emulator behavior, and fuzz targets remain unverified or
-unimplemented.
+| Target | macOS executions / seconds | Linux executions / seconds |
+| --- | --- | --- |
+| JSON | 750,691 / 11 | 1,062,899 / 11 |
+| Lines | 31,458 / 11 | 90,541 / 11 |
+| Syntax/preparation | 975,555 / 11 | 1,485,448 / 11 |
 
-Reproduce the gate and selected suites with the commands in
-[development](development.md#quality-gate) and
-[testing](testing.md#test-infrastructure). Rerun affected checks after changes.
+Campaigns used a 128 KiB mutation limit and a ten-second per-input timeout. Linux used
+libFuzzer's leak checking; macOS disabled it. Components and yyjson received coverage
+instrumentation. These are bounded runs, not coverage percentages or throughput
+comparisons: the targets perform different work and scheduling was not isolated.
+
+Stress-GC and fault regressions cover partial builders, exact captures, recursive
+factories, pooled literals, Record indexes, suspended contexts, checkpoint cleanup, and
+failed-entry recovery. Abort also clears borrowed diagnostics before collection and
+permits subsequent definitions. Generated tables and dependencies are not hand-edited.
+
+Remaining delivery checks include x86-64, macOS LeakSanitizer, rich-editor emulators,
+and the planned editor and bounded-evaluator fuzz targets. Stage-4 contracts are not
+inferred from passing stream or language tests.
 
 ## Performance evidence
 
-Current representations include flat captures, compact object headers, indexed Records,
-packed binding snapshots, shared List slices, prepared constants, and graph-aware
-equality. [Architecture](architecture.md) explains their ownership and cost models. The
-13 retained benchmarks cover these paths; [testing](testing.md#performance-evidence)
-defines the comparison procedure.
+All 23 release benchmarks pass on macOS/Clang and Linux/GCC. They validate workloads
+without timing thresholds. On the tested AArch64 ABIs, Values occupy 16 bytes, object
+headers 64 bytes, and syntax nodes 88 bytes; these are observations, not ABI promises.
 
-Earlier local measurements used intermediate working-tree snapshots without durable
-revision identities. They do not establish a reproducible release comparison. No general
-speedup, cache-locality improvement, or bounded GC pause is claimed. Future comparisons
-must identify both revisions and retain identical workloads and build options.
+Prior measurements motivated nested free-name summaries and code-local constant sharing.
+Sharing saves repetitive storage but adds preparation work for distinct literals. Those
+comparisons used earlier workload revisions and are not a current performance baseline.
+No bytecode prototype, cache-miss improvement, allocator-traffic reduction, or bounded
+GC pause has been measured. [Architecture](architecture.md#optimization-policy) records
+the retained design and tradeoffs; [testing](testing.md#performance-evidence) defines
+how to produce a reproducible comparison with the current workloads.

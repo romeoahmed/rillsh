@@ -1,11 +1,22 @@
+/**
+ * @file
+ * @brief Compose CLI startup, canonical input, presentation, and shutdown.
+ *
+ * The session owns the platform, environment, evaluator, and supervisor. Whole
+ * entries share one parser/evaluator path across scripts and the prompt.
+ * Effects are coordinated in evaluation.c; this file handles input and the
+ * user-facing boundary, including terminal restoration on controlled exit.
+ */
 #include "session.h"
 #include "config.h"
 #include "diagnostic.h"
 #include "exec/exec.h"
 #include "library/bundle.h"
 #include "library/library.h"
+#include "library/stream.h"
 #include "module.h"
 #include "platform/posix.h"
+#include "private.h"
 #include "runtime/runtime.h"
 #include "source.h"
 #include "syntax/syntax.h"
@@ -15,23 +26,13 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
 #include <unistd.h>
 
-typedef struct {
-  RillPlatform platform;
-  RillEnvironment env;
-  RillExec *exec;
-  RillEval *eval;
-  RillLibrary library;
-  RillModules modules;
-  RillColorMode color;
-  bool interactive;
-  int status;
-} Session;
-static bool write_all(int fd, const char *data, size_t n) {
+bool rill_session_write(int fd, const char *data, size_t n) {
   while (n) {
     ssize_t size = write(fd, data, n);
     if (size < 0 && errno == EINTR)
@@ -49,18 +50,18 @@ static RillPalette palette(Session *s, int fd) {
                             rill_platform_env_get(&s->env, "COLORTERM"),
                             rill_platform_env_get(&s->env, "NO_COLOR"));
 }
-static int out_of_memory(Session *s) {
+int rill_session_memory(Session *s) {
   s->library.exit_requested = true;
   s->library.exit_code = 1;
   const char message[] = "rillsh: OutOfMemory: allocation failed\n";
-  (void)write_all(2, message, sizeof(message) - 1);
+  (void)rill_session_write(2, message, sizeof(message) - 1);
   return 1;
 }
-static int diagnostic_at(Session *s, const char *source_name,
-                         RillBytes source_bytes, RillDiagnostic d) {
+int rill_session_diagnostic_at(Session *s, const char *source_name,
+                               RillBytes source_bytes, RillDiagnostic d) {
   if (d.kind == RILL_MEMORY ||
       ((d.kind == RILL_IO || d.kind == RILL_LAUNCH) && d.code == ENOMEM))
-    return out_of_memory(s);
+    return rill_session_memory(s);
   size_t line = 1, column = 1;
   if (source_name)
     for (size_t i = 0; i < d.offset && i < source_bytes.size; ++i) {
@@ -77,7 +78,7 @@ static int diagnostic_at(Session *s, const char *source_name,
       (!rill_text_escape(&label, (RillBytes){d.label, d.label_size}) ||
        !rill_text_escape(&escaped_message,
                          (RillBytes){d.message, d.message_size})))
-    return out_of_memory(s);
+    return rill_session_memory(s);
   const char *kind =
       d.label ? (label.data ? label.data : "") : rill_diagnostic_name(d.kind);
   const char *explanation =
@@ -99,8 +100,8 @@ static int diagnostic_at(Session *s, const char *source_name,
          rill_text_append(&out, message, strlen(message));
   }
   if (!ok || !rill_text_append(&out, "\n", 1))
-    return out_of_memory(s);
-  (void)write_all(2, out.data, out.size);
+    return rill_session_memory(s);
+  (void)rill_session_write(2, out.data, out.size);
   if (d.kind == RILL_SYNTAX)
     return 2;
   if (d.kind == RILL_CANCELLED)
@@ -109,84 +110,24 @@ static int diagnostic_at(Session *s, const char *source_name,
     return d.code;
   return 1;
 }
-static int diagnostic(Session *s, const RillSource *source, RillDiagnostic d) {
-  return diagnostic_at(s, source ? source->name : nullptr,
-                       source
-                           ? (RillBytes){source->bytes.data, source->bytes.size}
-                           : (RillBytes){},
-                       d);
+int rill_session_diagnostic(Session *s, const RillSource *source,
+                            RillDiagnostic d) {
+  return rill_session_diagnostic_at(
+      s, source ? source->name : nullptr,
+      source ? (RillBytes){source->bytes.data, source->bytes.size}
+             : (RillBytes){},
+      d);
 }
-static unsigned events(Session *s) {
+unsigned rill_session_events(Session *s) {
   unsigned bits = rill_platform_signals(&s->platform);
   rill_exec_signal(s->exec, bits);
+  rill_stream_signal(&s->library, bits);
   if (bits & (RILL_SIG_TERM | RILL_SIG_HUP)) {
     s->library.exit_requested = true;
     s->library.exit_code = bits & RILL_SIG_TERM ? 143 : 129;
     rill_exec_cancel_all(s->exec);
   }
   return bits;
-}
-static int evaluate(Session *s, RillSource *source, RillSyntax *syntax) {
-  if (syntax->state != RILL_COMPLETE)
-    return diagnostic(s, source, syntax->diagnostic);
-  rill_module_abort(&s->modules);
-  free(s->modules.base);
-  s->modules.base = getcwd(nullptr, 0);
-  rill_runtime_begin(s->eval, syntax);
-  RillNativePending pending = {};
-  bool interrupted = false;
-  while (!s->library.exit_requested) {
-    (void)rill_exec_poll(s->exec, pending.job ? 20 : 0, -1);
-    unsigned bits = events(s);
-    interrupted |= (bits & RILL_SIG_INT) != 0;
-    if (interrupted) {
-      // Finish foreground/cancel cleanup before leaving the entry. Interrupted
-      // wait leaves its independent background job alive.
-      if (pending.job && rill_exec_cancelled(pending.job)) {
-        if (rill_exec_state(pending.job) != RILL_JOB_COMPLETED)
-          continue;
-        rill_exec_acknowledge(pending.job);
-      }
-      rill_runtime_abort(s->eval);
-      return 130;
-    }
-    if (pending.job) {
-      if (!rill_library_progress(&s->library, &pending))
-        continue;
-    }
-    RillEvalEvent result = rill_runtime_step(s->eval);
-    switch (result.state) {
-    case RILL_EVAL_IMPORT:
-    case RILL_EVAL_MODULE:
-      rill_module_event(&s->modules, s->eval, result);
-      break;
-    case RILL_EVAL_NATIVE:
-      (void)rill_library_call(&s->library, &pending, result);
-      break;
-    case RILL_EVAL_YIELD:
-      break;
-    case RILL_EVAL_ERROR: {
-      int code = result.source
-                     ? diagnostic_at(s, result.source, result.source_bytes,
-                                     result.diagnostic)
-                     : diagnostic(s, source, result.diagnostic);
-      rill_runtime_abort(s->eval);
-      return code;
-    }
-    case RILL_EVAL_DONE:
-      if (s->interactive && result.value.kind != RILL_V_UNIT) {
-        [[gnu::cleanup(rill_text_clear)]] RillBuffer out = {};
-        if (!rill_library_display(result.value, &out) ||
-            !rill_text_append(&out, "\n", 1))
-          return out_of_memory(s);
-        if (!write_all(s->platform.tty, out.data, out.size))
-          return 1;
-      }
-      return 0;
-    }
-  }
-  rill_runtime_abort(s->eval);
-  return s->library.exit_code;
 }
 static int execute(Session *s, const char *name, const char *data,
                    size_t size) {
@@ -198,13 +139,13 @@ static int execute(Session *s, const char *name, const char *data,
       rill_source_init(&source, canonical ? canonical : name, data, size);
   free(canonical);
   if (error != RILL_OK)
-    return diagnostic(
+    return rill_session_diagnostic(
         s, nullptr,
         (RillDiagnostic){.kind = error,
                          .message = "source must be UTF-8 without NUL"});
   [[gnu::cleanup(rill_syntax_clear)]] RillSyntax syntax =
       rill_syntax_parse(&source);
-  return evaluate(s, &source, &syntax);
+  return rill_session_evaluate(s, &source, &syntax);
 }
 static bool read_source(Session *s, int fd, RillBuffer *out) {
   char buf[16384];
@@ -214,7 +155,7 @@ static bool read_source(Session *s, int fd, RillBuffer *out) {
     int ready = poll(input, 2, -1);
     if (ready < 0 && errno != EINTR)
       return false;
-    if (events(s) & RILL_SIG_INT) {
+    if (rill_session_events(s) & RILL_SIG_INT) {
       s->library.exit_requested = true;
       s->library.exit_code = 130;
     }
@@ -253,7 +194,7 @@ static void configure(Session *s) {
   else {
     const char *home = rill_platform_env_get(&s->env, "HOME");
     if (!home || home[0] != '/') {
-      (void)diagnostic(
+      (void)rill_session_diagnostic(
           s, nullptr,
           (RillDiagnostic){.kind = RILL_IO,
                            .message = "configuration disabled: no absolute "
@@ -263,14 +204,14 @@ static void configure(Session *s) {
     ok = rill_text_format(&path, "%s/.config/rillsh/init.rill", home);
   }
   if (!ok) {
-    (void)out_of_memory(s);
+    (void)rill_session_memory(s);
     return;
   }
   [[gnu::cleanup(rill_platform_close)]] int fd =
       rill_platform_internal(open(path.data, O_RDONLY | O_CLOEXEC | O_NOCTTY));
   if (fd < 0) {
     if (errno != ENOENT)
-      (void)diagnostic(
+      (void)rill_session_diagnostic(
           s, nullptr,
           (RillDiagnostic){.kind = RILL_IO,
                            .code = errno,
@@ -282,7 +223,7 @@ static void configure(Session *s) {
     s->status = execute(s, path.data, source.data, source.size);
     s->interactive = true;
   } else
-    (void)diagnostic(
+    (void)rill_session_diagnostic(
         s, nullptr,
         (RillDiagnostic){.kind = RILL_IO,
                          .code = errno,
@@ -292,7 +233,7 @@ static bool prompt(Session *s, bool continuation) {
   [[gnu::cleanup(rill_text_clear)]] RillBuffer out = {};
   return rill_style_append(&out, palette(s, s->platform.tty),
                            continuation ? "... " : "rill> ", false) &&
-         write_all(s->platform.tty, out.data, out.size);
+         rill_session_write(s->platform.tty, out.data, out.size);
 }
 static int interactive(Session *s) {
   [[gnu::cleanup(rill_text_clear)]] RillBuffer input = {};
@@ -306,7 +247,7 @@ static int interactive(Session *s) {
       shown = true;
     }
     bool ready = rill_exec_poll(s->exec, 20, s->platform.tty);
-    unsigned bits = events(s);
+    unsigned bits = rill_session_events(s);
     if (bits & RILL_SIG_INT) {
       rill_text_clear(&input);
       shown = false;
@@ -337,8 +278,8 @@ static int interactive(Session *s) {
         shown = false;
         continue;
       }
-      if (rill_exec_outstanding(s->exec, false)) {
-        s->status = diagnostic(
+      if (s->contexts || rill_exec_outstanding(s->exec, false)) {
+        s->status = rill_session_diagnostic(
             s, nullptr,
             (RillDiagnostic){
                 .kind = RILL_PROCESS,
@@ -358,7 +299,7 @@ static int interactive(Session *s) {
     RillError error =
         rill_source_init(&source, "<stdin>", input.data, input.size);
     if (error != RILL_OK) {
-      s->status = diagnostic(
+      s->status = rill_session_diagnostic(
           s, nullptr,
           (RillDiagnostic){.kind = error,
                            .message = "source must be UTF-8 without NUL"});
@@ -369,7 +310,7 @@ static int interactive(Session *s) {
     [[gnu::cleanup(rill_syntax_clear)]] RillSyntax syntax =
         rill_syntax_parse(&source);
     if (syntax.state != RILL_INCOMPLETE) {
-      s->status = evaluate(s, &source, &syntax);
+      s->status = rill_session_evaluate(s, &source, &syntax);
       rill_text_clear(&input);
     }
     shown = false;
@@ -395,11 +336,11 @@ int rill_session_main(int argc, char **argv, char **environment) {
           "reusable job plans.\nUse ^command for external commands, | for byte "
           "pipelines, and |> for function application.\n--no-config skips "
           "interactive startup configuration.\n";
-      return write_all(1, help, strlen(help)) ? 0 : 1;
+      return rill_session_write(1, help, strlen(help)) ? 0 : 1;
     }
     if (options && !strcmp(a, "--version"))
-      return write_all(1, "Rill Shell " RILL_VERSION "\n",
-                       sizeof("Rill Shell " RILL_VERSION "\n") - 1)
+      return rill_session_write(1, "Rill Shell " RILL_VERSION "\n",
+                                sizeof("Rill Shell " RILL_VERSION "\n") - 1)
                  ? 0
                  : 1;
     if (options && !strcmp(a, "--no-config")) {
@@ -422,9 +363,9 @@ int rill_session_main(int argc, char **argv, char **environment) {
       continue;
     }
     if (options && !strcmp(a, "-c")) {
-      if (++i >= argc || i + 1 != argc)
+      if (i != argc - 2)
         goto usage;
-      command = argv[i];
+      command = argv[i + 1];
       break;
     }
     if (options && a[0] == '-')
@@ -442,7 +383,7 @@ int rill_session_main(int argc, char **argv, char **environment) {
   char *cwd = getcwd(nullptr, 0);
   if (!cwd && errno == ENOMEM) {
     rill_platform_env_clear(&s.env);
-    return out_of_memory(&s);
+    return rill_session_memory(&s);
   }
   bool env_ok = rill_platform_env_set(&s.env, "PWD", cwd);
   free(cwd);
@@ -453,7 +394,7 @@ int rill_session_main(int argc, char **argv, char **environment) {
   if (!rill_platform_init(&s.platform, s.interactive)) {
     rill_platform_env_clear(&s.env);
     const char *msg = "rillsh: cannot initialize signal/terminal services\n";
-    bool wrote = write_all(2, msg, strlen(msg));
+    bool wrote = rill_session_write(2, msg, strlen(msg));
     (void)wrote;
     return 1;
   }
@@ -473,6 +414,7 @@ int rill_session_main(int argc, char **argv, char **environment) {
                             .eval = s.eval,
                             .arguments = argv + argument_start,
                             .argument_count = (size_t)(argc - argument_start)};
+  rill_session_context_services(&s);
   int status = {};
   bool user_interactive = s.interactive;
   s.interactive = false;
@@ -494,13 +436,13 @@ int rill_session_main(int argc, char **argv, char **environment) {
                   : 0;
     [[gnu::cleanup(rill_text_clear)]] RillBuffer source = {};
     if (fd < 0 || !read_source(&s, fd, &source))
-      status =
-          s.library.exit_requested
-              ? s.library.exit_code
-              : diagnostic(&s, nullptr,
-                           (RillDiagnostic){.kind = RILL_IO,
-                                            .code = errno,
-                                            .message = "cannot read source"});
+      status = s.library.exit_requested
+                   ? s.library.exit_code
+                   : rill_session_diagnostic(
+                         &s, nullptr,
+                         (RillDiagnostic){.kind = RILL_IO,
+                                          .code = errno,
+                                          .message = "cannot read source"});
     else
       status = execute(&s, file ? file : "<stdin>", source.data, source.size);
     if (file)
@@ -509,11 +451,12 @@ int rill_session_main(int argc, char **argv, char **environment) {
   if (!s.interactive && !s.library.exit_requested &&
       rill_exec_outstanding(s.exec, true)) {
     if (!status)
-      status = diagnostic(
+      status = rill_session_diagnostic(
           &s, nullptr,
           (RillDiagnostic){.kind = RILL_PROCESS,
                            .message = "script ended with unjoined jobs"});
   }
+  rill_session_context_clear(&s);
   rill_exec_cancel_all(s.exec);
   while (rill_exec_outstanding(s.exec, false)) {
     (void)rill_exec_poll(s.exec, 20, -1);
@@ -528,7 +471,7 @@ int rill_session_main(int argc, char **argv, char **environment) {
 usage:
   {
     const char *msg = "rillsh: invalid options; use --help\n";
-    bool wrote = write_all(2, msg, strlen(msg));
+    bool wrote = rill_session_write(2, msg, strlen(msg));
     (void)wrote;
     return 2;
   }

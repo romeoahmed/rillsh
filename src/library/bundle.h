@@ -1,4 +1,5 @@
-/** @file
+/**
+ * @file
  * @brief Versioned standard-library sources embedded with the executable.
  */
 #pragma once

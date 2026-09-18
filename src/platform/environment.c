@@ -1,3 +1,11 @@
+/**
+ * @file
+ * @brief Own the launch environment and transactional directory changes.
+ *
+ * Environment updates copy bytes before replacing entries. Directory changes
+ * prepare a separate map and retain the old directory for rollback, publishing
+ * PWD and OLDPWD only after bookkeeping succeeds.
+ */
 #include "diagnostic.h"
 #include "posix.h"
 #include <errno.h>

@@ -1,4 +1,5 @@
-/** @file
+/**
+ * @file
  * @brief Owned byte buffers, strict UTF-8, and Unicode display properties.
  */
 #pragma once
@@ -46,6 +47,11 @@ bool rill_text_format(RillBuffer *buffer, const char *format, ...);
  * The source must not alias the buffer. Failure leaves the buffer unchanged.
  */
 [[nodiscard]] bool rill_text_escape(RillBuffer *buffer, RillBytes bytes);
+/**
+ * @brief Shorten the payload, retaining storage and its trailing NUL.
+ * @pre size is no greater than the current payload size.
+ */
+void rill_text_truncate(RillBuffer *buffer, size_t size);
 /** @brief Release storage and reset the buffer. */
 void rill_text_clear(RillBuffer *buffer);
 /**

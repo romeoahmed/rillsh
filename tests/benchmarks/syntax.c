@@ -1,3 +1,11 @@
+/**
+ * @file
+ * @brief Measure repeated parsing and execution of wide statement sequences.
+ *
+ * Use the production source, parser, and evaluator with no external effects.
+ * Meson reports whole-process duration, including ownership transfer and
+ * cleanup.
+ */
 #include "syntax/syntax.h"
 #include "../unit/test.h"
 #include "diagnostic.h"

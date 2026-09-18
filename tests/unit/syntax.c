@@ -1,3 +1,11 @@
+/**
+ * @file
+ * @brief Whole-entry parsing and source-ownership regressions.
+ *
+ * Matrices distinguish complete, incomplete, and invalid input. Depth and
+ * ownership cases exercise malformed nesting and release of the original
+ * source.
+ */
 #include "syntax/syntax.h"
 #include "diagnostic.h"
 #include "source.h"

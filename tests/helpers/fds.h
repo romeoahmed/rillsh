@@ -1,3 +1,7 @@
+/**
+ * @file
+ * @brief Descriptor inventory shared by process test fixtures.
+ */
 #pragma once
 #include <dirent.h>
 #include <errno.h>

@@ -1,0 +1,1 @@
+let make=fn(x)=>fn(y)=>[x,y,'same','same']; make(1)(2)

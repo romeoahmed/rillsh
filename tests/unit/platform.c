@@ -1,3 +1,10 @@
+/**
+ * @file
+ * @brief Environment, directory, signal, and readiness contracts.
+ *
+ * Verify byte preservation, transactional state, inherited signal masks, and
+ * descriptor readiness against actual POSIX services.
+ */
 #include "../helpers/fds.h"
 #include "diagnostic.h"
 #include "platform/posix.h"

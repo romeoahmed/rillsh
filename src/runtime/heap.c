@@ -1,3 +1,20 @@
+/**
+ * @file
+ * @brief Nonmoving tracing GC, retained-byte budgets, and escape checks.
+ *
+ * Allocation may collect before copying inputs, so borrowed heap data needs
+ * registered roots. Marking and graph checks use intrusive worklists; neither
+ * recurses through the object graph. OS resources have explicit owners
+ * elsewhere.
+ *
+ * @verbatim
+ * registered roots --> initialized Values --> traced object edges
+ * heap object list ------------------------> sweep unreachable objects
+ * @endverbatim
+ *
+ * Object headers, Value slots, optional indexes, and inline bytes share an
+ * allocation. Kind-specific external storage is charged and released with it.
+ */
 #include "diagnostic.h"
 #include "private.h"
 #include "runtime.h"
@@ -19,12 +36,21 @@ struct RillBudget {
 };
 bool rill_runtime_is_object(RillValue v) { return v.kind >= RILL_V_STRING; }
 void rill_runtime_root(RillHeap *h, RillRoot *r, const RillValue *v, size_t n) {
-  *r = (RillRoot){h->roots, v, n};
+  *r = (RillRoot){.previous = h->roots, .values = v, .count = n};
+  if (h->roots)
+    h->roots->next = r;
   h->roots = r;
 }
 void rill_runtime_unroot(RillHeap *h, RillRoot *r) {
-  assert(h->roots == r);
-  h->roots = r->previous;
+  if (r->next)
+    r->next->previous = r->previous;
+  else {
+    assert(h->roots == r);
+    h->roots = r->previous;
+  }
+  if (r->previous)
+    r->previous->next = r->next;
+  *r = (RillRoot){};
 }
 static void mark(RillValue v, RillObject **gray, bool epoch) {
   if (!rill_runtime_is_object(v) || !v.as.object ||
@@ -69,6 +95,8 @@ void rill_runtime_collect(RillHeap *h) {
     } else {
       *link = o->next;
       h->bytes -= o->allocation;
+      if (o->kind == RILL_V_STREAM)
+        --h->scoped;
       if (o->kind == RILL_V_CODE && o->code)
         rill_eval_code_free(o->code);
       if (o->kind == RILL_V_BUDGET && o->budget) {
@@ -140,6 +168,8 @@ RillValue rill_runtime_object(RillHeap *h, RillValueKind kind,
     for (size_t i = 0; i < n; ++i)
       o->values[i] = (RillValue){};
   h->objects = o;
+  if (kind == RILL_V_STREAM)
+    ++h->scoped;
   h->bytes = total;
   RillValue out = {.kind = kind, .as.object = o};
   if (indexed && v && !rill_runtime_record_finish(out))
@@ -254,4 +284,59 @@ RillError rill_runtime_charge(RillHeap *h, RillValue budget, RillValue value) {
         status = charge(h, owner, o->budget->objects[i], &gray);
   }
   return status;
+}
+
+typedef struct {
+  RillObject *first, *last;
+} Walk;
+static void enqueue(Walk *walk, RillObject *object) {
+  if (!object || object->visiting)
+    return;
+  object->visiting = true;
+  object->gray = nullptr;
+  if (walk->last)
+    walk->last->gray = object;
+  else
+    walk->first = object;
+  walk->last = object;
+}
+RillError rill_runtime_persistent(RillHeap *heap, RillValue value) {
+  if (!heap->scoped || !rill_runtime_is_object(value))
+    return RILL_OK;
+  Walk walk = {};
+  enqueue(&walk, value.as.object);
+  RillError error = RILL_OK;
+  // Keep the complete discovery chain for resetting marks, even on early exit.
+  // No safepoint or callback may reuse gray while this queue is active.
+  for (RillObject *o = walk.first; o; o = o->gray) {
+    if (o->kind == RILL_V_STREAM) {
+      error = RILL_STREAM_ESCAPE;
+      break;
+    }
+    if (o->kind == RILL_V_STAGE && rill_runtime_is_object(o->metadata))
+      enqueue(&walk, o->metadata.as.object);
+    for (size_t i = 0; i < o->count; ++i)
+      if (rill_runtime_is_object(o->values[i]))
+        enqueue(&walk, o->values[i].as.object);
+    if (o->kind == RILL_V_BUDGET && o->budget)
+      for (size_t i = 0; i < o->budget->capacity; ++i)
+        enqueue(&walk, o->budget->objects[i]);
+  }
+  while (walk.first) {
+    RillObject *o = walk.first;
+    walk.first = o->gray;
+    o->visiting = false;
+    o->gray = nullptr;
+  }
+  return error;
+}
+
+RillError rill_runtime_charge_storage(RillValue value, size_t bytes) {
+  assert(value.kind == RILL_V_BUDGET);
+  struct RillBudget *budget = value.as.object->budget;
+  size_t total = {};
+  if (ckd_add(&total, budget->bytes, bytes) || total > budget->limit)
+    return RILL_LIMIT;
+  budget->bytes = total;
+  return RILL_OK;
 }

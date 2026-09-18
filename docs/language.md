@@ -1,9 +1,9 @@
 # Language
 
 This document specifies the first-release target language. [Execution](execution.md)
-defines process and stream effects. The non-Stream language is implemented; Stream
-lifetimes and cleanup scopes below belong to stage 3. [Current status](status.md)
-records coverage.
+defines process and stream effects. The language and scoped Stream lifetimes are
+implemented; [current status](status.md) records evidence and remaining presentation
+work.
 
 ## Semantic core
 
@@ -18,23 +18,23 @@ implicit laziness, text coercion, truthiness, or string-to-code conversion.
 
 ## Values
 
-| Kind          | Contract                                                               |
-| ------------- | ---------------------------------------------------------------------- |
-| Unit          | `()`; successful operations with no data result                        |
-| Null          | `null`; explicit absence in data, including JSON                       |
-| Bool          | `true` or `false`; the only accepted conditional values                |
-| Int           | Signed 64-bit integer; checked arithmetic                              |
-| Float         | IEEE binary64; finite results only                                     |
-| String        | Valid UTF-8, explicit byte length, possibly containing NUL             |
-| Bytes         | Arbitrary bytes with explicit length                                   |
-| Path          | POSIX path bytes without NUL; no automatic Unicode normalization       |
-| List          | Immutable, ordered sequence of values                                  |
-| Record        | Immutable mapping from unique String keys to values                    |
-| ADT value     | Nominal type identity, constructor identity, immutable payload         |
-| Function      | First-class unary callable, including native and constructor functions |
-| JobPlan       | Immutable external execution description                               |
-| Job handle    | Opaque, session-owned reference to a live or completed job             |
-| Stream handle | Opaque, scoped, single-consumer resource reference                     |
+| Kind | Contract |
+| --- | --- |
+| Unit | `()`; successful operations with no data result |
+| Null | `null`; explicit absence in data, including JSON |
+| Bool | `true` or `false`; the only accepted conditional values |
+| Int | Signed 64-bit integer; checked arithmetic |
+| Float | IEEE binary64; finite results only |
+| String | Valid UTF-8, explicit byte length, possibly containing NUL |
+| Bytes | Arbitrary bytes with explicit length |
+| Path | POSIX path bytes without NUL; no automatic Unicode normalization |
+| List | Immutable, ordered sequence of values |
+| Record | Immutable mapping from unique String keys to values |
+| ADT value | Nominal type identity, constructor identity, immutable payload |
+| Function | First-class unary callable, including native and constructor functions |
+| JobPlan | Immutable external execution description |
+| Job handle | Opaque, session-owned reference to a live or completed job |
+| Stream handle | Opaque, scoped, single-consumer resource reference |
 
 Resource handles do not expose OS handles. A Job handle may be retained in persistent
 session data; a Stream handle cannot outlive its execution scope. Stream escape rules
@@ -276,17 +276,17 @@ constructor patterns, and nesting. There are no view patterns, regex patterns, i
 pinning of existing variables, user-defined matchers, or pattern alternatives. The same
 pattern language serves `match`, `let`, and function parameters.
 
-| Pattern           | Meaning                                                 |
-| ----------------- | ------------------------------------------------------- |
-| `name`            | Bind a fresh local name, regardless of an outer binding |
-| `[a, b]`          | Exactly two elements                                    |
-| `[head, ..tail]`  | At least one element; bind the remaining list           |
-| `{name, size}`    | Anonymous record with exactly these keys                |
-| `{name, ..}`      | Anonymous record containing `name`; ignore other keys   |
-| `{name, ..rest}`  | Bind the remaining fields as an anonymous record        |
-| `{name: n}`       | Match the key `name`, bind `n`                          |
-| `Point {x, ..}`   | Point value containing the declared field `x`           |
-| `Outcome.Pending` | The fieldless constructor's singleton                   |
+| Pattern | Meaning |
+| --- | --- |
+| `name` | Bind a fresh local name, regardless of an outer binding |
+| `[a, b]` | Exactly two elements |
+| `[head, ..tail]` | At least one element; bind the remaining list |
+| `{name, size}` | Anonymous record with exactly these keys |
+| `{name, ..}` | Anonymous record containing `name`; ignore other keys |
+| `{name, ..rest}` | Bind the remaining fields as an anonymous record |
+| `{name: n}` | Match the key `name`, bind `n` |
+| `Point {x, ..}` | Point value containing the declared field `x` |
+| `Outcome.Pending` | The fieldless constructor's singleton |
 
 Only one rest pattern is allowed, at the end. Shorthand `name` in a record pattern means
 `name: name`. Nominal patterns reject keys not in their descriptor. Anonymous record
@@ -300,9 +300,9 @@ not escape. If no branch matches, evaluation raises MatchError.
 Names cannot occur twice in a pattern. `[x, x]` is invalid; use `[x, y] if x == y`. List
 rest views must not copy the full suffix on every recursive call. Matching can allocate
 bindings but cannot read a stream, perform field getters, or execute constructor code.
-No exhaustiveness guarantee is made for dynamic matches. Diagnose provably redundant
-arms when possible; a potentially incomplete match still has the runtime MatchError
-contract. Warning analysis must not evaluate guards or constructor expressions.
+Dynamic matches have no exhaustiveness guarantee. A potentially incomplete match retains
+the runtime MatchError contract. Redundancy warnings are not currently implemented; any
+future analysis must avoid evaluating guards or constructor paths.
 
 ## Errors and cancellation
 
@@ -374,22 +374,21 @@ machinery. There is no special command namespace for language functions.
 
 ### Pure library surface
 
-`std:core`, `std:seq`, `std:text`, and `std:process` are bundled modules. The prelude
-also exposes their public operations directly. `std:fs` and `std:json` are planned for
-stage 3. The table below supplements the sequence/process contracts in
-[execution](execution.md#core-library-contracts).
+The prelude exposes the bundled modules' public operations directly. These pure
+operations supplement the [sequence and process
+contracts](execution.md#core-library-contracts).
 
-| Operations                                               | Contract                                                                   |
-| -------------------------------------------------------- | -------------------------------------------------------------------------- |
-| `identity`, `compose(f, g, value)`                       | Ordinary unary functions; composition applies `g` before `f`               |
-| `add`, `subtract`, `multiply`, `divide`, `equal`, `less` | Curried equivalents of the corresponding operators                         |
-| `int`, `float`                                           | Numeric conversion; Float-to-Int truncates toward zero and checks range    |
-| `text`                                                   | Explicit String conversion for String, Bool, Int, and Float                |
-| `length`                                                 | List elements or anonymous Record fields; text requires explicit units     |
-| `byte_length`, `scalars`                                 | Encoded byte count; String to a List of one-scalar Strings                 |
-| `encode_utf8`, `decode_utf8`                             | String/Bytes conversion with strict UTF-8 validation                       |
-| `starts_with`, `ends_with`                               | String prefix/suffix predicates, configuration first                       |
-| `concat`, `reverse`, `drop`                              | Explicit List/Bytes concatenation; List reversal and shared suffix slicing |
+| Operations | Contract |
+| --- | --- |
+| `identity`, `compose(f, g, value)` | Ordinary unary functions; composition applies `g` before `f` |
+| `add`, `subtract`, `multiply`, `divide`, `equal`, `less` | Curried equivalents of the corresponding operators |
+| `int`, `float` | Numeric conversion; Float-to-Int truncates toward zero and checks range |
+| `text` | Explicit String conversion for String, Bool, Int, and Float |
+| `length` | List elements or anonymous Record fields; text requires explicit units |
+| `byte_length`, `scalars` | Encoded byte count; String to a List of one-scalar Strings |
+| `encode_utf8`, `decode_utf8` | String/Bytes conversion with strict UTF-8 validation |
+| `starts_with`, `ends_with` | String prefix/suffix predicates, configuration first |
+| `concat`, `reverse`, `drop` | Explicit List/Bytes concatenation; List reversal and shared suffix slicing |
 
 Sequence callbacks and currying are authored in Rill. C primitives handle checked
 numeric conversion, representation access, stable sorting, and OS effects. The private

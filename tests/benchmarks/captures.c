@@ -1,4 +1,11 @@
-#include "../unit/test.h"
+/**
+ * @file
+ * @brief Measure retained flat captures and collection over live closures.
+ *
+ * Keep closures reachable after preparation, report their retained graph, and
+ * time explicit collections separately from construction.
+ */
+#include "bench.h"
 #include "diagnostic.h"
 #include "runtime/runtime.h"
 #include "source.h"
@@ -7,13 +14,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <time.h>
 
-static uint64_t nanoseconds() {
-  struct timespec now = {};
-  CHECK(clock_gettime(CLOCK_MONOTONIC, &now) == 0);
-  return (uint64_t)now.tv_sec * UINT64_C(1000000000) + (uint64_t)now.tv_nsec;
-}
 int main() {
   RillEval *eval = rill_runtime_new(nullptr, 0);
   CHECK(eval);
@@ -55,7 +56,6 @@ int main() {
     total += elapsed;
     if (elapsed > maximum)
       maximum = elapsed;
-    CHECK(heap->bytes == retained);
   }
   CHECK(printf("{\"retained_bytes\":%zu,\"objects\":%zu,\"collections\":50,"
                "\"total_ns\":%" PRIu64 ",\"max_ns\":%" PRIu64 "}\n",

@@ -1,4 +1,5 @@
-/** @file
+/**
+ * @file
  * @brief Private pure primitive dispatch; callbacks remain language
  * applications.
  */

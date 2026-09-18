@@ -14,7 +14,7 @@ manifests own exact pins; [status](status.md) records the validation checkpoint.
   interfaces without adopting POSIX shell syntax or claiming full certification.
 - [XDG Base Directory 0.8](https://specifications.freedesktop.org/basedir-spec/0.8/):
   configuration and the planned persistent-state layout on both platforms.
-- [RFC 8259](https://www.rfc-editor.org/rfc/rfc8259): JSON syntax. Rill's planned codec
+- [RFC 8259](https://www.rfc-editor.org/rfc/rfc8259): JSON syntax. Rill's codec
   additionally rejects duplicate keys and out-of-range numbers.
 - [Unicode 18.0.0](https://www.unicode.org/Public/18.0.0/ucd/ReadMe.txt),
   [UAX #29 revision 49](https://www.unicode.org/reports/tr29/tr29-49.html),
@@ -35,7 +35,8 @@ for Linux-specific behavior. Kernel-internal APIs are not this shell's interface
 
 - [Meson reference](https://mesonbuild.com/Reference-manual.html),
   [built-in options](https://mesonbuild.com/Builtin-options.html),
-  [wraps](https://mesonbuild.com/Wrap-dependency-system-manual.html), and
+  [wraps](https://mesonbuild.com/Wrap-dependency-system-manual.html),
+  [1.12 release notes](https://mesonbuild.com/Release-notes-for-1-12-0.html), and
   [unit tests](https://mesonbuild.com/Unit-tests.html): native build and test facilities.
 - [GCC extensions](https://gcc.gnu.org/onlinedocs/gcc/C-Extensions.html),
   [attributes](https://gcc.gnu.org/onlinedocs/gcc/Common-Attributes.html), and
@@ -82,33 +83,36 @@ references, not requirements to add badges, banners, or duplicate documentation.
 
 ## Language and interaction ideas
 
-| Source                                                                                                                                                                                                                              | Idea retained                                                      |
-| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| [R7RS](https://standards.scheme.org/r7rs-html5/index.html)                                                                                                                                                                          | First-class functions, lexical scope, proper tail recursion        |
-| [Chez Scheme editor](https://cisco.github.io/ChezScheme/csug10.0/use.html)                                                                                                                                                          | Whole-expression input and history                                 |
-| [Haskell expressions](https://www.haskell.org/onlinereport/haskell2010/haskellch3.html)                                                                                                                                             | Unary application, currying, patterns; Rill evaluates strictly     |
-| [Nushell PipelineData](https://github.com/nushell/nushell/blob/main/crates/nu-protocol/src/pipeline/pipeline_data.rs) and [ByteStream](https://github.com/nushell/nushell/blob/main/crates/nu-protocol/src/pipeline/byte_stream.rs) | Reusable values versus consumable streams; process byte transport  |
-| [fish reader](https://github.com/fish-shell/fish-shell/blob/master/src/reader/reader.rs) and [highlighting](https://github.com/fish-shell/fish-shell/blob/master/src/highlight/highlight.rs)                                        | Responsive input, stale-result rejection, nonblocking highlighting |
+- [R7RS](https://standards.scheme.org/r7rs-html5/index.html): first-class functions,
+  lexical scope, and proper tail recursion.
+- [Chez Scheme editor](https://cisco.github.io/ChezScheme/csug10.0/use.html):
+  whole-expression input and history.
+- [Haskell expressions](https://www.haskell.org/onlinereport/haskell2010/haskellch3.html):
+  unary application, currying, and patterns; Rill evaluates strictly.
+- Nushell's [PipelineData](https://github.com/nushell/nushell/blob/main/crates/nu-protocol/src/pipeline/pipeline_data.rs)
+  and [ByteStream](https://github.com/nushell/nushell/blob/main/crates/nu-protocol/src/pipeline/byte_stream.rs):
+  values, consumable streams, and process bytes.
+- fish's [reader](https://github.com/fish-shell/fish-shell/blob/master/src/reader/reader.rs)
+  and [highlighting](https://github.com/fish-shell/fish-shell/blob/master/src/highlight/highlight.rs):
+  responsive input and rejection of stale asynchronous results.
 
-These are design references, not compatibility promises.
+These inform specific choices; they are not compatibility promises.
 
 ## Runtime memory design
 
-[V8's collector overview](https://v8.dev/blog/trash-talk) explains generational roots,
-write barriers, evacuation, and compaction tradeoffs. It informs the comparison in
-[architecture](architecture.md); Rill retains a single-threaded, nonmoving collector.
-[Meson benchmarks](https://mesonbuild.com/Unit-tests.html#benchmarks) provide separate,
-serial performance runs. Neither source prescribes a universal allocator or collector
-for Rill's workloads.
+The [runtime design](architecture.md#values-and-memory) owns the selected algorithms.
+These sources provide concrete implementations and alternative tradeoffs:
 
-[Lua 5.4 parser and upvalue analysis](https://www.lua.org/source/5.4/lparser.c.html) and
-[closure/prototype ownership](https://www.lua.org/source/5.4/lfunc.c.html) illustrate
-separating function code from closure instances. Rill uses code-owned free-name
-metadata, not Lua's bytecode or mutable upvalue model. The [LLVM Programmer's
-Manual](https://llvm.org/docs/ProgrammersManual.html) discusses bump allocation for
-groups of objects sharing a lifetime; Rill uses small typed syntax blocks without
-importing a general allocator framework.
-
+- [V8 collector overview](https://v8.dev/blog/trash-talk) and
+  [Lua's collector](https://www.lua.org/source/5.5/lgc.c.html): generations, barriers,
+  relocation, and incremental tracing.
+- [Lua parser](https://www.lua.org/source/5.5/lparser.c.html) and
+  [closure ownership](https://www.lua.org/source/5.5/lfunc.c.html): separate function
+  code, lexical analysis, and closure instances.
+- [LLVM Programmer's Manual](https://llvm.org/docs/ProgrammersManual.html): allocation
+  for objects sharing a lifetime.
+- [Cornell amortized analysis](https://www.cs.cornell.edu/courses/cs3110/2014fa/lectures/25/lec25.html):
+  geometric buffer growth; graph charging and GC have separate costs.
 - [Chez Scheme storage management](https://cisco.github.io/ChezScheme/csug/smgmt.html),
   [collector source](https://github.com/cisco/ChezScheme/blob/main/c/gc.c), and
   [allocation source](https://github.com/cisco/ChezScheme/blob/main/c/alloc.c): generations,
@@ -130,9 +134,31 @@ importing a general allocator framework.
 - Wilson et al., [Dynamic Storage Allocation: A Survey and Critical Review](https://csapp.cs.cmu.edu/3e/docs/dsa.pdf):
   allocation policy, fragmentation, and realistic workload evaluation. Requested bytes,
   resident memory, allocation traffic, and locality are distinct measurements.
+- Leijen, Zorn, and de Moura, [Mimalloc: Free List Sharding in Action](https://www.microsoft.com/en-us/research/publication/mimalloc-free-list-sharding-in-action/):
+  page-local free lists and allocator locality. Rill retains libc allocation; fewer
+  allocations do not by themselves establish fewer CPU cache misses.
+- Cornell, [Graph Traversals](https://courses.cis.cornell.edu/courses/cs2110/2026sp/lectures/lec22/):
+  discovery marking bounds shared/cyclic reachability to vertex-and-edge work. Rill's
+  temporary intrusive queue uses this principle without a separate visited hash table.
 - Blackburn and McKinley, [Immix](https://www.mmtk.io/assets/pubs/immix-pldi-2008.pdf):
   block/line allocation, recycling, fragmentation, and opportunistic evacuation explain
   why a region allocator requires more than a bump pointer.
 - Okasaki, [Purely Functional Data Structures](https://www.cs.cmu.edu/~rwh/students/okasaki.pdf):
   persistent versions require appropriate amortized reasoning; array, tree, and lazy
   representations have different costs. Rill retains strict immutable arrays and slices.
+
+## Bytecode and program analysis
+
+- Shi et al., [Virtual Machine Showdown: Stack Versus Registers](https://www.cs.tufts.edu/comp/150FP/archive/david-gregg/vm-showdown.pdf):
+  dispatch count, operand traffic, and instruction size tradeoffs. Its measured JVM
+  workloads do not predict Rill's speedup.
+- [Lua 5.5 execution loop](https://www.lua.org/source/5.5/lvm.c.html) and
+  [instruction formats](https://www.lua.org/source/5.5/lopcodes.h.html): register
+  operands, calls, and interpreter state. Rill borrows design questions, not Lua's
+  language semantics or instruction encoding.
+- Cornell, [Functional programming and closure conversion](https://www.cs.cornell.edu/courses/cs4120/2026sp/notes.html?id=functional):
+  lexical environments, escaping bindings, and closure representation. Rill's cached
+  free-name summaries preserve exact captures without adding an optimizer framework.
+- Tufts, [VM garbage collection](https://www.cs.tufts.edu/cs/106/modules/11gc.html):
+  register roots, liveness, relocation, and interior instruction pointers. A bytecode
+  conversion must preserve these ownership obligations as well as evaluation results.

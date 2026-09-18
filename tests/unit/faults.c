@@ -1,9 +1,19 @@
+/**
+ * @file
+ * @brief Allocation and launch failure recovery using production code.
+ *
+ * Meson compiles selected subject files with test-only allocation/POSIX
+ * aliases. These wrappers fail controlled operations while the harness keeps
+ * real cleanup services. Scenarios verify errors, retained state, and child
+ * reaping.
+ */
 #include "../helpers/fds.h"
 #include "../helpers/supervisor.h"
 #include "diagnostic.h"
 #include "exec/exec.h"
 #include "library/bundle.h"
 #include "library/library.h"
+#include "library/stream.h"
 #include "platform/posix.h"
 #include "runtime/runtime.h"
 #include "source.h"
@@ -541,14 +551,27 @@ static RillEvalEvent evaluate_library(RillLibrary *library,
   rill_runtime_begin(library->eval, syntax);
   RillNativePending pending = {};
   for (;;) {
+    if (pending.job) {
+      (void)rill_exec_poll(library->exec, 0, -1);
+      if (!rill_library_progress(library, &pending))
+        continue;
+    }
+    if (!rill_stream_progress(library))
+      continue;
     RillEvalEvent event = rill_runtime_step(library->eval);
+    if (event.state == RILL_EVAL_CLEANUP) {
+      rill_stream_unwind(library, event.native, event.value);
+      continue;
+    }
+    if (event.state == RILL_EVAL_CALLBACK) {
+      rill_stream_callback(library, event.value);
+      continue;
+    }
     if (event.state == RILL_EVAL_YIELD)
       continue;
     if (event.state != RILL_EVAL_NATIVE)
       return event;
-    // These cases construct data/plans or inspect an already completed job.
-    CHECK(rill_library_call(library, &pending, event));
-    CHECK(!pending.job);
+    (void)rill_library_call(library, &pending, event);
   }
 }
 static void check_library(const char *child) {
@@ -573,6 +596,15 @@ static void check_library(const char *child) {
   CHECK(rill_exec_cancelled(job));
   size_t native_count = {};
   const RillNative *natives = rill_library_natives(&native_count);
+  [[gnu::cleanup(rill_text_clear)]] RillBuffer nested = {}, deep_json = {};
+  for (size_t i = 0; i < 40; ++i)
+    CHECK(rill_text_append(&nested, "{\"x\":", 5));
+  CHECK(rill_text_append(&nested, "0", 1));
+  for (size_t i = 0; i < 40; ++i)
+    CHECK(rill_text_append(&nested, "}", 1));
+  CHECK(rill_text_format(&deep_json,
+                         "from_json(to_json(from_json('%s')))==from_json('%s')",
+                         nested.data, nested.data));
   const struct {
     const char *name, *source;
     bool exports;
@@ -597,9 +629,43 @@ static void check_library(const char *child) {
        false},
       {"record rest", "match {a:1,b:[2,3],c:4} {{a,..rest}=>rest.b==[2,3]}",
        false},
+      {"nested captures and constants",
+       "let factory=fn(x)=>fn(y)=>fn(z)=>[x,y,z,'same','same'];"
+       "let saved=factory(1)(2); saved(3)==[1,2,3,'same','same']",
+       false},
+      {"record update",
+       "let base={a:1,b:2,c:3,d:4,e:5,f:6,g:7,h:8,i:9,j:10,k:11,l:12,"
+       "m:13,n:14,o:15,p:16,q:17}; let copy=base with {a:[42],q:0};"
+       "copy.a==[42] and copy.q==0 and base.a==1 and base.q==17",
+       false},
       {"sort",
        "sort_by(fn(x)=>x.k,[{k:2,v:'a'},{k:1,v:'b'},{k:2,v:'c'}])[2].v=='c'",
        false},
+      {"stream callbacks",
+       "do {let value=chunks(encode_utf8(\"a\\nb\\n\")) |> lines |> "
+       "map(fn(x)=>x+'!') |> collect; value==['a!','b!']}",
+       false},
+      {"filled stream collection",
+       "do {let value=chunks(encode_utf8(\"a\\nb\\nc\\n\")) |> lines |> "
+       "map(fn(x)=>{item:x}) |> collect_with({max_items:3});"
+       "value==[{item:'a'},{item:'b'},{item:'c'}]}",
+       false},
+      {"nested stream callbacks",
+       "do {let value=chunks(encode_utf8('x')) |> map(fn(x)=>chunks(x) |> "
+       "collect_bytes) |> collect; value==[encode_utf8('x')]}",
+       false},
+      {"resource checkpoint",
+       "do {let kept=chunks(encode_utf8('x')); "
+       "let result=attempt(fn()=>do {let lost=chunks(encode_utf8('y')); "
+       "raise(error('Example','failed'))}); "
+       "match result {Result.Err {error}=>error.kind=='Example' and "
+       "collect_bytes(kept)==encode_utf8('x'),_=>false}}",
+       false},
+      {"JSON conversion",
+       "from_json(to_json({a:[1,1.0,null,true,'x']}))=={a:[1,1.0,null,true,'x']"
+       "}",
+       false},
+      {"deep JSON conversion", deep_json.data, false},
       {"Unicode scalars", "scalars('\u754ca')==['\u754c','a']", false}};
   for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); ++i) {
     bool complete = false;
@@ -646,6 +712,12 @@ static void check_library(const char *child) {
       fail_once = false;
       complete = !allocation_failed;
       if (complete) {
+        if (event.state != RILL_EVAL_DONE || event.value.kind != RILL_V_BOOL ||
+            !event.value.as.integer)
+          (void)fprintf(
+              stderr, "library case %s: event %d, value %d, error %s\n",
+              cases[i].name, (int)event.state, (int)event.value.kind,
+              event.diagnostic.message ? event.diagnostic.message : "none");
         CHECK(event.state == RILL_EVAL_DONE &&
               event.value.kind == RILL_V_BOOL && event.value.as.integer);
       } else {
@@ -656,6 +728,9 @@ static void check_library(const char *child) {
         CHECK(event.state == RILL_EVAL_ERROR &&
               event.diagnostic.kind == RILL_MEMORY);
       }
+      rill_stream_cancel(&library);
+      CHECK(!rill_stream_live(&library));
+      rill_stream_clear(&library);
       rill_runtime_free(eval);
     }
   }
@@ -664,6 +739,28 @@ static void check_library(const char *child) {
   rill_platform_env_clear(&environment);
   rill_platform_clear(&platform);
 }
+static void check_escape_without_allocation() {
+  RillHeap heap = {.stress = true};
+  RillValue values[2] = {};
+  RillRoot root = {};
+  rill_runtime_root(&heap, &root, values, 2);
+  values[0] =
+      rill_runtime_object(&heap, RILL_V_STREAM, nullptr, 0, nullptr, 0, 0);
+  values[1] =
+      rill_runtime_object(&heap, RILL_V_CELL, nullptr, 1, nullptr, 0, 0);
+  CHECK(values[0].kind == RILL_V_STREAM && values[1].kind == RILL_V_CELL);
+  allocation_budget = 0;
+  allocation_failed = false;
+  CHECK(rill_runtime_persistent(&heap, values[1]) == RILL_OK);
+  values[1].as.object->values[0] = values[0];
+  CHECK(rill_runtime_persistent(&heap, values[1]) == RILL_STREAM_ESCAPE);
+  values[1].as.object->values[0] = values[1];
+  CHECK(rill_runtime_persistent(&heap, values[1]) == RILL_OK);
+  CHECK(!allocation_failed);
+  allocation_budget = -1;
+  rill_runtime_unroot(&heap, &root);
+  rill_runtime_heap_clear(&heap);
+}
 int main(int argc, char **argv) {
   CHECK(argc == 3);
   if (!strcmp(argv[2], "memory")) {
@@ -671,6 +768,7 @@ int main(int argc, char **argv) {
     check_runtime();
     check_modules();
     check_equality_allocations();
+    check_escape_without_allocation();
     return 0;
   }
   CHECK(atexit(cleanup_launch) == 0);

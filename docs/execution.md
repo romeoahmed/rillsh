@@ -1,19 +1,18 @@
 # Execution
 
 This document specifies the first-release target for processes, streams, and effectful
-library operations. Application order follows [language](language.md). Plans, external
-jobs, reports, and List operations are implemented. Streams, public capture/codec APIs,
-and suspended language continuations belong to stage 3; examples using those features
-are design examples. [Current status](status.md) records coverage.
+library operations, all available through scripts and canonical interaction.
+[Language](language.md) defines application order; [current status](status.md) records
+validation and remaining work.
 
 ## Plans, jobs, reports, and streams
 
-| Object    | Meaning                                         | Lifetime                       |
-| --------- | ----------------------------------------------- | ------------------------------ |
-| JobPlan   | Immutable external pipeline description         | Ordinary GC-managed value      |
-| Job       | Process group, children, descriptors, state     | Explicit session/job ownership |
-| JobReport | Immutable completion data for all stages        | Ordinary GC-managed value      |
-| Stream    | Single-consumer traversal with possible failure | Explicit execution scope       |
+| Object | Meaning | Lifetime |
+| --- | --- | --- |
+| JobPlan | Immutable external pipeline description | Ordinary GC-managed value |
+| Job | Process group, children, descriptors, state | Explicit session/job ownership |
+| JobReport | Immutable completion data for all stages | Ordinary GC-managed value |
+| Stream | Single-consumer traversal with possible failure | Explicit execution scope |
 
 A JobPlan contains evaluated, validated command arguments and can be launched
 repeatedly. Each launch creates a distinct Job. A JobReport retains completion data
@@ -68,6 +67,10 @@ including across stages. Creating a plan does not launch its described processes
 its redirection files. Embedded expressions are ordinary strict expressions and may
 themselves have effects; plan syntax does not make them pure.
 
+Argument diagnostics use zero-based stage and `argv` indices, with the executable at
+index zero. Redirections do not occupy argument indices; each expanded List element
+does. Invalid redirection paths are reported separately from argument failures.
+
 `command(executable, arguments)` constructs the same one-stage plan programmatically.
 `pipe(left, right)` composes plans and preserves their per-stage policies. There is no
 AST re-parsing. `with_cwd(path, plan)` and `with_env(record, plan)` return new plans
@@ -100,18 +103,18 @@ redirection does not promise atomic file replacement.
 
 ## Execution functions
 
-| Function         | Behavior                                                                                                |
-| ---------------- | ------------------------------------------------------------------------------------------------------- |
-| `run(plan)`      | Foreground execution, inherited terminal streams; check all stage policies; return Unit                 |
-| `capture(plan)`  | Foreground execution, concurrent stdout/stderr capture; return report and Bytes; nonzero exit is data   |
-| `stream(plan)`   | Foreground job source producing stdout Bytes chunks; stderr inherited; completion checked at stream end |
-| `start(plan)`    | Start external-only background job; return session Job handle                                           |
-| `wait(handle)`   | Wait for a background job's report; nonzero exit is data; a stopped job raises JobStopped               |
-| `check(report)`  | Reject cancelled or failed reports; otherwise Unit                                                      |
-| `fg(handle)`     | Resume a job/context; return Unit for an external-only checked job or the resumed evaluation's result   |
-| `bg(handle)`     | Resume a stopped external-only job without terminal ownership; return Unit                              |
-| `cancel(handle)` | Cancel and await cleanup; return Unit; completed jobs are unchanged                                     |
-| `jobs()`         | Immutable snapshots of session jobs                                                                     |
+| Function | Behavior |
+| --- | --- |
+| `run(plan)` | Foreground execution, inherited terminal streams; check all stage policies; return Unit |
+| `capture(plan)` | Foreground execution, concurrent stdout/stderr capture; return report and Bytes; nonzero exit is data |
+| `stream(plan)` | Foreground job source producing stdout Bytes chunks; stderr inherited; completion checked at stream end |
+| `start(plan)` | Start external-only background job; return session Job handle |
+| `wait(handle)` | Wait for a background job's report; nonzero exit is data; a stopped job raises JobStopped |
+| `check(report)` | Reject cancelled or failed reports; otherwise Unit |
+| `fg(handle)` | Resume a job/context; return Unit for an external-only checked job or the resumed evaluation's result |
+| `bg(handle)` | Resume a stopped external-only job without terminal ownership; return Unit |
+| `cancel(handle)` | Cancel and await cleanup; return Unit; completed jobs are unchanged |
+| `jobs()` | Immutable snapshots of session jobs |
 
 `start`, `stream`, and `through` initiate launch when called. They complete the launch
 handshake before returning a handle; setup/exec error records raise a launch error. A
@@ -210,20 +213,25 @@ started background job. Interrupting a foreground execution or an already reques
 `cancel` waits for owned cleanup before returning to the prompt; no remaining expression
 in that entry runs after the interrupt.
 
-Interactive stop retains the live job and its execution continuation. `fg` resumes both.
-`bg` is supported only when no in-process evaluator/stream continuation is attached;
-otherwise it raises a clear capability error and leaves the job stopped. Other commands
-may execute while a context is stopped. Already-launched jobs keep their launch
-snapshots and open resources remain attached to the stopped scope. After resumption,
-explicit session-state reads and new launches observe the current session
-cwd/environment; lexical captures remain unchanged. No user evaluator runs concurrently
-in the background in the first release. `fg` returns the resumed expression result
-without separately displaying it. Successful resumed declarations publish a new REPL
-scope at completion, while their captured references remain those resolved originally.
-Nominal-name conflicts discovered at publication are errors; earlier effects are not
-rolled back. `wait` rejects handles with a suspended language continuation instead of
-implicitly running it. A pure suspended evaluation uses the same handle surface but has
-no process group.
+Interactive stop retains the live job and its execution continuation. The session
+freezes scope-owned process groups with SIGSTOP and observes their stop or exit before
+returning to the prompt; ordinary external terminal signals still follow POSIX job
+control. `fg` resumes the retained groups and continuation. `bg` is supported only when
+no in-process evaluator/stream continuation is attached; otherwise it raises a clear
+capability error and leaves the job stopped. Other commands may execute while a context
+is stopped. Already-launched jobs keep their launch snapshots and open resources remain
+attached to the stopped scope. After resumption, explicit session-state reads and new
+launches observe the current session cwd/environment; lexical captures remain unchanged.
+No user evaluator runs concurrently in the background in the first release. `fg` returns
+the resumed expression result without separately displaying it. Successful resumed
+declarations publish a new REPL scope at completion, while their captured references
+remain those resolved originally. The `fg` caller keeps its original lexical
+environment; newly published names become available to the next entry. Nominal-name
+conflicts discovered at publication are errors; earlier effects are not rolled back.
+`wait` rejects handles with a suspended language continuation instead of implicitly
+running it. A pure suspended evaluation uses the same handle surface but has no process
+group. In a script, a stopped stream producer raises ProcessError and is cleaned up; it
+cannot wait indefinitely for an interactive foreground request.
 
 Control operations validate handle kind and state. `fg` can foreground an external job
 or resume a stopped evaluation; a completed external job yields its checked result
@@ -234,12 +242,12 @@ evaluator. Separately started background jobs remain independently controllable.
 
 ## Stream ownership and scopes
 
-Streams are single-consumer resources. Aliases share a control block and an owner token
-with a generation number; creating an alias does not clone the stream. A transformation
-consumes its input token and returns a new token. A terminal sink consumes its token
-entirely. Every use validates ownership; using an alias after transfer raises
-StreamConsumed. `close(stream)` consumes and closes a stream without pulling more items.
-It returns Unit after cleanup, not a claim of successful producer completion.
+Streams are single-consumer resources. Aliases share a control block identified by a
+non-reused token; creating an alias does not clone the stream. A transformation consumes
+its input token and returns a new token. A terminal sink consumes its token entirely.
+Every use validates ownership; using an alias after transfer raises StreamConsumed.
+`close(stream)` consumes and closes a stream without pulling more items. It returns Unit
+after cleanup, not a claim of successful producer completion.
 
 ```rill
 do {
@@ -254,7 +262,8 @@ Borrowing an item while evaluating a callback does not grant ownership of the up
 stream. A filter predicate can observe each item once without being able to recursively
 drain the same input. Nested attempts to consume a busy stream fail.
 
-An execution scope surrounds each top-level entry/statement. Ordinary function calls
+An execution resource scope surrounds each top-level statement; an interactive entry may
+contain several statements with one atomic binding publication. Ordinary function calls
 share their caller's execution scope; returning a stream to the immediate caller is
 valid. A stream may be stored locally or captured by a temporary closure inside that
 scope. Before publishing REPL/module/script top-level bindings or returning a persistent
@@ -310,22 +319,22 @@ cancellation are checked during long pure evaluations, not only on syscalls.
 
 ## Core library contracts
 
-| Operation                    | Contract                                                             |
-| ---------------------------- | -------------------------------------------------------------------- |
-| `map(f, sequence)`           | Preserve category; one result per item                               |
-| `filter(p, sequence)`        | Require Bool predicate; preserve category                            |
-| `fold(f, initial, sequence)` | Apply `f(accumulator, item)` in order; return the final accumulator  |
-| `each(f, sequence)`          | Run in order, discard callback values, return Unit                   |
-| `take(n, sequence)`          | Nonnegative Int; successful early cutoff                             |
-| `close(stream)`              | Consume the handle and clean up without draining; return Unit        |
-| `sort_by(key, sequence)`     | Stable order, homogeneous comparable keys, return List               |
-| `sum(sequence)`              | Homogeneous numeric kind; checked Int arithmetic                     |
-| `files(path)`                | Value stream of anonymous records from filesystem APIs               |
-| `glob(pattern)`              | Explicit filesystem expansion to List of Paths; sorted by path bytes |
-| `read_text(path)`            | Read bounded content, decode strict UTF-8                            |
-| `from_json(bytes_or_string)` | One JSON document; return an ordinary value                          |
-| `to_json(value)`             | One JSON document as UTF-8 Bytes                                     |
-| `write_stdout(byte_stream)`  | Drain bytes exactly, then finalize associated jobs                   |
+| Operation | Contract |
+| --- | --- |
+| `map(f, sequence)` | Preserve category; one result per item |
+| `filter(p, sequence)` | Require Bool predicate; preserve category |
+| `fold(f, initial, sequence)` | Apply `f(accumulator, item)` in order; return the final accumulator |
+| `each(f, sequence)` | Run in order, discard callback values, return Unit |
+| `take(n, sequence)` | Nonnegative Int; successful early cutoff |
+| `close(stream)` | Consume the handle and clean up without draining; return Unit |
+| `sort_by(key, sequence)` | Stable order, homogeneous comparable keys, return List |
+| `sum(sequence)` | Homogeneous numeric kind; checked Int arithmetic |
+| `files(path)` | Value stream of anonymous records from filesystem APIs |
+| `glob(pattern)` | Explicit filesystem expansion to List of Paths; sorted by path bytes |
+| `read_text(path)` | Read bounded content, decode strict UTF-8 |
+| `from_json(bytes_or_string)` | One JSON document; return an ordinary value |
+| `to_json(value)` | One JSON document as UTF-8 Bytes |
+| `write_stdout(byte_stream)` | Drain bytes exactly, then finalize associated jobs |
 
 `files` emits `name: Path`, `path: Path`, `kind: String`, and `size: Int`; `name`
 contains the entry's basename and `path` the source-relative path. It includes hidden
@@ -358,15 +367,15 @@ defaults; unknown keys and negative/non-Int limits are errors. There is no impli
 unlimited sentinel. Zero permits only an empty result for size/count limits; nesting
 depth must be at least one.
 
-| Operation                              | Option keys              |
-| -------------------------------------- | ------------------------ |
-| `capture_with(options, plan)`          | `max_bytes`              |
-| `collect_with(options, stream)`        | `max_items`, `max_bytes` |
-| `collect_bytes_with(options, stream)`  | `max_bytes`              |
-| `lines_with(options, byte_stream)`     | `max_line_bytes`         |
-| `read_text_with(options, path)`        | `max_bytes`              |
-| `from_json_with(options, input)`       | `max_bytes`, `max_depth` |
-| `to_json_with(options, value)`         | `max_bytes`, `max_depth` |
+| Operation | Option keys |
+| --- | --- |
+| `capture_with(options, plan)` | `max_bytes` |
+| `collect_with(options, stream)` | `max_items`, `max_bytes` |
+| `collect_bytes_with(options, stream)` | `max_bytes` |
+| `lines_with(options, byte_stream)` | `max_line_bytes` |
+| `read_text_with(options, path)` | `max_bytes` |
+| `from_json_with(options, input)` | `max_bytes`, `max_depth` |
+| `to_json_with(options, value)` | `max_bytes`, `max_depth` |
 | `sort_by_with(options, key, sequence)` | `max_items`, `max_bytes` |
 
 The unqualified functions are ordinary wrappers supplying empty options records.
@@ -388,16 +397,16 @@ callback-specific effect restriction. Callback order determines when the effect 
 background jobs execute no user-language callbacks. `pwd()` returns a Path.
 
 Job handles use stable, non-reused session IDs, never bare PIDs. Stream aliases use
-generation checks to detect ownership transfer. Completed reports remain available
-through retained handles. `jobs()` returns records containing `id`, `handle`, `kind`,
-and `state`, so even a discarded start result can be recovered through the session.
-Dropping a handle does not detach a process. `get_env(name)` returns Option of Bytes.
-Environment names are nonempty Strings without NUL or `=`; `set_env` values are String
-or Bytes without NUL. `unset_env(name)` removes a variable explicitly. `exit(code)`
-refuses while jobs are live or stopped; Ctrl-D on an empty prompt makes the same request
-with code zero. `exit_force(code)` explicitly cancels session jobs and restores the
-terminal before exit. There is no detach/disown operation. Script EOF with unjoined
-background jobs is an error followed by cleanup; scripts must explicitly wait,
+permanent consumption checks to detect ownership transfer. Completed reports remain
+available through retained handles. `jobs()` returns records containing `id`, `handle`,
+`kind`, and `state`, so even a discarded start result can be recovered through the
+session. Dropping a handle does not detach a process. `get_env(name)` returns Option of
+Bytes. Environment names are nonempty Strings without NUL or `=`; `set_env` values are
+String or Bytes without NUL. `unset_env(name)` removes a variable explicitly.
+`exit(code)` refuses while jobs are live or stopped; Ctrl-D on an empty prompt makes the
+same request with code zero. `exit_force(code)` explicitly cancels session jobs and
+restores the terminal before exit. There is no detach/disown operation. Script EOF with
+unjoined background jobs is an error followed by cleanup; scripts must explicitly wait,
 foreground, or cancel. Here unjoined means not acknowledged by one of those operations,
 even if the event loop already reaped all children. Merely listing a job does not
 acknowledge its completion.

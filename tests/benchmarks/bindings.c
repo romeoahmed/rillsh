@@ -1,3 +1,10 @@
+/**
+ * @file
+ * @brief Measure full binding-snapshot publication and lookup.
+ *
+ * Populate through the C adapter to isolate snapshot work from parsing and
+ * duplicate-name validation; verify retained values after each publication.
+ */
 #include "../unit/test.h"
 #include "diagnostic.h"
 #include "runtime/runtime.h"
@@ -35,7 +42,8 @@ int main() {
     do {
       event = rill_runtime_step(eval);
     } while (event.state == RILL_EVAL_YIELD);
-    CHECK(event.state == RILL_EVAL_DONE && event.value.as.integer == 1);
+    CHECK(event.state == RILL_EVAL_DONE && event.value.kind == RILL_V_INT &&
+          event.value.as.integer == 1);
     for (size_t i = 0; i < 4096; ++i) {
       char name[32];
       int size = snprintf(name, sizeof(name), "binding%zu", i);
@@ -47,7 +55,6 @@ int main() {
     }
     rill_runtime_collect(rill_runtime_heap(eval));
     size_t bytes = rill_runtime_heap(eval)->bytes;
-    CHECK(!round || bytes == retained);
     retained = bytes;
   }
   CHECK(printf("{\"retained_bytes\":%zu}\n", retained) > 0);

@@ -1,4 +1,4 @@
-api_headers = [
+api_headers = files(
     'source.h',
     'diagnostic.h',
     'text/text.h',
@@ -9,10 +9,14 @@ api_headers = [
     'exec/exec.h',
     'library/library.h',
     'library/pure.h',
+    'library/value.h',
+    'library/json.h',
+    'library/fs.h',
+    'library/stream.h',
     'library/bundle.h',
     'session/module.h',
     'session/session.h',
-]
+)
 pure = static_library(
     'rill-pure',
     'source.c',
@@ -38,17 +42,22 @@ posix = static_library(
 library_core = static_library(
     'rill-library',
     'library/pure.c',
+    'library/value.c',
+    'library/json.c',
     'library/bundle.c',
+    dependencies: yyjson,
     include_directories: inc,
 )
 shell = executable(
     'rillsh',
     'main.c',
     'session/session.c',
+    'session/evaluation.c',
     'session/module.c',
     'library/library.c',
+    'library/fs.c',
+    'library/stream.c',
     link_with: [posix, pure, library_core],
-    dependencies: yyjson,
     include_directories: inc,
     install: true,
 )

@@ -31,7 +31,7 @@ fn starts_with(prefix, value) => __pure(["starts_with", prefix, value])
 fn ends_with(suffix, value) => __pure(["ends_with", suffix, value])
 fn concat(a, b) => __pure(["concat", a, b])
 fn reverse(items) => __pure(["reverse", items])
-fn take(count, items) => __pure(["take", count, items])
+fn take(count, items) => if __pure(["is_stream", items]) then __stream(["take", count, items]) else __pure(["take", count, items])
 fn drop(count, items) => __pure(["drop", count, items])
 fn record(pairs) => __pure(["record", pairs])
 fn extend(fields, base) => __pure(["extend", fields, base])
@@ -40,30 +40,56 @@ fn lookup(key, fields) => match __pure(["lookup", key, fields]) {
   [value] => some(value),
   [] => Option.None
 }
-fn fold(f, initial, items) => match items {
+fn fold(f, initial, items) => if __pure(["is_stream", items]) then __stream(["fold", fn(pair) => f(pair[0], pair[1]), initial, items]) else match items {
   [] => initial,
   [head, ..tail] => fold(f, f(initial, head), tail)
 }
-fn each(f, items) => match items {
+fn each(f, items) => if __pure(["is_stream", items]) then __stream(["each", f, items]) else match items {
   [] => (),
   [head, ..tail] => do { f(head); each(f, tail) }
 }
-fn map(f, items) => do {
+fn map(f, items) => if __pure(["is_stream", items]) then __stream(["map", f, items]) else do {
   fn loop(rest, output) => match rest {
     [] => __pure(["unroll", output]),
     [head, ..tail] => loop(tail, [f(head), output])
   }
   loop(items, [])
 }
-fn filter(predicate, items) => do {
+fn filter(predicate, items) => if __pure(["is_stream", items]) then __stream(["filter", predicate, items]) else do {
   fn loop(rest, output) => match rest {
     [] => __pure(["unroll", output]),
     [head, ..tail] => if predicate(head) then loop(tail, [head, output]) else loop(tail, output)
   }
   loop(items, [])
 }
-fn sum(items) => match items { [] => 0, [head, ..tail] => fold(add, __pure(["number", head]), tail) }
+fn sum(items) => match fold(fn(acc, value) => match acc {
+  Option.None => some(__pure(["number", value])),
+  Option.Some {value: total} => some(total + value)
+}, Option.None, items) { Option.None => 0, Option.Some {value} => value }
+fn chunks(value) => __stream(["chunks", value])
+fn files(directory) => __stream(["files", directory])
+fn stream(plan) => __stream(["stream", plan])
+fn through(plan, input) => __stream(["through", plan, input])
+fn lines_with(options, input) => __stream(["lines", options, input])
+fn lines(input) => lines_with({}, input)
+fn collect_with(options, input) => __stream(["collect", options, input])
+fn collect(input) => collect_with({}, input)
+fn collect_bytes_with(options, input) => __stream(["collect_bytes", options, input])
+fn collect_bytes(input) => collect_bytes_with({}, input)
+fn close(input) => __stream(["close", input])
+fn write_stdout(input) => __stream(["write", input])
+fn capture_with(options, plan) => __data(["capture", options, plan])
+fn capture(plan) => capture_with({}, plan)
+fn from_json_with(options, input) => __data(["from_json", options, input])
+fn from_json(input) => from_json_with({}, input)
+fn to_json_with(options, value) => __data(["to_json", options, value])
+fn to_json(value) => to_json_with({}, value)
+fn read_text_with(options, file) => __data(["read_text", options, file])
+fn read_text(file) => read_text_with({}, file)
+fn glob(pattern) => __data(["glob", pattern])
+fn display_path(value) => __data(["display_path", value])
 fn sort_by_with(options, key, items) => do {
+  let items = if __pure(["is_stream", items]) then collect_with(options, items) else items
   let budget = __pure(["sort_input", options, items])
   let decorated = map(fn(value) => [__pure(["sort_key", budget, key(value)]), value], items)
   __pure(["sort", decorated])

@@ -3,8 +3,9 @@
 This document specifies the first-release target for invocation and interaction.
 [Architecture](architecture.md) defines editor mechanisms; [platform](platform.md)
 defines encoding and terminal capabilities. [Current status](status.md) describes the
-canonical-input REPL available today. Invocation is implemented; the editing,
-completion, history, and rich presentation contracts below belong to stage 4.
+canonical-input REPL and incremental stream display available today. Invocation is
+implemented. Grapheme editing, completion, history, and rich presentation below are
+stage-4 requirements, not current prompt behavior.
 
 ## Invocation and session boundaries
 
@@ -55,24 +56,24 @@ few aliases. Copy and paste remain available through the terminal emulator. Bind
 require neither Command-key nor Ctrl-Shift-key delivery. Editing modes and configurable
 keymaps are outside the first release.
 
-| Action                                        | Default input                                    |
-| --------------------------------------------- | ------------------------------------------------ |
-| Move one grapheme; delete before/after cursor | Left/Right; Backspace/Delete                     |
-| Move within multiline input                   | Up/Down; at the first/last row, navigate history |
-| Move to logical line boundaries               | Home/End; Ctrl-A/Ctrl-E aliases                  |
-| Insert newline without submission             | Ctrl-J or Shift-Tab                              |
-| Submit according to parser state              | Enter at buffer end                              |
-| Submit the whole buffer explicitly            | Alt-Enter                                        |
-| Complete; navigate candidates                 | Tab; Tab/Shift-Tab in the menu                   |
-| Search previous input incrementally           | Ctrl-R                                           |
-| Undo; redo                                    | Ctrl-_; Alt-r                                    |
-| Delete preceding word                         | Ctrl-W                                           |
-| Delete to logical line end                    | Ctrl-K                                           |
-| Close completion or history search            | Escape                                           |
-| Cancel current entry                          | Ctrl-C                                           |
-| Request EOF on empty buffer; delete otherwise | Ctrl-D                                           |
-| Suspend the shell while editing               | Ctrl-Z                                           |
-| Redraw; show help                             | Ctrl-L; F1                                       |
+| Action | Default input |
+| --- | --- |
+| Move one grapheme; delete before/after cursor | Left/Right; Backspace/Delete |
+| Move within multiline input | Up/Down; at the first/last row, navigate history |
+| Move to logical line boundaries | Home/End; Ctrl-A/Ctrl-E aliases |
+| Insert newline without submission | Ctrl-J or Shift-Tab |
+| Submit according to parser state | Enter at buffer end |
+| Submit the whole buffer explicitly | Alt-Enter |
+| Complete; navigate candidates | Tab; Tab/Shift-Tab in the menu |
+| Search previous input incrementally | Ctrl-R |
+| Undo; redo | Ctrl-_; Alt-r |
+| Delete preceding word | Ctrl-W |
+| Delete to logical line end | Ctrl-K |
+| Close completion or history search | Escape |
+| Cancel current entry | Ctrl-C |
+| Request EOF on empty buffer; delete otherwise | Ctrl-D |
+| Suspend the shell while editing | Ctrl-Z |
+| Redraw; show help | Ctrl-L; F1 |
 
 Word deletion uses runs of whitespace, identifier characters, or punctuation; it is an
 editing convenience rather than a second language tokenizer. A completion menu consumes
@@ -102,13 +103,13 @@ remains in discard-until-marker state before accepting new keys. EOF or terminal
 cancels the pending paste. There is no time-based inference that rapidly typed
 characters must be pasted text.
 
-| Resource                                       | First-release limit                            |
-| ---------------------------------------------- | ---------------------------------------------- |
-| Editable entry, including an uncommitted paste | 1 MiB of UTF-8 bytes                           |
-| Undo/redo log                                  | 1,000 transactions and 8 MiB of retained edits |
-| Persistent history                             | 10,000 entries and 16 MiB                      |
-| Completion list                                | 200 candidates and 1 MiB of retained text      |
-| Key-sequence recognition                       | 64 bytes; 100 ms ESC/key ambiguity deadline    |
+| Resource | First-release limit |
+| --- | --- |
+| Editable entry, including an uncommitted paste | 1 MiB of UTF-8 bytes |
+| Undo/redo log | 1,000 transactions and 8 MiB of retained edits |
+| Persistent history | 10,000 entries and 16 MiB |
+| Completion list | 200 candidates and 1 MiB of retained text |
+| Key-sequence recognition | 64 bytes; 100 ms ESC/key ambiguity deadline |
 
 Over-limit edits leave the previous buffer unchanged and produce a concise message. Old
 undo/history entries may be evicted according to their stated bounds. Consecutive text

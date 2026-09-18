@@ -1,4 +1,13 @@
+/**
+ * @file
+ * @brief Length-aware buffers, strict UTF-8, and grapheme traversal.
+ *
+ * Buffer operations own storage; decoding and segmentation borrow byte spans.
+ * Pinned Unicode tables drive boundaries and the current width estimate,
+ * independently of libc locale and terminal I/O.
+ */
 #include "text.h"
+#include <assert.h>
 #include <errno.h>
 #include <stdarg.h>
 #include <stdckdint.h>
@@ -55,6 +64,12 @@ bool rill_text_format(RillBuffer *b, const char *format, ...) {
   }
   va_end(args);
   return ok;
+}
+void rill_text_truncate(RillBuffer *b, size_t size) {
+  assert(size <= b->size);
+  b->size = size;
+  if (b->data)
+    b->data[size] = '\0';
 }
 void rill_text_clear(RillBuffer *b) {
   free(b->data);
@@ -132,6 +147,8 @@ bool rill_text_valid(const char *s, size_t n) {
   return true;
 }
 bool rill_text_encode(RillBuffer *b, uint32_t c) {
+  if (c > 0x10ffff || (c >= 0xd800 && c <= 0xdfff))
+    return false;
   unsigned char s[4];
   size_t n = {};
   if (c <= 0x7f) {
@@ -141,21 +158,18 @@ bool rill_text_encode(RillBuffer *b, uint32_t c) {
     s[0] = (unsigned char)(0xc0 | (c >> 6));
     s[1] = (unsigned char)(0x80 | (c & 63));
     n = 2;
-  } else if (c >= 0xd800 && c <= 0xdfff)
-    return false;
-  else if (c <= 0xffff) {
+  } else if (c <= 0xffff) {
     s[0] = (unsigned char)(0xe0 | (c >> 12));
     s[1] = (unsigned char)(0x80 | ((c >> 6) & 63));
     s[2] = (unsigned char)(0x80 | (c & 63));
     n = 3;
-  } else if (c <= 0x10ffff) {
+  } else {
     s[0] = (unsigned char)(0xf0 | (c >> 18));
     s[1] = (unsigned char)(0x80 | ((c >> 12) & 63));
     s[2] = (unsigned char)(0x80 | ((c >> 6) & 63));
     s[3] = (unsigned char)(0x80 | (c & 63));
     n = 4;
-  } else
-    return false;
+  }
   return rill_text_append(b, s, n);
 }
 

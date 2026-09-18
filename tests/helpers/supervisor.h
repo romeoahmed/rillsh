@@ -1,3 +1,7 @@
+/**
+ * @file
+ * @brief Test-owned supervisor cleanup for unreaped helper children.
+ */
 #pragma once
 #include "exec/exec.h"
 #include "platform/posix.h"

@@ -1,3 +1,11 @@
+/**
+ * @file
+ * @brief Controlled external programs for process and PTY tests.
+ *
+ * Explicit modes expose argv, bytes, descriptors, signals, and terminal state.
+ * Fixtures avoid GNU/BSD utility differences and use readiness handshakes where
+ * the parent must observe a live child before acting.
+ */
 #include "fds.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -101,6 +109,18 @@ int main(int argc, char **argv) {
   }
   if (!strcmp(mode, "both")) {
     return put(1, "out\n", 4) && put(2, "err\n", 4) ? 0 : 3;
+  }
+  if (!strcmp(mode, "rows")) {
+    if (!put(2, "stream-ready\n", 13))
+      return 3;
+    while (put(1, "row\n", 4)) {
+    }
+    return 3;
+  }
+  if (!strcmp(mode, "output-error")) {
+    if (!put(1, "row\n", 4) || close(1) < 0)
+      return 3;
+    return 7;
   }
   if (!strcmp(mode, "flood")) {
     unsigned char bytes[16384];

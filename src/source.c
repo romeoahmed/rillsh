@@ -1,3 +1,10 @@
+/**
+ * @file
+ * @brief Validate and own source text before parsing.
+ *
+ * Source names and UTF-8 bytes are copied together; invalid input leaves a
+ * clearable empty owner. Diagnostics use byte offsets into this storage.
+ */
 #include "source.h"
 #include "diagnostic.h"
 #include "text/text.h"

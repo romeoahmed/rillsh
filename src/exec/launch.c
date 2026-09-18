@@ -1,3 +1,12 @@
+/**
+ * @file
+ * @brief Prepare and register a pipeline before releasing its children.
+ *
+ * Copy launch inputs and open descriptor actions before fork. Children perform
+ * only async-signal-safe setup and wait at a gate while the parent registers
+ * the process group and hands off the terminal when required. Partial launch
+ * failure retains every child identity until cancellation and reaping finish.
+ */
 #include "diagnostic.h"
 #include "exec.h"
 #include "platform/posix.h"
@@ -126,14 +135,13 @@ static bool paths(Prepared *s, const char *path) {
   for (size_t i = 0; i < count; ++i) {
     const char *end = strchr(path, ':');
     size_t n = end ? (size_t)(end - path) : strlen(path);
-    RillBuffer b = {};
+    [[gnu::cleanup(rill_text_clear)]] RillBuffer b = {};
     if ((n &&
          (!rill_text_append(&b, path, n) || !rill_text_append(&b, "/", 1))) ||
-        !rill_text_append(&b, s->argv[0], strlen(s->argv[0]))) {
-      rill_text_clear(&b);
+        !rill_text_append(&b, s->argv[0], strlen(s->argv[0])))
       return false;
-    }
     s->paths[i] = b.data;
+    b = (RillBuffer){};
     path = end ? end + 1 : path + n;
   }
   return true;
@@ -204,12 +212,28 @@ RillJob *rill_exec_launch(RillExec *e, const RillExecSpec *spec,
                               .message = "job or pipeline limit exceeded"};
     return nullptr;
   }
+  if (spec->streaming && spec->feed) {
+    for (size_t i = 0; i < stage_count; ++i)
+      for (size_t k = 0; k < spec->stages[i].redirect_count; ++k) {
+        int target = spec->stages[i].redirects[k].target;
+        if ((i == 0 && target == 0) || (i + 1 == stage_count && target == 1)) {
+          *error = (RillDiagnostic){
+              .kind = RILL_TYPE,
+              .message = "through conflicts with endpoint redirection"};
+          return nullptr;
+        }
+      }
+  }
   RillJob *j = malloc(sizeof(*j));
   Launch l = {};
   if (!j)
     goto fail;
   *j = (RillJob){.errors = -1,
                  .input = -1,
+                 .relay = -1,
+                 .streaming = spec->streaming,
+                 .data = spec->streaming || spec->capture,
+                 .feed_end = !spec->streaming,
                  .output = {-1, -1},
                  .count = stage_count,
                  .background = spec->background,
@@ -233,7 +257,7 @@ RillJob *rill_exec_launch(RillExec *e, const RillExecSpec *spec,
     if (defaults[i] >= 0 && own(&l, defaults[i]) < 0)
       goto fail;
   }
-  if (spec->background || spec->capture) {
+  if (spec->background || spec->capture || spec->streaming) {
     defaults[0] = own(
         &l, rill_platform_internal(open("/dev/null", O_RDONLY | O_CLOEXEC)));
     if (defaults[0] < 0)
@@ -286,8 +310,12 @@ RillJob *rill_exec_launch(RillExec *e, const RillExecSpec *spec,
     l.stages[stage].pipe_output = fds[1];
     l.stages[stage + 1].pipe_input = fds[0];
   }
-  if (spec->capture)
+  if (spec->capture || spec->streaming)
     for (int i = 0; i < 2; ++i) {
+      if (spec->streaming && i == 1 && !isatty(defaults[2]))
+        continue;
+      if (spec->streaming && i == 1)
+        j->relay = defaults[2];
       int fds[2];
       if (!pipe_owned(&l, fds))
         goto fail;
@@ -389,7 +417,8 @@ RillJob *rill_exec_launch(RillExec *e, const RillExecSpec *spec,
   ++e->count;
   if (!spec->background) {
     e->attached = j;
-    if (!j->error.kind && !spec->capture && e->platform->tty >= 0) {
+    if (!j->error.kind && !spec->capture && !spec->streaming &&
+        e->platform->tty >= 0) {
       if (rill_platform_foreground(e->platform, j->group, nullptr))
         j->handed = true;
       else
@@ -400,6 +429,7 @@ RillJob *rill_exec_launch(RillExec *e, const RillExecSpec *spec,
   }
   j->errors = detach(&l, j->errors);
   j->input = detach(&l, j->input);
+  j->relay = detach(&l, j->relay);
   for (int i = 0; i < 2; ++i)
     j->output[i] = detach(&l, j->output[i]);
   if (!j->error.kind) {
@@ -425,7 +455,7 @@ fail:
     int saved = errno;
     release(&l);
     if (j) {
-      j->errors = j->input = j->output[0] = j->output[1] = -1;
+      j->errors = j->input = j->relay = j->output[0] = j->output[1] = -1;
       rill_exec_job_destroy(j);
     }
     *error = (RillDiagnostic){

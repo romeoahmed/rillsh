@@ -1,3 +1,11 @@
+/**
+ * @file
+ * @brief Language semantics and retained-code behavior through the evaluator.
+ *
+ * Table cases cover values and errors; separate scenarios verify closure
+ * lifetimes, collection, and proper tail calls. Meson owns process isolation
+ * and deadlines.
+ */
 #include "diagnostic.h"
 #include "runtime/runtime.h"
 #include "source.h"
@@ -44,6 +52,35 @@ static void expect(RillEval *eval, const char *source, int64_t expected) {
     (void)fprintf(stderr, "%s\nexpected Int %" PRId64 "\n", source, expected);
   CHECK(event.value.kind == RILL_V_INT && event.value.as.integer == expected);
 }
+static void command_diagnostics() {
+  const struct {
+    const char *source;
+    size_t stage, argument;
+    bool has_argument;
+  } cases[] = {
+      {"job {^printf > out \"\\u{0}\"}", 0, 1, true},
+      {"job {^printf > out ...$([\"ok\",\"\\u{0}\"])}", 0, 2, true},
+      {"job {^printf ok | ^cat > out $(42)}", 1, 1, true},
+      {"job {^printf > out ...$([\"ok\",42])}", 0, 2, true},
+      {"job {^printf > \"\\u{0}\"}", 0, 0, false},
+      {"job {^printf ok | ^cat > $(42)}", 1, 0, false},
+      {"job {^\"\"}", 0, 0, true},
+  };
+  RillEval *eval = rill_runtime_new(nullptr, 0);
+  CHECK(eval);
+  rill_runtime_heap(eval)->stress = true;
+  for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); ++i) {
+    RillEvalEvent event = evaluate(eval, cases[i].source, nullptr);
+    CHECK(event.state == RILL_EVAL_ERROR && event.diagnostic.kind == RILL_TYPE);
+    CHECK(event.diagnostic.stage == cases[i].stage);
+    CHECK(event.diagnostic.has_argument == cases[i].has_argument);
+    if (cases[i].has_argument)
+      CHECK(event.diagnostic.argument == cases[i].argument);
+  }
+  CHECK(evaluate(eval, "job {^printf > out \"\"}", nullptr).state ==
+        RILL_EVAL_DONE);
+  rill_runtime_free(eval);
+}
 static void constants() {
   RillEval *eval = rill_runtime_new(nullptr, 0);
   CHECK(eval);
@@ -55,6 +92,12 @@ static void constants() {
          "if literal()==literal() and first.key==1 and second.key==2 "
          "then 1 else 0",
          1);
+  expect(eval,
+         "fn pooled()=>['',\"a\\u{0}b\",'key',\"a\\u{0}b\",''];"
+         "let values=pooled(); let keyed={key:values[1]};"
+         "if values==['',\"a\\u{0}b\",'key',keyed.key,''] "
+         "and values[1]!=\"a\\u{0}c\" then 1 else 0",
+         1);
   // A retained literal survives replacing its defining functions.
   RillEvalEvent event = evaluate(
       eval, "let saved=literal(); let literal=0; let record=0", nullptr);
@@ -64,6 +107,90 @@ static void constants() {
   rill_runtime_collect(heap);
   CHECK(event.value.as.object->bytes.size == 3);
   CHECK(!memcmp(event.value.as.object->bytes.data, "a\0b", 3));
+  rill_runtime_free(eval);
+}
+
+static void function_layouts() {
+  RillEval *eval = rill_runtime_new(nullptr, 0);
+  CHECK(eval);
+  rill_runtime_heap(eval)->stress = true;
+  [[gnu::cleanup(rill_text_clear)]] RillBuffer source = {};
+  CHECK(rill_text_append(&source, "let functions=[", 15));
+  for (size_t i = 0; i < 129; ++i)
+    CHECK(
+        rill_text_format(&source, "%sfn(x)=>fn(y)=>x+y+%zu", i ? "," : "", i));
+  CHECK(rill_text_append(&source, "]; 0", 4));
+  expect(eval, source.data, 0);
+  expect(eval, "functions[0](1)(2)+functions[128](3)(4)", 138);
+  // Distinct code owners use independent slots; old closures remain callable.
+  expect(eval,
+         "let saved=functions[64](10); let functions=0; "
+         "let unrelated=fn()=>999; saved(2)",
+         76);
+  rill_runtime_collect(rill_runtime_heap(eval));
+  expect(eval, "saved(3)+unrelated()", 1076);
+  expect(eval,
+         "let seed=7; let factory=fn(x)=>do {"
+         "let shadow=x+1; fn(y)=>do {let x=y+2;"
+         "fn(z)=>[seed,shadow,x,z]}};"
+         "let first=factory(10)(20); let second=factory(30)(40);"
+         "if first(1)==[7,11,22,1] and "
+         "second(2)==[7,31,42,2] then 1 else 0",
+         1);
+  expect(eval,
+         "fn recursive_factory(base)=>do {"
+         "rec {fn even(n)=>if n==0 then base else odd(n-1);"
+         "fn odd(n)=>if n==0 then base+1 else even(n-1)};"
+         "fn(n)=>even(n)}; let recursive_saved=recursive_factory(40);"
+         "recursive_saved(3)",
+         41);
+  expect(eval,
+         "let seed=900; let factory=0; let recursive_factory=0; first(3)[2]",
+         22);
+  rill_runtime_collect(rill_runtime_heap(eval));
+  expect(eval, "recursive_saved(4)+second(4)[1]", 71);
+  rill_runtime_free(eval);
+}
+
+static void operators() {
+  RillEval *eval = rill_runtime_new(nullptr, 0);
+  CHECK(eval);
+  rill_runtime_heap(eval)->stress = true;
+  expect(eval,
+         "if 2+3*4==14 and 8-3==5 and 8.0/2.0==4.0 and -(-7)==7 "
+         "and 2<3 and 3>2 and 2<=2 and 3>=3 and 2!=3 "
+         "and 'a'+'b'=='ab' and 'a'<'b' and not false then 1 else 0",
+         1);
+  expect(eval, "if (false and missing) or (true or missing) then 1 else 0", 1);
+  const char *const cases[] = {
+      "10-3-2==5 and 12.0/3.0/2.0==2.0",
+      "(1<1)==false and (1>1)==false and 1<=1 and 1>=1",
+      "(1.0<1.0)==false and 1.0<=1.0 and 2.0>1.0 and 2.0>=1.0",
+      "''<'a' and 'a'<'aa' and 'aa'>'a' and 'a'<='a' and 'a'>='a'",
+      "\"a\\u{0}b\"<\"a\\u{0}c\" and \"a\\u{0}b\"!='a'",
+      "not (true and false) and (false or true) and not (false or false)",
+  };
+  for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); ++i) {
+    [[gnu::cleanup(rill_text_clear)]] RillBuffer source = {};
+    CHECK(rill_text_format(&source, "if %s then 1 else 0", cases[i]));
+    expect(eval, source.data, 1);
+  }
+  const RillNative native = {"effect", 42};
+  rill_runtime_free(eval);
+  eval = rill_runtime_new(&native, 1);
+  CHECK(eval);
+  RillEvalEvent event = evaluate(eval, "effect(1)+effect(2)", nullptr);
+  for (int64_t i = 1; i <= 2; ++i) {
+    CHECK(event.state == RILL_EVAL_NATIVE && event.native == 42);
+    CHECK(event.value.kind == RILL_V_INT && event.value.as.integer == i);
+    rill_runtime_collect(rill_runtime_heap(eval));
+    rill_runtime_resume(eval, event.value, (RillDiagnostic){});
+    do {
+      event = rill_runtime_step(eval);
+    } while (event.state == RILL_EVAL_YIELD);
+  }
+  CHECK(event.state == RILL_EVAL_DONE && event.value.kind == RILL_V_INT &&
+        event.value.as.integer == 3);
   rill_runtime_free(eval);
 }
 
@@ -160,6 +287,10 @@ static void values_and_patterns() {
              {"struct Point {x}", RILL_TYPE},
              {"1+1.0", RILL_TYPE},
              {"9223372036854775807+1", RILL_ARITHMETIC},
+             {"-9223372036854775808-1", RILL_ARITHMETIC},
+             {"0-(-9223372036854775808)", RILL_ARITHMETIC},
+             {"9223372036854775807*2", RILL_ARITHMETIC},
+             {"-9223372036854775808*(-1)", RILL_ARITHMETIC},
              {"-(-9223372036854775808)", RILL_ARITHMETIC},
              {"1.0/0.0", RILL_ARITHMETIC},
              {"1.0e308*1.0e308", RILL_ARITHMETIC},
@@ -320,7 +451,10 @@ int main(int argc, char **argv) {
   if (!strcmp(argv[1], "semantics")) {
     values_and_patterns();
     pattern_validation_order();
+    command_diagnostics();
+    operators();
   } else if (!strcmp(argv[1], "code")) {
+    function_layouts();
     constants();
     wide_operands();
     binding_snapshots();

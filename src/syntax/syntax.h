@@ -1,4 +1,5 @@
-/** @file
+/**
+ * @file
  * @brief Syntax-owned command and expression tree, shared by scripts and
  * prompts.
  */
@@ -45,6 +46,24 @@ typedef enum {
   RILL_IMPORT,
   RILL_SPREAD
 } RillNodeKind;
+/** @brief Parsed operators; spelling is resolved once, before evaluation. */
+typedef enum {
+  RILL_OP_PIPE,
+  RILL_OP_WITH,
+  RILL_OP_OR,
+  RILL_OP_AND,
+  RILL_OP_EQ,
+  RILL_OP_NE,
+  RILL_OP_LE,
+  RILL_OP_GE,
+  RILL_OP_LT,
+  RILL_OP_GT,
+  RILL_OP_ADD,
+  RILL_OP_SUB,
+  RILL_OP_MUL,
+  RILL_OP_DIV,
+  RILL_OP_NOT
+} RillOperator;
 /** @brief Redirection syntax in source order. */
 typedef enum {
   RILL_INPUT,
@@ -63,16 +82,18 @@ typedef struct RillNode {
   size_t offset;     ///< Source byte offset.
   RillBuffer text; ///< Decoded text; code preparation replaces String text with
                    ///< a slot.
-  double real;     ///< Finite floating literal.
   bool grouped;    ///< Explicit parentheses permit nested comparisons.
   bool exported;   ///< Top-level export declaration.
   bool repeated;   ///< Duplicate pattern names, set during code preparation.
   struct RillNode *pattern; ///< Parameter or binding pattern.
   union {
-    int64_t integer;       ///< Integer literal, precedence, or module flag.
+    double real;           ///< Finite floating literal.
+    int64_t integer;       ///< Integer literal or module flag.
+    RillOperator op;       ///< Unary, binary, pipe, or update operation.
     RillRedirect redirect; ///< Syntax redirection operation.
     size_t constant; ///< String/key slot assigned after code consumes syntax.
-  }; ///< Kind selects the payload; the parser leaves constant slots unset.
+    size_t function; ///< Capture-layout slot assigned during code preparation.
+  }; ///< Kind selects the payload; the parser leaves preparation slots unset.
   struct RillNode *children;       ///< Ordered operands.
   struct RillNode *next;           ///< Next sibling.
   struct RillNode *allocated_next; ///< Parse arena ownership chain.

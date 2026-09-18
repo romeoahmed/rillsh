@@ -1,4 +1,5 @@
-/** @file
+/**
+ * @file
  * @brief Semantic RGB styles with deterministic terminal palette selection.
  */
 #pragma once

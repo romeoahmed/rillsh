@@ -1,7 +1,16 @@
+/**
+ * @file
+ * @brief Implement pure primitives requiring representation access.
+ *
+ * Validate argument shapes and perform checked arithmetic, conversions, data
+ * operations, and sorting. Higher-order composition remains in Rill; this
+ * dispatcher never recursively invokes language callbacks.
+ */
 #include "pure.h"
 #include "diagnostic.h"
 #include "runtime/runtime.h"
 #include "text/text.h"
+#include "value.h"
 #include <inttypes.h>
 #include <math.h>
 #include <stdckdint.h>
@@ -53,30 +62,12 @@ static int compare_item(const void *a, const void *b) {
 }
 static bool sort_limits(RillValue options, size_t *items, size_t *bytes,
                         RillDiagnostic *error) {
-  *items = 1000000;
-  *bytes = (size_t)64 * 1024 * 1024;
-  if (options.kind != RILL_V_RECORD) {
-    *error = (RillDiagnostic){.kind = RILL_TYPE,
-                              .message = "sort options require Record"};
+  RillLimit limits[] = {{"max_items", 1'000'000, 0},
+                        {"max_bytes", (size_t)64 * 1024 * 1024, 0}};
+  if (!rill_library_limits(options, limits, 2, error))
     return false;
-  }
-  RillObject *o = options.as.object;
-  for (size_t i = 0; i < o->count; i += 2) {
-    RillBytes key = o->values[i].as.object->bytes;
-    RillValue value = o->values[i + 1];
-    size_t *limit = nullptr;
-    if (key.size == 9 && !memcmp(key.data, "max_items", 9))
-      limit = items;
-    if (key.size == 9 && !memcmp(key.data, "max_bytes", 9))
-      limit = bytes;
-    if (!limit || value.kind != RILL_V_INT || value.as.integer < 0 ||
-        (uint64_t)value.as.integer > SIZE_MAX) {
-      *error = (RillDiagnostic){.kind = RILL_TYPE,
-                                .message = "unknown or invalid sort limit"};
-      return false;
-    }
-    *limit = (size_t)value.as.integer;
-  }
+  *items = limits[0].value;
+  *bytes = limits[1].value;
   return true;
 }
 RillValue rill_library_pure(RillHeap *h, RillValue input, RillDiagnostic *d) {
@@ -89,6 +80,9 @@ RillValue rill_library_pure(RillHeap *h, RillValue input, RillDiagnostic *d) {
   size_t argc = rill_runtime_count(input) - 1;
   RillValue a = argc ? rill_runtime_at(input, 1) : (RillValue){},
             b = argc > 1 ? rill_runtime_at(input, 2) : (RillValue){};
+  if (!strcmp(op, "is_stream"))
+    return (RillValue){.kind = RILL_V_BOOL,
+                       .as.integer = a.kind == RILL_V_STREAM};
   if (!strcmp(op, "number")) {
     if (a.kind != RILL_V_INT && a.kind != RILL_V_FLOAT)
       return fail(d, RILL_TYPE, "expected numeric value");

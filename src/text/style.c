@@ -1,3 +1,10 @@
+/**
+ * @file
+ * @brief Select a terminal palette and append trusted styled text.
+ *
+ * Capability hints and explicit overrides choose RGB, indexed, basic, or plain
+ * output. Callers escape untrusted bytes before applying styles.
+ */
 #include "style.h"
 #include "text.h"
 #include <stddef.h>

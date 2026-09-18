@@ -1,3 +1,10 @@
+/**
+ * @file
+ * @brief Measure equality of differently shared, equal DAGs.
+ *
+ * Layered graphs have equal unfoldings but different transitions, exercising
+ * equivalence classes instead of only matching-shape traversal.
+ */
 #include "../unit/test.h"
 #include "diagnostic.h"
 #include "runtime/runtime.h"

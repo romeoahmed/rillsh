@@ -1,3 +1,11 @@
+/**
+ * @file
+ * @brief Heap, graph, and evaluator-lifecycle contracts.
+ *
+ * Exercise independent roots, partial builders, shared/cyclic graphs, Record
+ * indexes, and transactional entries under collection. Meson selects scenarios
+ * separately; assertions cover ownership rather than fixed allocation counts.
+ */
 #include "runtime/runtime.h"
 #include "diagnostic.h"
 #include "source.h"
@@ -7,6 +15,39 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+
+static void independent_roots() {
+  RillHeap heap = {.stress = true};
+  RillValue values[3] = {};
+  RillRoot roots[3] = {};
+  for (size_t i = 0; i < 3; ++i) {
+    rill_runtime_root(&heap, &roots[i], &values[i], 1);
+    values[i] =
+        rill_runtime_object(&heap, RILL_V_STRING, nullptr, 0, "retained", 8, 0);
+    CHECK(values[i].kind == RILL_V_STRING);
+  }
+  // Suspended contexts can unregister in any order, then reuse a root frame.
+  rill_runtime_unroot(&heap, &roots[1]);
+  values[1] = (RillValue){};
+  rill_runtime_collect(&heap);
+  CHECK(!strcmp(values[0].as.object->bytes.data, "retained"));
+  CHECK(!strcmp(values[2].as.object->bytes.data, "retained"));
+  rill_runtime_root(&heap, &roots[1], &values[1], 1);
+  values[1] =
+      rill_runtime_object(&heap, RILL_V_LIST, values + 2, 1, nullptr, 0, 0);
+  CHECK(values[1].kind == RILL_V_LIST);
+  rill_runtime_unroot(&heap, &roots[0]);
+  rill_runtime_unroot(&heap, &roots[2]);
+  values[0] = values[2] = (RillValue){};
+  rill_runtime_collect(&heap);
+  RillValue kept = rill_runtime_at(values[1], 0);
+  CHECK(kept.kind == RILL_V_STRING &&
+        !strcmp(kept.as.object->bytes.data, "retained"));
+  rill_runtime_unroot(&heap, &roots[1]);
+  rill_runtime_collect(&heap);
+  CHECK(heap.bytes == 0);
+  rill_runtime_heap_clear(&heap);
+}
 
 static void heap_contracts() {
   RillHeap heap = {.stress = true};
@@ -91,6 +132,47 @@ static void builders_and_slices() {
   rill_runtime_collect(&heap);
   CHECK(heap.bytes == values[2].as.object->allocation);
   rill_runtime_unroot(&heap, &root);
+  rill_runtime_heap_clear(&heap);
+}
+static void scoped_graphs() {
+  RillHeap heap = {};
+  RillValue values[5] = {};
+  RillRoot root = {};
+  rill_runtime_root(&heap, &root, values, 5);
+  values[0] =
+      rill_runtime_object(&heap, RILL_V_STREAM, nullptr, 0, nullptr, 0, 0);
+  CHECK(values[0].kind == RILL_V_STREAM);
+  for (size_t i = 0; i < 20000; ++i) {
+    RillValue edges[] = {values[1], values[1]};
+    values[1] =
+        rill_runtime_object(&heap, RILL_V_LIST, edges, 2, nullptr, 0, 0);
+    CHECK(values[1].kind == RILL_V_LIST);
+  }
+  values[2] =
+      rill_runtime_object(&heap, RILL_V_STAGE, nullptr, 0, nullptr, 0, 0);
+  values[3] = rill_runtime_budget(&heap, SIZE_MAX);
+  CHECK(values[2].kind == RILL_V_STAGE && values[3].kind == RILL_V_BUDGET);
+  CHECK(rill_runtime_charge(&heap, values[3], values[0]) == RILL_OK);
+  // Repeated walks must restore temporary state after success and early
+  // failure, without changing collection epochs or retaining their visited
+  // graphs.
+  for (size_t round = 0; round < 4; ++round) {
+    CHECK(rill_runtime_persistent(&heap, values[1]) == RILL_OK);
+    values[2].as.object->metadata = values[0];
+    RillValue edges[] = {values[2], values[1], values[3]};
+    values[4] =
+        rill_runtime_object(&heap, RILL_V_LIST, edges, 3, nullptr, 0, 0);
+    CHECK(values[4].kind == RILL_V_LIST);
+    CHECK(rill_runtime_persistent(&heap, values[4]) == RILL_STREAM_ESCAPE);
+    values[2].as.object->metadata = values[1];
+    values[4].as.object->values[2] = values[4];
+    CHECK(rill_runtime_persistent(&heap, values[4]) == RILL_OK);
+    CHECK(rill_runtime_persistent(&heap, values[3]) == RILL_STREAM_ESCAPE);
+    rill_runtime_collect(&heap);
+  }
+  rill_runtime_unroot(&heap, &root);
+  rill_runtime_collect(&heap);
+  CHECK(!heap.bytes && !heap.scoped);
   rill_runtime_heap_clear(&heap);
 }
 static void deep_equality() {
@@ -232,6 +314,50 @@ static void equality_boundaries() {
   rill_runtime_heap_clear(&heap);
 }
 
+static void copied_records() {
+  RillHeap heap = {.stress = true};
+  RillValue values[2] = {};
+  RillRoot root = {};
+  rill_runtime_root(&heap, &root, values, 2);
+  const size_t sizes[] = {0, 1, 7, 16, 33, 128};
+  for (size_t k = 0; k < sizeof(sizes) / sizeof(*sizes); ++k) {
+    size_t count = sizes[k];
+    values[0] = rill_runtime_record(&heap, nullptr, count * 2);
+    CHECK(values[0].kind == RILL_V_RECORD);
+    for (size_t i = 0; i < count; ++i) {
+      char name[32];
+      int n = snprintf(name, sizeof(name), "key%zu", count - i);
+      CHECK(n > 0 && (size_t)n < sizeof(name));
+      name[0] = '\0';
+      values[0].as.object->values[2 * i] = rill_runtime_object(
+          &heap, RILL_V_STRING, nullptr, 0, name, (size_t)n, 0);
+      CHECK(values[0].as.object->values[2 * i].kind == RILL_V_STRING);
+      values[0].as.object->values[2 * i + 1] =
+          (RillValue){.kind = RILL_V_INT, .as.integer = (int64_t)i};
+    }
+    CHECK(rill_runtime_record_finish(values[0]));
+    values[1] = rill_runtime_record_copy(&heap, values[0]);
+    CHECK(values[1].kind == RILL_V_RECORD);
+    bool equal = false;
+    CHECK(rill_runtime_equal(values[0], values[1], &equal) == RILL_OK && equal);
+    if (count) {
+      values[1].as.object->values[1].as.integer = -1;
+      CHECK(values[0].as.object->values[1].as.integer == 0);
+    }
+    // The copied index must not borrow storage from its discarded source.
+    values[0] = (RillValue){};
+    rill_runtime_collect(&heap);
+    for (size_t i = 0; i < count; ++i) {
+      RillValue item = {};
+      RillBytes key = values[1].as.object->values[2 * i].as.object->bytes;
+      CHECK(rill_runtime_field(values[1], key, &item));
+      CHECK(item.kind == RILL_V_INT &&
+            item.as.integer == (i ? (int64_t)i : -1));
+    }
+  }
+  rill_runtime_unroot(&heap, &root);
+  rill_runtime_heap_clear(&heap);
+}
 static void indexed_records() {
   RillHeap heap = {.stress = true};
   RillValue records[2] = {};
@@ -388,6 +514,44 @@ static RillEvalEvent entry(RillEval *eval, const char *text) {
   return event;
 }
 
+static void aborted_diagnostic() {
+  const RillNative native = {"effect", 42};
+  RillEval *eval = rill_runtime_new(&native, 1);
+  CHECK(eval);
+  RillHeap *heap = rill_runtime_heap(eval);
+  heap->stress = true;
+  CHECK(entry(eval, "let stable=7").state == RILL_EVAL_DONE);
+  [[gnu::cleanup(rill_source_clear)]] RillSource source = {};
+  const char text[] = "let pending=9; effect(0)";
+  CHECK(rill_source_init(&source, "abort", text, sizeof(text) - 1) == RILL_OK);
+  [[gnu::cleanup(rill_syntax_clear)]] RillSyntax syntax =
+      rill_syntax_parse(&source);
+  CHECK(syntax.state == RILL_COMPLETE);
+  rill_runtime_begin(eval, &syntax);
+  CHECK(next_event(eval).state == RILL_EVAL_NATIVE);
+  RillValue detail =
+      rill_runtime_object(heap, RILL_V_STRING, nullptr, 0, "temporary", 9, 0);
+  CHECK(detail.kind == RILL_V_STRING);
+  rill_runtime_resume(
+      eval, detail,
+      (RillDiagnostic){.kind = RILL_TYPE,
+                       .message = detail.as.object->bytes.data});
+  CHECK(next_event(eval).diagnostic.kind == RILL_TYPE);
+  // Abort discards both the error and the root backing its borrowed message.
+  rill_runtime_abort(eval);
+  rill_runtime_abort(eval);
+  CHECK(rill_runtime_define(eval, "fresh",
+                            (RillValue){.kind = RILL_V_INT, .as.integer = 11}));
+  RillValue value = {};
+  CHECK(!rill_runtime_lookup(eval, "pending", &value));
+  CHECK(rill_runtime_lookup(eval, "stable", &value) &&
+        value.kind == RILL_V_INT && value.as.integer == 7);
+  CHECK(next_event(eval).state == RILL_EVAL_DONE);
+  CHECK(rill_runtime_lookup(eval, "fresh", &value) &&
+        value.kind == RILL_V_INT && value.as.integer == 11);
+  rill_runtime_free(eval);
+}
+
 static void entries() {
   RillEval *eval = rill_runtime_new(nullptr, 0);
   CHECK(eval);
@@ -418,6 +582,35 @@ static void entries() {
   rill_runtime_free(eval);
 }
 
+static void snapshot_merges() {
+  RillEval *eval = rill_runtime_new(nullptr, 0);
+  CHECK(eval);
+  rill_runtime_heap(eval)->stress = true;
+  for (size_t round = 0; round < 3; ++round) {
+    for (size_t i = 0; i < 32; ++i) {
+      char name[32];
+      int size = snprintf(name, sizeof(name), "key%zu", 31 - i);
+      CHECK(size > 0 && (size_t)size < sizeof(name));
+      CHECK(rill_runtime_define(
+          eval, name,
+          (RillValue){.kind = RILL_V_INT, .as.integer = (int64_t)(i + round)}));
+    }
+    CHECK(entry(eval, "let middle=5; let z=9; let a=1").state ==
+          RILL_EVAL_DONE);
+    CHECK(entry(eval, "let key17=99; missing").state == RILL_EVAL_ERROR);
+    for (size_t i = 0; i < 32; ++i) {
+      char name[32];
+      int size = snprintf(name, sizeof(name), "key%zu", 31 - i);
+      CHECK(size > 0 && (size_t)size < sizeof(name));
+      RillValue value = {};
+      CHECK(rill_runtime_lookup(eval, name, &value));
+      CHECK(value.kind == RILL_V_INT &&
+            value.as.integer == (int64_t)(i + round));
+    }
+    CHECK(entry(eval, "let middle=6; middle+z+a").value.as.integer == 16);
+  }
+  rill_runtime_free(eval);
+}
 static void unary_protocol() {
   const RillNative native = {"f", 42};
   RillEval *eval = rill_runtime_new(&native, 1);
@@ -485,10 +678,13 @@ static void unary_protocol() {
 int main(int argc, char **argv) {
   CHECK(argc == 2);
   if (!strcmp(argv[1], "heap")) {
+    independent_roots();
+    copied_records();
     heap_contracts();
     builders_and_slices();
     retained_budget();
     stage_policy();
+    scoped_graphs();
   } else if (!strcmp(argv[1], "equality")) {
     deep_equality();
     shared_equality();
@@ -497,7 +693,9 @@ int main(int argc, char **argv) {
     indexed_records();
   } else {
     CHECK(!strcmp(argv[1], "entries"));
+    aborted_diagnostic();
     entries();
+    snapshot_merges();
     unary_protocol();
   }
 }

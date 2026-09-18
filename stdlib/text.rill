@@ -4,3 +4,6 @@ export let encode_utf8 = encode_utf8
 export let decode_utf8 = decode_utf8
 export let starts_with = starts_with
 export let ends_with = ends_with
+export let lines = lines
+export let lines_with = lines_with
+export let display_path = display_path

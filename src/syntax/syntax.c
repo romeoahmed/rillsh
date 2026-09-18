@@ -1,3 +1,12 @@
+/**
+ * @file
+ * @brief Parse complete entries into stable, owned syntax trees.
+ *
+ * Expression and command modes share source offsets but have distinct word
+ * rules. Precedence parsing preserves effect order; syntax depth is checked
+ * before evaluation. Complete, incomplete, and invalid results all own storage
+ * and must be cleared or transferred to code preparation.
+ */
 #include "syntax.h"
 #include "diagnostic.h"
 #include "source.h"
@@ -589,8 +598,9 @@ static RillNode *suffix(Parser *p) {
              !(p->at + 1 < p->size && digit(p->s[p->at + 1]));
   if ((neg && take(p, '-')) || keyword(p, "not")) {
     RillNode *n = node(p, RILL_UNARY, at);
-    if (!n || !append(p, &n->text, neg ? "-" : "not", neg ? 1 : 3))
+    if (!n)
       return nullptr;
+    n->op = neg ? RILL_OP_SUB : RILL_OP_NOT;
     n->children = binary(p, 9);
     return n;
   }
@@ -664,13 +674,16 @@ static RillNode *binary(Parser *p, unsigned minimum) {
     }
     static const struct {
       const char *text;
+      RillOperator op;
       unsigned prec;
       bool word;
-    } ops[] = {{"|>", 1, false}, {"with", 2, true}, {"or", 3, true},
-               {"and", 4, true}, {"==", 5, false},  {"!=", 5, false},
-               {"<=", 5, false}, {">=", 5, false},  {"<", 5, false},
-               {">", 5, false},  {"+", 6, false},   {"-", 6, false},
-               {"*", 7, false},  {"/", 7, false}};
+    } ops[] = {{"|>", RILL_OP_PIPE, 1, false}, {"with", RILL_OP_WITH, 2, true},
+               {"or", RILL_OP_OR, 3, true},    {"and", RILL_OP_AND, 4, true},
+               {"==", RILL_OP_EQ, 5, false},   {"!=", RILL_OP_NE, 5, false},
+               {"<=", RILL_OP_LE, 5, false},   {">=", RILL_OP_GE, 5, false},
+               {"<", RILL_OP_LT, 5, false},    {">", RILL_OP_GT, 5, false},
+               {"+", RILL_OP_ADD, 6, false},   {"-", RILL_OP_SUB, 6, false},
+               {"*", RILL_OP_MUL, 7, false},   {"/", RILL_OP_DIV, 7, false}};
     size_t i = 0;
     for (; i < sizeof(ops) / sizeof(*ops); ++i) {
       if (ops[i].prec < minimum)
@@ -682,21 +695,22 @@ static RillNode *binary(Parser *p, unsigned minimum) {
       p->at = saved;
       break;
     }
-    if (ops[i].prec == 5 && left->kind == RILL_BINARY && left->integer == 5 &&
-        !left->grouped) {
+    if (ops[i].prec == 5 && left->kind == RILL_BINARY &&
+        left->op >= RILL_OP_EQ && left->op <= RILL_OP_GT && !left->grouped) {
       fail(p, "comparisons do not chain");
       break;
     }
+    RillOperator op = ops[i].op;
     RillNode *n = node(p,
-                       i == 0   ? RILL_PIPE
-                       : i == 1 ? RILL_WITH
-                                : RILL_BINARY,
+                       op == RILL_OP_PIPE   ? RILL_PIPE
+                       : op == RILL_OP_WITH ? RILL_WITH
+                                            : RILL_BINARY,
                        left->offset);
-    if (!n || !append(p, &n->text, ops[i].text, strlen(ops[i].text))) {
+    if (!n) {
       left = nullptr;
       break;
     }
-    n->integer = ops[i].prec;
+    n->op = op;
     n->children = left;
     left->next = binary(p, ops[i].prec + 1);
     if (!left->next) {

@@ -1,3 +1,12 @@
+/**
+ * @file
+ * @brief Advance process jobs, bounded byte queues, and cleanup deadlines.
+ *
+ * One supervisor owns child identities and captured storage. Polling pumps all
+ * channels, observes wait statuses, and aggregates completion policy. Pipe EOF
+ * does not prove process success; signaling authority ends with the last owned
+ * member, even if output or a retained report remains.
+ */
 #include "diagnostic.h"
 #include "exec.h"
 #include "platform/posix.h"
@@ -9,7 +18,9 @@
 #include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -35,6 +46,7 @@ void rill_exec_job_destroy(RillJob *j) {
     return;
   rill_platform_close(&j->errors);
   rill_platform_close(&j->input);
+  rill_platform_close(&j->relay);
   for (int i = 0; i < 2; ++i) {
     rill_platform_close(&j->output[i]);
     rill_text_clear(&j->captured[i]);
@@ -59,17 +71,33 @@ static void signal_job(RillJob *j, int signal) {
   if (grouped)
     (void)kill(-j->group, signal);
 }
-void rill_exec_cancel(RillJob *j) {
-  if (j->state == RILL_JOB_COMPLETED || j->cancelled)
+static void terminate(RillJob *j) {
+  if (j->state == RILL_JOB_COMPLETED || j->state == RILL_JOB_CANCELLING)
     return;
-  j->cancelled = true;
   j->state = RILL_JOB_CANCELLING;
   j->deadline = rill_platform_now() + 1000;
+  if (j->relay >= 0)
+    rill_text_truncate(&j->captured[1], 0);
   rill_platform_close(&j->input);
   for (int i = 0; i < 2; ++i)
     rill_platform_close(&j->output[i]);
   signal_job(j, SIGTERM);
   signal_job(j, SIGCONT);
+}
+void rill_exec_cancel(RillJob *j) {
+  if (j->state == RILL_JOB_COMPLETED)
+    return;
+  j->cancelled = true;
+  terminate(j);
+}
+void rill_exec_cutoff(RillJob *j) {
+  if (j->cancelled)
+    return;
+  j->cutoff = true;
+  for (size_t i = 0; i < j->count; ++i)
+    if (!j->stages[i].done)
+      j->stages[i].cutoff_signal = true;
+  terminate(j);
 }
 static void io_failure(RillJob *j, const char *message) {
   if (!j->error.kind)
@@ -79,6 +107,18 @@ static void io_failure(RillJob *j, const char *message) {
 }
 // One bounded operation per channel keeps a busy job from starving others.
 static void pump(RillJob *j) {
+  if (j->relay >= 0 && j->captured[1].size) {
+    struct pollfd fd = {.fd = j->relay, .events = POLLOUT};
+    if (poll(&fd, 1, 0) > 0) {
+      ssize_t n = write(j->relay, j->captured[1].data, j->captured[1].size);
+      if (n > 0) {
+        memmove(j->captured[1].data, j->captured[1].data + n,
+                j->captured[1].size - (size_t)n);
+        rill_text_truncate(&j->captured[1], j->captured[1].size - (size_t)n);
+      } else if (n < 0 && errno != EINTR && errno != EAGAIN)
+        io_failure(j, "cannot relay child stderr");
+    }
+  }
   if (j->errors >= 0) {
     ssize_t n = read(j->errors, (char *)&j->wire_error + j->error_used,
                      sizeof(j->wire_error) - j->error_used);
@@ -107,12 +147,15 @@ static void pump(RillJob *j) {
     }
   }
   if (j->input >= 0) {
-    if (j->fed == j->feed.size)
-      rill_platform_close(&j->input);
-    else {
+    if (j->fed == j->feed.size) {
+      j->fed = 0;
+      rill_text_truncate(&j->feed, 0);
+      if (j->feed_end)
+        rill_platform_close(&j->input);
+    } else {
       size_t size = j->feed.size - j->fed;
-      if (size > 65536)
-        size = 65536;
+      if (size > RILL_EXEC_QUEUE_BYTES)
+        size = RILL_EXEC_QUEUE_BYTES;
       ssize_t n = write(j->input, j->feed.data + j->fed, size);
       if (n > 0)
         j->fed += (size_t)n;
@@ -125,13 +168,27 @@ static void pump(RillJob *j) {
   for (int i = 0; i < 2; ++i)
     if (j->output[i] >= 0) {
       char bytes[16384];
-      ssize_t n = read(j->output[i], bytes, sizeof(bytes));
+      size_t room = sizeof(bytes);
+      if (j->streaming) {
+        size_t available = RILL_EXEC_QUEUE_BYTES - j->captured[i].size;
+        if (room > available)
+          room = available;
+      }
+      if (!room)
+        continue;
+      ssize_t n = read(j->output[i], bytes, room);
       if (n > 0) {
         size_t current = j->captured[0].size + j->captured[1].size;
-        if ((size_t)n > j->limit - current) {
+        if (!j->streaming && (size_t)n > j->limit - current) {
+          int length = snprintf(
+              j->error_text, sizeof(j->error_text),
+              "capture byte limit %zu exceeded: %zu retained, %zu additional",
+              j->limit, current, (size_t)n);
           j->error = (RillDiagnostic){
               .kind = RILL_LIMIT,
-              .message = "combined capture byte limit exceeded"};
+              .message = length >= 0 && (size_t)length < sizeof(j->error_text)
+                             ? j->error_text
+                             : "combined capture byte limit exceeded"};
           rill_exec_cancel(j);
         } else if (!rill_text_append(&j->captured[i], bytes, (size_t)n)) {
           j->error = (RillDiagnostic){.kind = RILL_MEMORY,
@@ -180,25 +237,30 @@ static void reap(RillJob *j) {
       if (!j->stages[i].stopped)
         all_stopped = false;
     }
-  if (!j->cancelled) {
+  if (!j->cancelled && !j->cutoff) {
     if (live && all_stopped)
       j->state = RILL_JOB_STOPPED;
     else if (j->state == RILL_JOB_STOPPED)
       j->state = j->errors >= 0 ? RILL_JOB_LAUNCHING : RILL_JOB_RUNNING;
   }
-  if (live && j->cancelled && !j->killed &&
+  if (live && (j->cancelled || j->cutoff) && !j->killed &&
       rill_platform_now() >= j->deadline) {
     signal_job(j, SIGKILL);
     j->killed = true;
   }
-  if (!live && j->errors < 0 && j->output[0] < 0 && j->output[1] < 0) {
+  if (!live && j->errors < 0 && j->output[0] < 0 && j->output[1] < 0 &&
+      (j->relay < 0 || !j->captured[1].size)) {
     j->state = RILL_JOB_COMPLETED;
     rill_platform_close(&j->input);
     bool downstream = true;
     for (size_t i = j->count; i > 0; --i) {
       RillExecStatus *s = &j->stages[i - 1];
-      s->expected_pipe = s->signaled && s->status == SIGPIPE &&
-                         j->connected[i - 1] && downstream && !j->cancelled;
+      s->expected_pipe =
+          s->signaled && !j->cancelled &&
+          ((s->status == SIGPIPE &&
+            ((j->connected[i - 1] && downstream) || j->cutoff)) ||
+           (j->cutoff && s->cutoff_signal &&
+            (s->status == SIGTERM || s->status == SIGKILL)));
       downstream =
           downstream && ((!s->signaled && s->status >= 0 && s->status < 256 &&
                           s->accepted_codes[s->status]) ||
@@ -227,9 +289,19 @@ bool rill_exec_poll(RillExec *e, int timeout, int extra_fd) {
         e->attached = nullptr;
     }
     fds[count++] = (struct pollfd){.fd = j->errors, .events = POLLIN};
-    fds[count++] = (struct pollfd){.fd = j->input, .events = POLLOUT};
-    fds[count++] = (struct pollfd){.fd = j->output[0], .events = POLLIN};
-    fds[count++] = (struct pollfd){.fd = j->output[1], .events = POLLIN};
+    fds[count++] = (struct pollfd){
+        .fd = j->input >= 0 && j->fed < j->feed.size ? j->input : -1,
+        .events = POLLOUT};
+    fds[count++] = (struct pollfd){
+        .fd = !j->streaming || j->captured[0].size < RILL_EXEC_QUEUE_BYTES
+                  ? j->output[0]
+                  : -1,
+        .events = POLLIN};
+    fds[count++] = (struct pollfd){
+        .fd = !j->streaming || j->captured[1].size < RILL_EXEC_QUEUE_BYTES
+                  ? j->output[1]
+                  : -1,
+        .events = POLLIN};
   }
   if (timeout < 0 || timeout > 20)
     timeout = 20; // Also service cancellation deadlines without a timer FD.
@@ -295,10 +367,11 @@ bool rill_exec_resume(RillExec *e, RillJob *j, bool foreground) {
   if (!rill_exec_job_live(j))
     return true;
   if (foreground) {
-    if (!rill_platform_foreground(e->platform, j->group,
+    if (!j->data &&
+        !rill_platform_foreground(e->platform, j->group,
                                   j->has_modes ? &j->modes : nullptr))
       return false;
-    j->handed = e->platform->tty >= 0;
+    j->handed = !j->data && e->platform->tty >= 0;
     e->attached = j;
   }
   if (kill(-j->group, SIGCONT) < 0) {
@@ -365,4 +438,33 @@ void rill_exec_prune(RillExec *e) {
     } else
       at = &j->next;
   }
+}
+
+void rill_exec_consume(RillJob *j, size_t count) {
+  assert(j->streaming && count <= j->captured[0].size);
+  if (!count)
+    return;
+  memmove(j->captured[0].data, j->captured[0].data + count,
+          j->captured[0].size - count);
+  rill_text_truncate(&j->captured[0], j->captured[0].size - count);
+}
+bool rill_exec_feed_ready(const RillJob *j) {
+  return j->input >= 0 && !j->feed_end && j->fed == j->feed.size;
+}
+bool rill_exec_feed(RillJob *j, RillBytes bytes) {
+  assert(rill_exec_feed_ready(j) && bytes.size <= RILL_EXEC_QUEUE_BYTES);
+  j->fed = 0;
+  rill_text_truncate(&j->feed, 0);
+  return rill_text_append(&j->feed, bytes.data, bytes.size);
+}
+void rill_exec_feed_end(RillJob *j) { j->feed_end = true; }
+bool rill_exec_feed_open(const RillJob *j) { return j->input >= 0; }
+bool rill_exec_cutoff_requested(const RillJob *j) { return j->cutoff; }
+
+void rill_exec_stop(RillJob *j) {
+  if (rill_exec_job_live(j) && !j->cancelled && !j->cutoff)
+    signal_job(j, SIGSTOP);
+}
+bool rill_exec_quiescent(const RillJob *j) {
+  return !rill_exec_job_live(j) || j->state == RILL_JOB_STOPPED;
 }

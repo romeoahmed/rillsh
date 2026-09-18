@@ -1,4 +1,5 @@
-/** @file
+/**
+ * @file
  * @brief Asynchronous process supervision over byte-oriented launch
  * specifications.
  *
@@ -45,7 +46,9 @@ typedef struct {
       *environment; ///< Borrowed environment copied during preparation.
   bool background;  ///< Default stdin is /dev/null.
   bool capture; ///< Concurrent stdout/stderr byte capture, no terminal handoff.
-  bool feed;    ///< Feed input through an owned nonblocking pipe.
+  bool
+      streaming; ///< Bounded stdout queue; stderr remains inherited or relayed.
+  bool feed;     ///< Feed input through an owned nonblocking pipe.
   RillBytes input;      ///< Copied input, only used with feed.
   size_t capture_limit; ///< Combined stdout/stderr byte limit when capturing.
 } RillExecSpec;
@@ -64,6 +67,7 @@ typedef struct {
   bool done;                ///< Reaped termination, not merely pipe EOF.
   bool stopped;             ///< Latest wait observation.
   bool signaled;            ///< Status denotes a signal instead of exit code.
+  bool cutoff_signal;       ///< Cleanup targeted this still-owned child.
   bool expected_pipe;       ///< Connected downstream success permits SIGPIPE.
   int status; ///< Exit code, terminating signal, or current stop signal.
 } RillExecStatus;
@@ -182,3 +186,31 @@ void rill_exec_retain(RillExec *exec, size_t id);
 /** @brief Release acknowledged completed jobs with no retained handle; never
  * signal. */
 void rill_exec_prune(RillExec *exec);
+
+/** @brief Capacity of each in-process byte edge, independent of kernel pipes.
+ */
+static constexpr size_t RILL_EXEC_QUEUE_BYTES = (size_t)64 * 1024;
+/** @brief Consume a prefix of the streaming stdout queue; zero is a no-op.
+ *
+ * No allocation occurs. count must not exceed the queued byte count. */
+void rill_exec_consume(RillJob *job, size_t count);
+/** @brief Whether a dynamic feed accepts another chunk of at most queue
+ * capacity. */
+bool rill_exec_feed_ready(const RillJob *job);
+/** @brief Copy a nonempty chunk into an empty feed queue; false on allocation
+ * failure. */
+bool rill_exec_feed(RillJob *job, RillBytes bytes);
+/** @brief Close dynamic stdin after its queued bytes have drained. */
+void rill_exec_feed_end(RillJob *job);
+/** @brief Whether the child still accepts feed input. */
+bool rill_exec_feed_open(const RillJob *job);
+/** @brief Request intentional cutoff, retaining already observed failures. */
+void rill_exec_cutoff(RillJob *job);
+/** @brief Whether intentional consumer cutoff was requested. */
+bool rill_exec_cutoff_requested(const RillJob *job);
+
+/** @brief Request a stop without relinquishing owned process identities. */
+void rill_exec_stop(RillJob *job);
+/** @brief Whether all owned children are stopped or reaped; output may remain.
+ */
+bool rill_exec_quiescent(const RillJob *job);

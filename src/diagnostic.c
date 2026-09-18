@@ -1,6 +1,21 @@
+/**
+ * @file
+ * @brief Map error categories to stable display names.
+ *
+ * This allocation-free layer contains no formatting, terminal I/O, or child
+ * status policy; callers retain ownership of diagnostic text.
+ */
 #include "diagnostic.h"
 const char *rill_diagnostic_name(RillError k) {
   switch (k) {
+  case RILL_DECODE:
+    return "DecodeError";
+  case RILL_STREAM_CONSUMED:
+    return "StreamConsumed";
+  case RILL_STREAM_ESCAPE:
+    return "StreamEscape";
+  case RILL_UNCONSUMED_STREAM:
+    return "UnconsumedStream";
   case RILL_MATCH_ERROR:
     return "MatchError";
   case RILL_ARITHMETIC:

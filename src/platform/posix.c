@@ -1,3 +1,11 @@
+/**
+ * @file
+ * @brief Own session signals, descriptors, and terminal transitions.
+ *
+ * Handlers only record flags and wake the self-pipe. Ordinary code drains
+ * events, manages foreground ownership, and restores inherited state. Native
+ * Linux/macOS readiness differences stay here; job policy belongs to exec.
+ */
 #include "posix.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -51,6 +59,7 @@ static void handler(int sig) {
 void rill_platform_close(int *fd) {
   if (*fd >= 0) {
     int saved = errno;
+    // Linux and Darwin release the descriptor even when close reports EINTR.
     (void)close(*fd);
     *fd = -1;
     errno = saved;

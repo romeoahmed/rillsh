@@ -1,4 +1,5 @@
-/** @file
+/**
+ * @file
  * @brief Owned source identity and byte spans shared across components.
  */
 #pragma once

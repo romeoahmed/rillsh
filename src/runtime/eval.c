@@ -1,3 +1,21 @@
+/**
+ * @file
+ * @brief Cooperative evaluation over explicit, rooted continuations.
+ *
+ * Each frame retains scope, code, and initialized operands. Tail calls replace
+ * frames; host effects yield events instead of nesting a C evaluator. Entry
+ * bindings publish atomically, and cleanup checkpoints remain live until the
+ * host has released their resources.
+ *
+ * @verbatim
+ * step --> value / error / yield
+ *      --> host request --> session service --> resume --> step
+ *      --> callback     --> ordinary frames --> callback event
+ * @endverbatim
+ *
+ * Suspension transfers frames and roots into a saved context. Abort discards
+ * pending work and diagnostics while preserving committed bindings.
+ */
 #include "diagnostic.h"
 #include "private.h"
 #include "runtime.h"
@@ -38,6 +56,7 @@ static bool same(RillBytes a, RillBytes b) {
 }
 enum { SMALL_FRAME_VALUES = 16, SPARE_FRAMES = 32 };
 static constexpr size_t MAX_CONTINUATIONS = 65'536;
+static constexpr size_t MAX_STAGE_ITEMS = 65'536;
 static void pop(RillEval *e) {
   Frame *f = e->frame;
   rill_runtime_unroot(&e->heap, &f->root);
@@ -51,13 +70,8 @@ static void pop(RillEval *e) {
   } else
     free(f);
 }
-static bool push(RillEval *e, const RillNode *node, RillValue env,
-                 RillValue code) {
-  if (e->depth == MAX_CONTINUATIONS) {
-    rill_eval_error(e, RILL_LIMIT, "continuation limit exceeded");
-    return false;
-  }
-  size_t count = OPERANDS, bytes = {};
+static size_t frame_slots(RillEval *e, const RillNode *node) {
+  size_t count = OPERANDS;
   // Only aggregates retain all operands. Sequential forms need fixed-size
   // frames regardless of syntax width, keeping them within the frame cache.
   if (node && (node->kind == RILL_LIST || node->kind == RILL_RECORD ||
@@ -68,11 +82,20 @@ static bool push(RillEval *e, const RillNode *node, RillValue env,
           node->kind == RILL_RECORD || node->kind == RILL_ENUM ? 2 : 1;
       if (ckd_add(&count, count, slots)) {
         rill_eval_error(e, RILL_MEMORY, "frame size overflow");
-        return false;
+        return 0;
       }
     }
-  if (count < SMALL_FRAME_VALUES)
-    count = SMALL_FRAME_VALUES;
+  return count < SMALL_FRAME_VALUES ? SMALL_FRAME_VALUES : count;
+}
+static bool push(RillEval *e, const RillNode *node, RillValue env,
+                 RillValue code) {
+  if (e->depth == MAX_CONTINUATIONS) {
+    rill_eval_error(e, RILL_LIMIT, "continuation limit exceeded");
+    return false;
+  }
+  size_t count = frame_slots(e, node), bytes = {};
+  if (!count)
+    return false;
   if (ckd_mul(&bytes, count, sizeof(RillValue)) ||
       ckd_add(&bytes, bytes, sizeof(Frame))) {
     rill_eval_error(e, RILL_MEMORY, "frame size overflow");
@@ -135,10 +158,29 @@ static void done(RillEval *e, RillValue v) {
 }
 static void replace(RillEval *e, const RillNode *node, RillValue env,
                     RillValue code) {
-  // push() cannot collect while the old frame roots are absent.
-  pop(e);
+  Frame *f = e->frame;
+  size_t count = frame_slots(e, node);
+  if (!count)
+    return;
+  if (count == f->capacity) {
+    // Keep root registration stable. Reset control state and the live prefix;
+    // discarded operands must not survive the next allocation or suspension.
+    *f = (Frame){.parent = f->parent,
+                 .node = node,
+                 .next = node ? node->children : nullptr,
+                 .used = OPERANDS,
+                 .capacity = count,
+                 .root = f->root};
+    f->values[ENV] = env;
+    f->values[OWNER] = code;
+    f->root.count = OPERANDS;
+  } else {
+    // Shrink wide frames too: tail calls must not retain a wide high-water
+    // mark. push() cannot collect while the old frame roots are absent.
+    pop(e);
+    (void)push(e, node, env, code);
+  }
   e->ready = false;
-  (void)push(e, node, env, code);
   e->roots[RESULT] = (RillValue){};
 }
 static void publish(RillEval *e, Frame *f, RillValue env) {
@@ -147,9 +189,9 @@ static void publish(RillEval *e, Frame *f, RillValue env) {
   else
     e->roots[ENTRY] = env;
 }
-static RillValue numeric(RillEval *e, const char *op, RillValue a,
+static RillValue numeric(RillEval *e, RillOperator op, RillValue a,
                          RillValue b) {
-  if (!strcmp(op, "==") || !strcmp(op, "!=")) {
+  if (op == RILL_OP_EQ || op == RILL_OP_NE) {
     bool eq = {};
     RillError status = rill_runtime_equal(a, b, &eq);
     if (status) {
@@ -157,10 +199,10 @@ static RillValue numeric(RillEval *e, const char *op, RillValue a,
       return (RillValue){};
     }
     return (RillValue){.kind = RILL_V_BOOL,
-                       .as.integer = !strcmp(op, "==") ? eq : !eq};
+                       .as.integer = op == RILL_OP_EQ ? eq : !eq};
   }
-  bool order = !strcmp(op, "<") || !strcmp(op, ">") || !strcmp(op, "<=") ||
-               !strcmp(op, ">=");
+  bool order = op == RILL_OP_LT || op == RILL_OP_GT || op == RILL_OP_LE ||
+               op == RILL_OP_GE;
   if (a.kind != b.kind) {
     rill_eval_error(e, RILL_TYPE, "operands must have the same kind");
     return (RillValue){};
@@ -168,7 +210,7 @@ static RillValue numeric(RillEval *e, const char *op, RillValue a,
   int cmp = 0;
   if (a.kind == RILL_V_STRING) {
     RillBytes x = a.as.object->bytes, y = b.as.object->bytes;
-    if (!strcmp(op, "+")) {
+    if (op == RILL_OP_ADD) {
       [[gnu::cleanup(rill_text_clear)]] RillBuffer joined = {};
       bool ok = rill_text_append(&joined, x.data, x.size) &&
                 rill_text_append(&joined, y.data, y.size);
@@ -191,11 +233,11 @@ static RillValue numeric(RillEval *e, const char *op, RillValue a,
     bool overflow = false;
     cmp = (x > y) - (x < y);
     if (!order) {
-      if (!strcmp(op, "+"))
+      if (op == RILL_OP_ADD)
         overflow = ckd_add(&z, x, y);
-      else if (!strcmp(op, "-"))
+      else if (op == RILL_OP_SUB)
         overflow = ckd_sub(&z, x, y);
-      else if (!strcmp(op, "*"))
+      else if (op == RILL_OP_MUL)
         overflow = ckd_mul(&z, x, y);
       else {
         rill_eval_error(e, RILL_TYPE, "/ requires Float operands");
@@ -209,13 +251,13 @@ static RillValue numeric(RillEval *e, const char *op, RillValue a,
     double x = a.as.real, y = b.as.real, z = 0;
     cmp = (x > y) - (x < y);
     if (!order) {
-      if (!strcmp(op, "+"))
+      if (op == RILL_OP_ADD)
         z = x + y;
-      else if (!strcmp(op, "-"))
+      else if (op == RILL_OP_SUB)
         z = x - y;
-      else if (!strcmp(op, "*"))
+      else if (op == RILL_OP_MUL)
         z = x * y;
-      else if (!strcmp(op, "/") && y != 0)
+      else if (op == RILL_OP_DIV && y != 0)
         z = x / y;
       else {
         rill_eval_error(e, RILL_ARITHMETIC, "division by zero");
@@ -231,10 +273,10 @@ static RillValue numeric(RillEval *e, const char *op, RillValue a,
     return (RillValue){};
   }
   return (RillValue){.kind = RILL_V_BOOL,
-                     .as.integer = !strcmp(op, "<")    ? cmp < 0
-                                   : !strcmp(op, ">")  ? cmp > 0
-                                   : !strcmp(op, "<=") ? cmp <= 0
-                                                       : cmp >= 0};
+                     .as.integer = op == RILL_OP_LT   ? cmp < 0
+                                   : op == RILL_OP_GT ? cmp > 0
+                                   : op == RILL_OP_LE ? cmp <= 0
+                                                      : cmp >= 0};
 }
 static RillValue construct(RillEval *e, RillValue ctor, RillValue arg) {
   RillValue desc = ctor.as.object->values[0];
@@ -353,7 +395,7 @@ static RillValue error_value(RillEval *e, RillDiagnostic d) {
   rill_runtime_unroot(&e->heap, &root);
   return record;
 }
-static bool catch_error(RillEval *e) {
+static bool catch_error(RillEval *e, int64_t *checkpoint) {
   if (e->error.kind == RILL_MEMORY || e->error.kind == RILL_CANCELLED)
     return false;
   Frame *handler = e->frame;
@@ -361,6 +403,7 @@ static bool catch_error(RillEval *e) {
     handler = handler->parent;
   if (!handler)
     return false;
+  *checkpoint = handler->checkpoint;
   RillDiagnostic d = e->error;
   while (e->frame != handler)
     pop(e);
@@ -415,6 +458,7 @@ static void call(RillEval *e, Frame *f, RillValue function_value,
   if (function_value.as.integer == -1) {
     // The checkpoint remains while the thunk's own calls are tail-eliminated.
     f->phase = ATTEMPT_WAIT;
+    f->checkpoint = e->resource_serial;
     f->next = nullptr;
     if (push(e, nullptr, f->values[ENV], f->values[OWNER])) {
       save(e->frame, argument);
@@ -508,16 +552,17 @@ void rill_runtime_abort(RillEval *e) {
   e->statement = nullptr;
   e->waiting = false;
   e->ready = false;
+  e->error = (RillDiagnostic){};
   rill_runtime_collect(&e->heap);
 }
 void rill_runtime_begin(RillEval *e, RillSyntax *s) {
   rill_runtime_abort(e);
-  e->error = (RillDiagnostic){};
   e->roots[CODE] = rill_eval_code(e, s);
   if (e->error.kind)
     return;
   e->roots[ENTRY] = rill_eval_scope(e, e->roots[GLOBAL]);
   e->statement = e->roots[CODE].as.object->code->syntax.first;
+  e->resource_boundary = e->resource_serial;
 }
 static void recursive(RillEval *e, Frame *f) {
   const RillNode *first =
@@ -608,13 +653,22 @@ static RillPlanRedirect lower_redirect(RillRedirect redirect) {
 RillEvalEvent rill_runtime_step(RillEval *e) {
   for (unsigned quantum = 0; quantum < 1024; ++quantum) {
     if (e->error.kind) {
-      if (catch_error(e))
+      int64_t checkpoint = 0;
+      if (catch_error(e, &checkpoint)) {
+        if (!e->error.kind && e->resource_serial > checkpoint) {
+          e->waiting = true;
+          return (RillEvalEvent){.state = RILL_EVAL_CLEANUP,
+                                 .native = checkpoint,
+                                 .value = e->roots[RESULT]};
+        }
         continue;
+      }
       RillSyntax *origin = e->roots[ERROR_CODE].kind == RILL_V_CODE
                                ? &e->roots[ERROR_CODE].as.object->code->syntax
                                : nullptr;
       return (RillEvalEvent){
           .state = RILL_EVAL_ERROR,
+          .value = e->roots[RAISED],
           .diagnostic = e->error,
           .source = origin ? origin->name.data : nullptr,
           .source_bytes =
@@ -624,9 +678,36 @@ RillEvalEvent rill_runtime_step(RillEval *e) {
     if (e->waiting)
       return (RillEvalEvent){.state = RILL_EVAL_YIELD};
     if (!e->frame) {
+      if (e->roots[RESULT].kind == RILL_V_STREAM) {
+        e->waiting = true;
+        return (RillEvalEvent){.state = RILL_EVAL_STREAM,
+                               .value = e->roots[RESULT]};
+      }
+      if (e->resource_boundary != e->resource_serial) {
+        e->resource_boundary = e->resource_serial;
+        RillError escape = rill_runtime_persistent(&e->heap, e->roots[ENTRY]);
+        if (!escape)
+          escape = rill_runtime_persistent(&e->heap, e->roots[RESULT]);
+        if (escape) {
+          rill_eval_error(e, escape,
+                          "scoped Stream cannot escape a top-level statement");
+          continue;
+        }
+        e->waiting = true;
+        return (RillEvalEvent){.state = RILL_EVAL_CLEANUP,
+                               .value = e->roots[RESULT]};
+      }
       if (!e->statement) {
-        RillValue pending[] = {rill_eval_compact(e, e->roots[ENTRY]),
-                               e->roots[TYPES]};
+        RillValue merged = e->roots[GLOBAL];
+        RillRoot merge_root = {};
+        rill_runtime_root(&e->heap, &merge_root, &merged, 1);
+        for (RillValue p = e->roots[ENTRY];
+             p.kind == RILL_V_ENV && p.as.object->count == 2 && !e->error.kind;
+             p = p.as.object->values[0])
+          merged = rill_eval_bind(e, merged, p.as.object->bytes.data,
+                                  p.as.object->values[1], false);
+        RillValue pending[] = {rill_eval_compact(e, merged), e->roots[TYPES]};
+        rill_runtime_unroot(&e->heap, &merge_root);
         RillRoot root = {};
         rill_runtime_root(&e->heap, &root, pending, 2);
         RillSyntax *syntax = e->roots[CODE].kind == RILL_V_CODE
@@ -636,10 +717,24 @@ RillEvalEvent rill_runtime_step(RillEval *e) {
              n && !e->error.kind; n = n->next)
           if (n->kind == RILL_STRUCT || n->kind == RILL_ENUM) {
             RillValue v = {};
+            if (rill_eval_lookup_env(e->roots[TYPES], n->text.data, &v)) {
+              rill_eval_error(
+                  e, RILL_TYPE,
+                  "nominal declaration already exists at publication");
+              break;
+            }
             if (rill_eval_lookup_env(pending[0], n->text.data, &v))
               pending[1] =
                   rill_eval_bind(e, pending[1], n->text.data, v, false);
           }
+        if (!e->error.kind) {
+          RillError escape = rill_runtime_persistent(&e->heap, pending[0]);
+          if (!escape)
+            escape = rill_runtime_persistent(&e->heap, e->roots[RESULT]);
+          if (escape)
+            rill_eval_error(e, escape,
+                            "scoped Stream cannot escape an execution entry");
+        }
         // Publish bindings and nominal names together only after both succeed.
         if (!e->error.kind) {
           e->roots[GLOBAL] = pending[0];
@@ -668,6 +763,12 @@ RillEvalEvent rill_runtime_step(RillEval *e) {
         publish(e, f, f->values[ENV]);
         done(e, (RillValue){});
         continue;
+      }
+      if (f->phase == HOST_WAIT) {
+        pop(e);
+        e->waiting = true;
+        return (RillEvalEvent){.state = RILL_EVAL_CALLBACK,
+                               .value = e->roots[RESULT]};
       }
       if (f->phase == MODULE_WAIT || f->phase == CALL_WAIT) {
         done(e, e->roots[RESULT]);
@@ -801,14 +902,14 @@ RillEvalEvent rill_runtime_step(RillEval *e) {
       continue;
     }
     if (kind == RILL_BINARY && f->used == OPERANDS + 1 &&
-        (!strcmp(n->text.data, "and") || !strcmp(n->text.data, "or"))) {
+        (n->op == RILL_OP_AND || n->op == RILL_OP_OR)) {
       RillValue left = f->values[OPERANDS];
       if (left.kind != RILL_V_BOOL) {
         rill_eval_error(e, RILL_TYPE, "logical operands require Bool");
         continue;
       }
-      if ((!strcmp(n->text.data, "and") && !left.as.integer) ||
-          (!strcmp(n->text.data, "or") && left.as.integer)) {
+      if ((n->op == RILL_OP_AND && !left.as.integer) ||
+          (n->op == RILL_OP_OR && left.as.integer)) {
         done(e, left);
         continue;
       }
@@ -879,16 +980,16 @@ RillEvalEvent rill_runtime_step(RillEval *e) {
         rill_eval_error(e, RILL_MISSING_FIELD, "missing record field");
       break;
     case RILL_BINARY:
-      if (!strcmp(n->text.data, "and") || !strcmp(n->text.data, "or")) {
+      if (n->op == RILL_OP_AND || n->op == RILL_OP_OR) {
         if (args[1].kind != RILL_V_BOOL)
           rill_eval_error(e, RILL_TYPE, "logical operands require Bool");
         else
           v = args[1];
       } else
-        v = numeric(e, n->text.data, args[0], args[1]);
+        v = numeric(e, n->op, args[0], args[1]);
       break;
     case RILL_UNARY:
-      if (!strcmp(n->text.data, "not")) {
+      if (n->op == RILL_OP_NOT) {
         if (args[0].kind != RILL_V_BOOL)
           rill_eval_error(e, RILL_TYPE, "not requires Bool");
         else
@@ -912,8 +1013,9 @@ RillEvalEvent rill_runtime_step(RillEval *e) {
         rill_eval_error(e, RILL_TYPE, "with requires records");
         break;
       }
-      v = rill_eval_object(e, RILL_V_RECORD, base.as.object->values,
-                           base.as.object->count, nullptr, 0);
+      v = rill_runtime_record_copy(&e->heap, base);
+      if (v.kind == RILL_V_UNIT)
+        rill_eval_error(e, RILL_MEMORY, "allocation failed");
       save(f, v);
       if (e->error.kind)
         break;
@@ -943,8 +1045,8 @@ RillEvalEvent rill_runtime_step(RillEval *e) {
       for (const RillNode *c = n->children; c; c = c->next, ++index) {
         size_t added =
             c->kind == RILL_SPREAD ? rill_runtime_count(args[index]) : 1;
-        if (ckd_add(&total, total, added) || total > 65536) {
-          rill_eval_error(e, RILL_LIMIT, "command argument limit exceeded");
+        if (ckd_add(&total, total, added) || total > MAX_STAGE_ITEMS) {
+          rill_eval_error(e, RILL_LIMIT, "command payload limit exceeded");
           break;
         }
       }
@@ -968,27 +1070,36 @@ RillEvalEvent rill_runtime_step(RillEval *e) {
           items[used++] = args[index];
         }
       }
+      size_t argument = 0;
       for (size_t i = 0; i < total; ++i) {
         RillValue item = items[i];
-        if (item.kind == RILL_V_REDIRECT) {
+        bool redirect = item.kind == RILL_V_REDIRECT;
+        if (redirect) {
           if (!item.as.object->count)
             continue;
           item = item.as.object->values[0];
         }
+        const char *message = nullptr;
         if (item.kind != RILL_V_STRING && item.kind != RILL_V_BYTES &&
             item.kind != RILL_V_PATH) {
-          rill_eval_error(e, RILL_TYPE,
-                          "command arguments require String, Bytes or Path");
-          break;
-        }
-        if (memchr(item.as.object->bytes.data, 0, item.as.object->bytes.size) ||
-            (i == 0 && !item.as.object->bytes.size)) {
-          rill_eval_error(e, RILL_TYPE, "invalid NUL or empty executable");
-          e->error.has_argument = true;
-          e->error.argument = i;
+          message = redirect
+                        ? "redirection paths require String, Bytes or Path"
+                        : "command arguments require String, Bytes or Path";
+        } else if (memchr(item.as.object->bytes.data, 0,
+                          item.as.object->bytes.size)) {
+          message = redirect ? "redirection path contains NUL"
+                             : "command argument contains NUL";
+        } else if (!redirect && argument == 0 && !item.as.object->bytes.size)
+          message = "executable must not be empty";
+        if (message) {
+          rill_eval_error(e, RILL_TYPE, message);
+          e->error.has_argument = !redirect;
+          e->error.argument = argument;
           e->error.stage = f->parent ? f->parent->used - OPERANDS : 0;
           break;
         }
+        if (!redirect)
+          ++argument;
       }
       break;
     }
@@ -1034,7 +1145,7 @@ RillEvalEvent rill_runtime_step(RillEval *e) {
 void rill_runtime_resume(RillEval *e, RillValue value,
                          RillDiagnostic diagnostic) {
   e->waiting = false;
-  e->ready = true;
+  e->ready = e->frame != nullptr;
   e->roots[RESULT] = value;
   e->error = diagnostic;
   if (diagnostic.kind && value.kind == RILL_V_ADT)
@@ -1086,4 +1197,93 @@ bool rill_runtime_builtin(RillEval *e, const char *name, RillValue *value) {
                               ? e->roots[ENTRY]
                               : e->roots[PRELUDE],
                           name, value);
+}
+
+void rill_runtime_callback(RillEval *e, RillValue function,
+                           RillValue argument) {
+  assert(e->waiting);
+  RillValue env = e->frame ? e->frame->values[ENV] : e->roots[ENTRY],
+            code = e->frame ? e->frame->values[OWNER] : e->roots[CODE];
+  e->waiting = false;
+  e->ready = false;
+  if (!push(e, nullptr, env, code))
+    return;
+  e->frame->phase = HOST_WAIT;
+  if (!push(e, nullptr, env, code))
+    return;
+  e->frame->phase = ATTEMPT_WAIT;
+  e->frame->checkpoint = e->resource_serial;
+  if (!push(e, nullptr, env, code))
+    return;
+  save(e->frame, function);
+  save(e->frame, argument);
+}
+
+int64_t rill_runtime_resource_id(RillEval *e) {
+  return e->resource_serial == INT64_MAX ? 0 : ++e->resource_serial;
+}
+struct RillEvaluation {
+  Frame *frame;
+  const RillNode *statement;
+  size_t depth;
+  int64_t resource_boundary;
+  RillValue roots[ROOT_COUNT];
+  RillRoot root;
+  RillDiagnostic error;
+  bool waiting, ready;
+};
+static bool shared_root(size_t i) {
+  return i == GLOBAL || i == TYPES || i == PRELUDE || i == MODULES;
+}
+RillEvaluation *rill_runtime_suspend(RillEval *e) {
+  RillEvaluation *saved = malloc(sizeof(*saved));
+  if (!saved)
+    return nullptr;
+  *saved = (RillEvaluation){.frame = e->frame,
+                            .statement = e->statement,
+                            .depth = e->depth,
+                            .resource_boundary = e->resource_boundary,
+                            .error = e->error,
+                            .waiting = e->waiting,
+                            .ready = e->ready};
+  for (size_t i = 0; i < ROOT_COUNT; ++i)
+    if (!shared_root(i)) {
+      saved->roots[i] = e->roots[i];
+      e->roots[i] = (RillValue){};
+    }
+  rill_runtime_root(&e->heap, &saved->root, saved->roots, ROOT_COUNT);
+  e->frame = nullptr;
+  e->statement = nullptr;
+  e->depth = 0;
+  e->waiting = false;
+  e->ready = false;
+  e->error = (RillDiagnostic){};
+  return saved;
+}
+void rill_runtime_restore(RillEval *e, RillEvaluation *saved) {
+  assert(!e->frame && !e->statement);
+  e->frame = saved->frame;
+  e->statement = saved->statement;
+  e->depth = saved->depth;
+  e->resource_boundary = saved->resource_boundary;
+  e->error = saved->error;
+  e->waiting = saved->waiting;
+  e->ready = saved->ready;
+  for (size_t i = 0; i < ROOT_COUNT; ++i)
+    if (!shared_root(i))
+      e->roots[i] = saved->roots[i];
+  rill_runtime_unroot(&e->heap, &saved->root);
+  free(saved);
+}
+void rill_runtime_discard(RillEval *e, RillEvaluation *saved) {
+  if (!saved)
+    return;
+  for (Frame *frame = saved->frame; frame;) {
+    Frame *next = frame->parent;
+    rill_runtime_unroot(&e->heap, &frame->root);
+    free(frame);
+    frame = next;
+  }
+  rill_runtime_unroot(&e->heap, &saved->root);
+  free(saved);
 }

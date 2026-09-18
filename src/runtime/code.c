@@ -1,3 +1,12 @@
+/**
+ * @file
+ * @brief Transfer parsed syntax into traced, reusable code.
+ *
+ * Prepare exact free-name layouts and a code-local pool of immutable Strings.
+ * Closures retain this owner; escaped literals do not retain code. Preparation
+ * runs no user code and defers pattern errors until their expression is
+ * reached.
+ */
 #include "diagnostic.h"
 #include "private.h"
 #include "runtime.h"
@@ -5,62 +14,73 @@
 #include "text/text.h"
 #include <stdckdint.h>
 #include <stddef.h>
-#include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
-static size_t bucket(const RillNode *node, size_t capacity) {
-  uintptr_t key = (uintptr_t)node >> 3;
-  key ^= key >> 17;
-  return (size_t)key & (capacity - 1);
-}
-Captures *rill_eval_captures(RillCode *code, const RillNode *node) {
-  size_t slot = bucket(node, code->capacity);
-  while (code->functions[slot].node != node)
-    slot = (slot + 1) & (code->capacity - 1);
-  return &code->functions[slot];
-}
 static bool constant(const RillNode *node) {
   return node->kind == RILL_STRING || node->kind == RILL_PAIR;
+}
+static int literal_order(const void *left, const void *right) {
+  const RillNode *const *a = left, *const *b = right;
+  RillBuffer x = (*a)->text, y = (*b)->text;
+  size_t size = x.size < y.size ? x.size : y.size;
+  int order = size ? memcmp(x.data, y.data, size) : 0;
+  return order ? order : (x.size > y.size) - (x.size < y.size);
 }
 RillValue rill_eval_constant(RillValue owner, const RillNode *node) {
   return owner.as.object->values[node->constant];
 }
 RillValue rill_eval_code(RillEval *e, RillSyntax *syntax) {
+  RillNode **literals = nullptr;
   if (syntax->allocation < sizeof(RillSyntax))
     goto failure;
-  size_t count = 0, constants = 0, capacity = 1, bytes = {}, allocation = {},
-         total = {};
+  size_t count = 0, constants = 0, bytes = {}, allocation = {}, total = {};
   for (const RillNode *n = syntax->allocated; n; n = n->allocated_next) {
     if (n->kind == RILL_FUNCTION)
       ++count;
-    if (constant(n))
+    if (syntax->state == RILL_COMPLETE && constant(n))
       ++constants;
   }
-  while (capacity / 2 < count)
-    if (ckd_mul(&capacity, capacity, 2))
+  size_t unique = 0;
+  if (constants) {
+    if (ckd_mul(&bytes, constants, sizeof(*literals)))
       goto failure;
-  if (ckd_mul(&bytes, capacity, sizeof(Captures)) ||
+    literals = malloc(bytes);
+    if (!literals)
+      goto failure;
+    size_t i = 0;
+    for (RillNode *n = syntax->allocated; n; n = n->allocated_next)
+      if (constant(n))
+        literals[i++] = n;
+    qsort(literals, constants, sizeof(*literals), literal_order);
+    // Share immutable bytes only within this code owner. No global intern table
+    // or back edge may extend a literal's lifetime to unrelated code.
+    for (i = 0; i < constants; ++i) {
+      if (!i || literal_order(literals + i - 1, literals + i))
+        ++unique;
+      literals[i]->constant = unique - 1;
+    }
+  }
+  if (ckd_mul(&bytes, count, sizeof(Captures)) ||
       ckd_add(&bytes, bytes, sizeof(RillCode)))
     goto failure;
   RillValue value =
-      rill_eval_object(e, RILL_V_CODE, nullptr, constants, nullptr, 0);
+      rill_eval_object(e, RILL_V_CODE, nullptr, unique, nullptr, 0);
   if (e->error.kind)
     goto failure;
   // Analysis uses only C storage; constant construction roots code below.
   RillCode *code = malloc(bytes);
   if (!code)
     goto failure;
-  *code = (RillCode){.syntax = *syntax, .capacity = capacity};
+  *code = (RillCode){.syntax = *syntax, .count = count};
   *syntax = (RillSyntax){};
-  for (size_t i = 0; i < capacity; ++i)
-    code->functions[i] = (Captures){};
-  for (const RillNode *n = code->syntax.allocated; n; n = n->allocated_next) {
+  size_t function = 0;
+  for (RillNode *n = code->syntax.allocated; n; n = n->allocated_next) {
     if (n->kind != RILL_FUNCTION)
       continue;
-    size_t slot = bucket(n, capacity);
-    while (code->functions[slot].node)
-      slot = (slot + 1) & (capacity - 1);
-    code->functions[slot].node = n;
+    // The complete function set is known; node slots need no pointer index.
+    n->function = function;
+    code->functions[function++] = (Captures){.node = n};
   }
   if (code->syntax.state == RILL_COMPLETE)
     for (RillNode *n = code->syntax.allocated; n; n = n->allocated_next) {
@@ -87,11 +107,11 @@ RillValue rill_eval_code(RillEval *e, RillSyntax *syntax) {
     rill_eval_code_free(code);
     goto failure;
   }
-  for (size_t i = 0; i < capacity; ++i) {
+  for (size_t i = 0; i < count; ++i) {
     Captures *analysis = &code->functions[i];
-    if (!analysis->node || code->syntax.state != RILL_COMPLETE)
+    if (code->syntax.state != RILL_COMPLETE)
       continue;
-    rill_eval_analyze(e, analysis);
+    rill_eval_analyze(e, code, analysis);
     size_t names = {};
     if (e->error.kind ||
         ckd_mul(&names, analysis->capacity, sizeof(*analysis->names)) ||
@@ -113,14 +133,11 @@ RillValue rill_eval_code(RillEval *e, RillSyntax *syntax) {
     // no back edge, so an escaped literal does not retain its syntax.
     RillRoot root = {};
     rill_runtime_root(&e->heap, &root, &value, 1);
-    size_t slot = 0;
-    for (RillNode *n = code->syntax.allocated; n && !e->error.kind;
-         n = n->allocated_next) {
-      if (!constant(n))
-        continue;
-      n->constant = slot;
-      value.as.object->values[slot++] =
-          rill_eval_text(e, n->text.data, n->text.size);
+    for (size_t i = 0; i < constants && !e->error.kind; ++i) {
+      RillNode *n = literals[i];
+      RillValue *slot = &value.as.object->values[n->constant];
+      if (slot->kind == RILL_V_UNIT)
+        *slot = rill_eval_text(e, n->text.data, n->text.size);
       if (n->kind == RILL_STRING && !e->error.kind) {
         // Lowered literals read the pool. Record keys still need their decoded
         // syntax text for pattern matching; Strings no longer need two copies.
@@ -139,14 +156,16 @@ RillValue rill_eval_code(RillEval *e, RillSyntax *syntax) {
     e->error = code->syntax.diagnostic;
     e->roots[ERROR_CODE] = value;
   }
+  free(literals);
   return value;
 failure:
+  free(literals);
   rill_syntax_clear(syntax);
   rill_eval_error(e, RILL_MEMORY, "cannot retain code");
   return (RillValue){};
 }
 void rill_eval_code_free(RillCode *code) {
-  for (size_t i = 0; i < code->capacity; ++i)
+  for (size_t i = 0; i < code->count; ++i)
     free(code->functions[i].names);
   rill_syntax_clear(&code->syntax);
   free(code);

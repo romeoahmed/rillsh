@@ -1,3 +1,7 @@
+/**
+ * @file
+ * @brief Evaluator frames, lexical analysis, and code-owned metadata.
+ */
 #pragma once
 #include "diagnostic.h"
 #include "runtime.h"
@@ -19,7 +23,14 @@ enum {
   ROOT_COUNT
 };
 enum { ENV, OWNER, OPERANDS };
-enum { CALL_WAIT = 100, ATTEMPT_WAIT, MATCH_GUARD, IMPORT_WAIT, MODULE_WAIT };
+enum {
+  CALL_WAIT = 100,
+  ATTEMPT_WAIT,
+  MATCH_GUARD,
+  IMPORT_WAIT,
+  MODULE_WAIT,
+  HOST_WAIT
+};
 // Slots ENV and OWNER retain lexical scope and code; OPERANDS begins the
 // initialized operand prefix registered by root. Unused capacity is untraced.
 typedef struct Frame {
@@ -27,6 +38,7 @@ typedef struct Frame {
   const RillNode *node, *next, *arm;
   size_t used, capacity;
   unsigned phase;
+  int64_t checkpoint;
   RillRoot root;
   RillValue values[];
 } Frame;
@@ -41,6 +53,7 @@ struct RillEval {
   RillRoot root;
   RillDiagnostic error;
   bool waiting, ready;
+  int64_t resource_serial, resource_boundary;
 };
 typedef struct Bound {
   struct Bound *parent;
@@ -75,16 +88,16 @@ typedef struct Captures {
   const char **names;
   size_t count, capacity;
   RillError error;
+  bool prepared;
   const char *message;
 } Captures;
 typedef struct RillCode {
   RillSyntax syntax;
   RillNode module;
-  size_t capacity;
+  size_t count;
   Captures functions[];
 } RillCode;
-void rill_eval_analyze(RillEval *eval, Captures *captures);
+void rill_eval_analyze(RillEval *eval, RillCode *code, Captures *captures);
 RillValue rill_eval_code(RillEval *eval, RillSyntax *syntax);
 void rill_eval_code_free(RillCode *code);
-Captures *rill_eval_captures(RillCode *code, const RillNode *node);
 RillValue rill_eval_constant(RillValue code, const RillNode *node);

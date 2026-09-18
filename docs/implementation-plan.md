@@ -33,9 +33,9 @@ stdlib/
   core.rill
   seq.rill
   text.rill
-  fs.rill                     Planned filesystem API
+  fs.rill                     Filesystem streams and explicit expansion
   process.rill
-  json.rill                   Planned JSON API
+  json.rill                   Strict JSON conversion
 subprojects/
   yyjson.wrap                 Pinned dependency; build overlay only if required
   packagefiles/               Any project-owned Meson overlay, separate from upstream source
@@ -47,14 +47,13 @@ docs/                         Specifications and this plan
   Doxyfile.in                 Minimal API-reference template; outputs stay in the build tree
 ```
 
-`tools/` contains the Unicode generator/verifier and the small check driver shared by
-developers and CI; both use Python's standard library. C23 `#embed` embeds the standard
-library directly. `tests/unit/` holds C component tests, `system/` holds Python
-process/PTY tests, `helpers/` holds controlled child programs, and `benchmarks/` holds
-release workloads. Add `fuzz/` with the fuzz targets; add `spec/` only if standalone
-Rill fixtures improve conformance testing. Keep fixtures with the cases that use them.
-Meson suite names remain those in testing; directories and suites need not correspond
-one-to-one. Generated build files and benchmark results stay under ignored build trees.
+`tools/` contains the Unicode generator/verifier, using Python's standard library. C23
+`#embed` embeds the standard library directly. `tests/unit/` holds C component tests,
+`system/` holds Python process/PTY tests, `helpers/` holds controlled child programs,
+and `benchmarks/` holds release workloads. `fuzz/` holds syntax and codec fuzz targets
+and seed inputs; keep fixtures with the cases that use them. Meson suite names remain
+those in testing; directories and suites need not correspond one-to-one. Generated build
+files and benchmark results stay under ignored build trees.
 
 Keep headers beside their implementations. There is no installed C SDK or public
 `include/` tree. `src/main.c` is the only executable entry point.
@@ -66,17 +65,18 @@ invariants; it does not receive the entire Session merely to obtain unrelated se
 Source and diagnostic types are small shared contracts, not the seed of a `utils` layer.
 The following table lists allowed project dependencies; standard C facilities are
 available everywhere, and source/diagnostic types are omitted from individual rows.
+Editor dependencies describe planned work; see status for the implemented surface.
 
-| Owner      | Responsibility                                                                                   | Direct component dependencies                         |
-| ---------- | ------------------------------------------------------------------------------------------------ | ----------------------------------------------------- |
-| `text`     | Length-aware text, Unicode properties/metrics, literal/style spans                               | None                                                  |
-| `syntax`   | Syntax, completeness, precedence, AST, highlight/indentation metadata                            | `text`                                                |
-| `runtime`  | Language values, code ownership, lexical resolution, GC, evaluation, resource tokens             | `syntax`, `text`                                      |
-| `platform` | Native descriptor, terminal, signal, filesystem, environment, and clock services                 | `text` where byte/text views are needed               |
-| `exec`     | Prepared launches, child identities, job state, reports, nonblocking byte transport              | `platform`, `text`                                    |
-| `editor`   | Pure input/edit/layout state and rendering operations                                            | `syntax`, `text`                                      |
-| `library`  | Callable primitives, codecs, filesystem/process adapters, library metadata                       | `runtime`, `exec`, `platform`, `text`; private yyjson |
-| Session    | Scheduling, terminal handoff, startup, module I/O, history/completion coordination, presentation | Component interfaces above                            |
+| Owner | Responsibility | Direct component dependencies |
+| --- | --- | --- |
+| `text` | Length-aware text, Unicode properties/metrics, literal/style spans | None |
+| `syntax` | Syntax, completeness, precedence, AST, highlight/indentation metadata | `text` |
+| `runtime` | Language values, code ownership, lexical resolution, GC, evaluation, resource tokens | `syntax`, `text` |
+| `platform` | Native descriptor, terminal, signal, filesystem, environment, and clock services | `text` where byte/text views are needed |
+| `exec` | Prepared launches, child identities, job state, reports, nonblocking byte transport | `platform`, `text` |
+| `editor` | Pure input/edit/layout state and rendering operations | `syntax`, `text` |
+| `library` | Callable primitives, codecs, filesystem/process adapters, library metadata | `runtime`, `exec`, `platform`, `text`; private yyjson |
+| Session | Scheduling, terminal handoff, startup, module I/O, history/completion coordination, presentation | Component interfaces above |
 
 This is a dependency direction, not a requirement for one archive per directory.
 `runtime` has no POSIX, editor, or yyjson dependency. `exec` accepts evaluated launch
@@ -125,11 +125,12 @@ are session services; the editor owns their in-memory editing/search/menu state.
 ### File and header discipline
 
 Start with a few files per component, splitting by a cohesive responsibility when
-implementation size or tests justify it. For example, `runtime/value.c`, `heap.c`,
-`eval.c`, and `stream.c` are useful boundaries; a separate file for each value variant
-or evaluator opcode is not. `exec/launch.c` and `job.c` separate launch setup from live
-supervision; `editor/input.c`, `edit.c`, `layout.c`, and `render.c` separate testable
-state machines. These examples are starting points, not an exhaustive file checklist.
+implementation size or tests justify it. For example, `runtime/value.c`, `heap.c`, and
+`eval.c`, plus `library/stream.c` are useful boundaries; a separate file for each value
+variant or evaluator opcode is not. `exec/launch.c` and `job.c` separate launch setup
+from live supervision; `editor/input.c`, `edit.c`, `layout.c`, and `render.c` separate
+testable state machines. These examples are starting points, not an exhaustive file
+checklist.
 
 A component's boundary header exposes operations, immutable views, and explicit
 ownership. Keep representation headers private; use forward declarations where useful,
@@ -154,13 +155,13 @@ carry include paths and link requirements.
 
 Maintain one list of boundary headers for the optional `api-docs` target. The quality
 gate requires it; ordinary shell builds do not. Cross-component includes must follow the
-dependency table: include paths do not enforce encapsulation. The quality gate checks
-project boundaries, while review guards against private-representation dependencies.
+dependency table: include paths do not enforce encapsulation. Review guards component
+boundaries and private-representation dependencies.
 
-| Input                            | Output                            | Lifecycle                                             |
-| -------------------------------- | --------------------------------- | ----------------------------------------------------- |
-| Pinned Unicode data and manifest | `src/text/unicode_tables.inc`     | Explicit regeneration; both inputs and output tracked |
-| Authored `stdlib/*.rill`         | Read-only bytes in the executable | Native C23 `#embed`; compiler-tracked dependencies    |
+| Input | Output | Lifecycle |
+| --- | --- | --- |
+| Pinned Unicode data and manifest | `src/text/unicode_tables.inc` | Explicit regeneration; both inputs and output tracked |
+| Authored `stdlib/*.rill` | Read-only bytes in the executable | Native C23 `#embed`; compiler-tracked dependencies |
 
 Bundling gives `std:` modules a deterministic source versioned with the executable.
 Diagnostics use logical names such as `std:seq`; file imports retain their own identity
@@ -182,87 +183,42 @@ loop. Commit size is independent of stage boundaries.
 
 ### 1. A reliable executable shell foundation
 
-**Complete.** Implemented scope and acceptance evidence: [current status](status.md).
+**Complete.** Build and toolchain, owned source/diagnostics, initial Values/GC, command
+parsing, launch gates, byte pumps, cancellation, and external job control. CLI/script
+input and a canonical prompt use the production parser and evaluator. Unicode generation
+and RGB/plain output are available without rich editing.
 
-**Deliver.** Establish the repository/build layout, Fedora development image, native
-macOS builds, strict toolchain, API documentation target, pinned inputs, Unicode
-generation, and test helpers. Implement the production source/diagnostic path, initial
-Values/GC and continuation protocol, command parsing/lowering, and the POSIX supervisor
-with its byte pumps. Support literal commands, byte pipelines, redirection, launch
-reports, cancellation, and external job control. Use the same unary native-call path
-that later language features will extend. Provide CLI/script input and a canonical-input
-prompt; text/style separation and RGB capability policy start here even though
-cursor-addressed editing comes later.
-
-**Boundary.** This is the command-capable subset of the final grammar. Closures,
-user-defined ADTs, structured streams, and rich editing are not completion conditions.
-Process tests can construct launch specifications directly before all public library
-functions exist. No temporary shell interpreter or `system()` fallback is acceptable.
-
-**Accept when:**
-
-- The actual binary executes a multi-stage pipeline from source and reports syntax,
-  launch, and process failures distinctly; controlled helpers verify bytes and redirection.
-- Process contracts E03–E08, E14–E16, E18–E20 and platform P01–P03, P07, P13–P14 pass
-  for the implemented command surface, using direct supervisor tests where necessary.
-  External foreground/background stop/resume and terminal restoration have real PTY evidence.
-- Fedora and native macOS builds pass compilation, formatting, analysis, and applicable
-  ASan/UBSan/release tests. The Unicode corpus and minimal RGB/plain rendering checks pass.
-  Documented boundary headers generate a warning-free HTML reference with C23 declarations
-  and ownership contracts intact.
+Acceptance covers source-to-process pipelines, distinct syntax/launch/exit errors,
+E03–E08, E14–E16, E18–E20, and P01–P03, P07, P13–P14 for this surface. PTY tests
+establish external stop/resume and restoration. Linux and native macOS pass applicable
+sanitizer/release gates, Unicode conformance, and warning-free API generation.
 
 ### 2. The complete functional language
 
-**Complete.** Implemented scope and acceptance evidence: [current status](status.md).
+**Complete.** First-class unary functions, currying, tail calls, records, ADTs,
+patterns, checked arithmetic, errors, modules, lexical captures, transactional entry
+publication, bundled libraries, and reusable process plans. The prompt remains plain.
 
-**Deliver.** Complete syntax, lexical resolution/lowering, first-class unary functions,
-currying, proper tail calls, records, ADTs, patterns, arithmetic, error conversion,
-modules, and transactional REPL binding publication. Complete code/capture ownership, GC
-roots, and collection of shadowed bindings. Bootstrap bundled modules and the prelude;
-implement pure sequence/text operations and the public JobPlan/process API through the
-existing adapters. Extend canonical multiline input to the complete grammar and add
-startup config.
-
-**Boundary.** The language and reusable plan model are complete. Structured streaming,
-stream-dependent lifetime cases, and suspended mixed evaluations belong to stage 3; the
-editor still uses the plain input path.
-
-**Accept when:**
-
-- First-class closures and constructors can be stored, returned, partially applied, and
-  matched across module imports and REPL entries, with specified effect order.
-- L01–L14 and A01–A12 pass for non-Stream cases, including one million tail calls,
-  stress collection, and live-heap checks; E01–E02 verify plan reuse and launch snapshots.
-  Stream-specific branches of L10–L11 and L15–L16 are explicitly pending stage 3.
-- End-to-end scripts combine library functions and external plans without a second
-  dispatch path. Failed entries preserve earlier effects but publish no partial bindings;
-  original stage-1 process and terminal regressions remain green.
+Acceptance covers L01–L14 and A01–A12 for non-Stream cases, including million-call tail
+recursion and stress GC; E01–E02 establish plan reuse and snapshots. Closures and
+constructors survive module/entry boundaries. Failed entries preserve earlier effects
+but publish no bindings. Stream-specific branches are accepted in stage 3.
 
 ### 3. Structured streaming and complete execution semantics
 
-**Deliver.** Implement stream ownership/escape checks, explicit close/finalization,
-source/transform/sink resumption connected to the existing byte pumps, codecs, Stream
-extensions to the existing collection/sorting budgets, and the filesystem/JSON library.
-Complete `capture`, `stream`, `through`, and checked completion. Integrate cancellation
-and suspended evaluator/job contexts with foreground resume, session snapshots, and
-shutdown. Complete all library contracts and render results incrementally through
-text/style spans on the existing prompt.
+**Complete.** Scoped stream ownership, lazy transforms, checked sinks, materialization
+budgets, filesystem/JSON adapters, and concurrent process transport. Foreground
+suspension retains evaluator and resource contexts for resumption. Only one user context
+runs at a time; rich editing, completion, and history remain stage 4.
 
-**Boundary.** This is the complete language and execution model usable through scripts
-and plain interaction. Rich editing, persistent history, and completion UI remain stage 4. There is still only one active user evaluator; no background callback scheduler is
-added.
+Acceptance covers all L-, A-, and E-series contracts, including Stream branches, codec
+boundaries, limit failures, cancellation, and cleanup before caught-error recovery. PTY
+cases suspend pure and mixed evaluations, resume with `fg`, and reject unsupported `bg`
+without losing state. Large simultaneous I/O remains bounded and producer failures
+cannot disappear behind byte EOF.
 
-**Accept when:**
-
-- All L-, A-, and E-series contracts pass, including previously pending Stream branches.
-  JSON/Unicode boundaries and limit options have property, fuzz, and failure-injection
-  evidence; cancelled reports cannot become success merely because children exit zero.
-- A filesystem value stream can be transformed, materialized, encoded, and passed through
-  an external process; a long process stream can be cut off without zombies or hidden
-  producer failures. Large simultaneous input/output/stderr traffic stays bounded.
-- PTY scenarios interrupt and suspend both pure evaluation and mixed pipelines. `fg`
-  resumes correctly, unsupported `bg` is rejected without losing state, and repeated
-  failure/cancellation leaves the prompt, descriptors, and heap usable.
+[Current status](status.md) records the implementation and validation evidence for these
+completed stages. Every stage retains the preceding regression suite.
 
 ### 4. Complete interactive experience and delivery
 

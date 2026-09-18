@@ -1,0 +1,6 @@
+option(
+    'fuzz',
+    type: 'boolean',
+    value: false,
+    description: 'Build libFuzzer targets and seed regression tests',
+)
