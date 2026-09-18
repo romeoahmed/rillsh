@@ -1,0 +1,6 @@
+/build/
+/subprojects/packagecache/
+/subprojects/yyjson-*/
+__pycache__/
+.ruff_cache/
+/subprojects/.wraplock

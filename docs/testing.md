@@ -1,0 +1,256 @@
+# Testing
+
+This document defines test infrastructure and acceptance contracts for the first release.
+[Current status](status.md) records current coverage and remaining work. Tests verify observable
+behavior, ownership, and failure recovery independently of implementation details.
+
+## Test infrastructure
+
+Meson owns executable isolation, parallelism, deadlines, selection, repetition and
+JUnit logs. C tests use one always-active `CHECK` macro: it evaluates its condition once
+and calls `exit(1)` on failure, preserving `atexit` cleanup. It remains active under
+NDEBUG and leaves sanitizer signal handlers intact. Keep registration, reporting,
+and scheduling in Meson. Small component programs and separately registered supervisor scenarios
+keep one failure from hiding unrelated contracts.
+
+Python's standard-library `unittest` owns system/PTY fixtures and assertions; Meson
+owns their outer process lifecycle. Criterion and cmocka were evaluated but would add
+runners or recovery machinery that the current tests do not need. Revisit a C test
+library only when fixture reuse or diagnostics justify the dependency.
+
+### Fixtures and failure paths
+
+C helpers expose bytes, environment, cwd, descriptors, simultaneous stdout/stderr,
+signals, terminal state and exit behavior. Use them instead of GNU/BSD utility-specific
+assumptions. Descriptor checks enumerate `/dev/fd` on both supported systems, excluding
+the enumeration's own descriptor. A fixture above descriptor 255 verifies that checks
+cover high-numbered descriptors as well.
+
+A private archive compiles the actual source/text/parser, directory transaction and
+launch code with eight allocation/POSIX aliases. Allocation budgets advance until the
+first complete success, checking each failed prefix for the correct error and preserved
+ownership. Named launch scenarios cover first/later fork and registration failure,
+stopped unregistered children and termination before exec. These substitutions remain
+outside production interfaces. They are not exhaustive OS or allocator fault coverage.
+
+Supervisor scenarios run in separate Meson processes. Their `atexit` cleanup kills only
+known unreaped helper children and bounds the remaining supervision wait. A deliberate
+exit-42 scenario verifies cleanup of a live job; `expected_exitcode: 42` rejects unrelated
+assertion failures and cleanup failure (99). Python fixtures register temporary-directory
+and PTY cleanup through `enterContext`, including failures during `setUp`. Ordinary
+subprocesses get a cooperative shutdown interval, then bounded forced termination;
+PTY fixtures also reclaim the foreground group. No portable cleanup mechanism promises
+to recover arbitrary escaped descendants after the supervisor itself crashes.
+
+System tests use unittest's native `test_*.py` discovery and `subTest` for input matrices.
+Meson passes built executable locations through two test-only environment variables and
+explicit `depends` targets, so selected suites rebuild their helpers. Each case owns its
+HOME/XDG directories, locale and color hints. Preserve sanitizer environment settings;
+an empty environment can disable symbolizer lookup or change error reporting. PTY tests
+wait for actual output, bound retained output, and use deadlines for reads, writes and
+reaping. Short polling waits are for OS state observation, never substitutes for readiness.
+
+Use Meson's native selection and repetition instead of hard-coded retry loops:
+
+```sh
+meson test -C build --print-errorlogs
+meson test -C build --suite runtime
+meson test -C build 'supervisor-*' --repeat=10 --logbase=repeat --print-errorlogs
+meson test -C build --suite pty --print-errorlogs
+```
+
+Current Meson suites are `unicode`, `syntax`, `runtime`, `editor`, `process`, `platform`,
+`fault` and `pty`; later stages add `adt`, `stream` and `codec`. PTY unavailability is an
+explicit failure in the required Linux/macOS matrix. Tests must not claim raw-editor,
+full Unicode width, ADT, stream or codec coverage before those features exist.
+
+## Language conformance
+
+| ID  | Contract                                                                                          |
+| --- | ------------------------------------------------------------------------------------------------- |
+| L01 | Lexer distinguishes command words from expressions without name-dependent parsing                 |
+| L02 | Complete/Incomplete/Invalid agree across strings, comments, blocks, pipes, and EOF                |
+| L03 | Grouped application equals staged unary application, including intermediate effects               |
+| L04 | `x \|> f` evaluates x first, once; hygienic lowering cannot capture user names                    |
+| L05 | Closures survive defining entries; later shadowing does not change captured bindings              |
+| L06 | Functions in records/lists remain ordinary functions with no hidden receiver                      |
+| L07 | Direct, mutual, and indirect tail calls do not grow continuation depth                            |
+| L08 | Tail-call temporaries and unreachable shadowed REPL bindings are collectible; live heap plateaus  |
+| L09 | Overflow, bad conversions, non-finite floats, and invalid indexing are language errors            |
+| L10 | Unit, Null, Option.None, empty List, and empty Stream remain distinct                             |
+| L11 | attempt catches language errors but cannot swallow cancellation                                   |
+| L12 | Script and REPL evaluation semantics agree apart from boundary display/recovery                   |
+| L13 | Module caching preserves nominal identity; cycles and duplicate declarations fail                 |
+| L14 | Failed REPL entries publish no partial bindings; earlier external effects remain                  |
+| L15 | A closure captures resolved free bindings; an unrelated local Stream does not prevent publication |
+| L16 | Session effects in callbacks follow ordinary call order; existing job snapshots stay unchanged    |
+
+Minimum tail tests perform one million tail calls under debug, ASan/UBSan, and release
+profiles. Check both continuation depth and live heap after collection; an RSS-only test
+can confuse allocator retention with actual live objects. Non-tail recursion must fail
+by an evaluator limit rather than C stack corruption.
+
+## ADTs, records, and patterns
+
+| ID  | Contract                                                                       |
+| --- | ------------------------------------------------------------------------------ |
+| A01 | Nominal identity cannot be forged by record keys or equal display names        |
+| A02 | Constructors are first-class; a fieldless constructor is a value, not a thunk  |
+| A03 | Construction rejects missing/extra/duplicate fields independently of key order |
+| A04 | Exact/open/rest patterns have the specified field and length behavior          |
+| A05 | Anonymous patterns do not implicitly match nominal products                    |
+| A06 | Parameter patterns are checked at each curried application                     |
+| A07 | Match subject evaluates once; branches/guards preserve source order            |
+| A08 | Guard errors propagate; false guards do not leak bindings or roll back effects |
+| A09 | Repeated pattern names are diagnosed; no accidental equality-pattern semantics |
+| A10 | `with` preserves identity and rejects insertion; base values remain unchanged  |
+| A11 | Equality rejects nested unsupported values regardless of field traversal order |
+| A12 | List-tail matching avoids quadratic copying and survives GC                    |
+
+Generated tests can check record equality under field permutation, constructor
+projection, update immutability, and parsing/printing round trips for the explicitly
+round-trippable subset. Functions and resources are not in that subset.
+
+## Processes, streams, and resource safety
+
+| ID  | Contract                                                                                                           |
+| --- | ------------------------------------------------------------------------------------------------------------------ |
+| E01 | Plan construction captures arguments once and opens no redirection files                                           |
+| E02 | Separate launches use distinct Jobs; explicit and ambient cwd/env rules hold                                       |
+| E03 | Empty, spaced, newline, wildcard, leading-dash, and invalid-UTF-8 path arguments survive                           |
+| E04 | NUL is rejected at argv/env/path boundaries with the responsible argument identified                               |
+| E05 | ENOEXEC does not invoke another shell; actual exit 127 differs from launch failure                                 |
+| E06 | Redirection order and overridden pipeline endpoints behave exactly as specified                                    |
+| E07 | Large concurrent stdin/stdout/stderr traffic cannot deadlock                                                       |
+| E08 | A pipeline larger than kernel pipe capacity starts all necessary stages before waiting                             |
+| E09 | Expected downstream cutoff differs from failure and user cancellation                                              |
+| E10 | Byte EOF followed by unsuccessful process exit still fails a checked stream                                        |
+| E11 | Transfer or close invalidates old stream aliases; reentrant consumption fails                                      |
+| E12 | Scoped Stream handles in records and closures are rejected before persistent publication; Job handles remain valid |
+| E13 | Capture/materialization limits fail clearly and reap producers without truncating success                          |
+| E14 | Partial launch and codec failures close all descriptors and reap every owned child                                 |
+| E15 | Closed standard descriptors and dup2 self-mappings do not leak CLOEXEC mistakes                                    |
+| E16 | Child signal masks/dispositions are reset; inherited ignored SIGPIPE does not persist                              |
+| E17 | Stopped mixed contexts resume in foreground; bg rejects them without losing state                                  |
+| E18 | Cleanup escalates and reaps owned children without signaling groups after ownership ends                           |
+| E19 | Inherited open-file-description flags remain unchanged, including when FDs are duplicated                          |
+| E20 | Cancelled reports fail check even when every stage exits zero; wait returns cancellation as report data            |
+
+Run helpers that emit substantially more than typical pipe capacity on both stdout and
+stderr while reading stdin. Compare exact bytes and stage reports. Send Ctrl-C during
+every stage of launch and draining. Force the third stage's exec/redirection to fail
+while the first two are active. Repeatedly launch short commands and inspect both
+internal ownership counters and OS-visible child/FD state where available.
+
+The helpers enumerate inherited descriptors through `/dev/fd` and inspect flags with
+`fcntl`; Linux-specific `/proc` details are not required. Test launch gates with
+immediately exiting process-group leaders and children killed before exec. EOF on the
+error channel alone must not be treated as proof of successful exec. Use process-group
+timeouts to expose deadlocks instead of indefinite waits.
+
+## Editor, Unicode, and PTY interaction
+
+Test the pure editor components independently of a real terminal. A simple flat string
+reference model is appropriate for gap-buffer edits and undo; it is a test oracle, not a
+second production editor. Feed input in every partition for short cases and randomized
+partitions for larger cases, holding byte-arrival times and deadline events fixed.
+Compare final text, cursor, events, pending decoder state, and resource bounds.
+
+| ID  | Contract                                                                                                                       |
+| --- | ------------------------------------------------------------------------------------------------------------------------------ |
+| I01 | Editing and undo preserve valid UTF-8 and grapheme cursor boundaries, including insertions that join neighboring clusters      |
+| I02 | Segmentation passes every official Unicode 18.0.0 GraphemeBreakTest case; generated tables reproduce from pinned inputs        |
+| I03 | Width fixtures cover combining-only clusters, CJK, variation selectors, emoji modifiers, flags, ZWJ sequences, and tabs        |
+| I04 | Incremental UTF-8, CSI/SS3, and ESC-prefix decoding is independent of read chunk boundaries and respects deadlines             |
+| I05 | Bracketed paste is one bounded transaction; newlines, control bytes, and command-looking text never submit or invoke shortcuts |
+| I06 | Invalid/oversized/interrupted paste drains through the closing marker; its suffix never becomes a command                      |
+| I07 | Undo/redo, multiline history, menu acceptance, and parser-driven submission preserve the documented editing state              |
+| I08 | Layout preserves graphemes across wrapping, viewport movement, resize, and the right margin                                    |
+| I09 | Partial output writes cannot interleave escape sequences; redraw coalescing retains the unsent suffix                          |
+| I10 | Highlighting performs no I/O/evaluation; cursor movement or cancellation invalidates completion even without text changes      |
+| I11 | Terminal entry/exit, foreground handoff, suspension, errors, and repeated resume restore the correct modes                     |
+| I12 | History locking and replacement preserve complete entries across simultaneous sessions and interrupted writes                  |
+
+Grapheme tests establish boundary conformance; they do not establish terminal-cell
+width. Width is a separate project policy with deterministic fixtures and manual checks
+in supported terminal emulators. Do not turn one emulator's glyph rendering into a
+Unicode conformance claim.
+
+PTY tests create a session and controlling terminal, then exercise these contracts
+across editing, external execution, streaming, and pure evaluation. Include a child that
+changes termios, terminal reads, TOSTOP, partial-key deadlines, resize during paste, and
+background notifications. Verify restoration after errors and stop/resume. A hung
+completion worker must not block editing or permit additional unreaped workers. A stream
+renderer must display available items without requesting a layout sample.
+
+Use terminal-semantic assertions and captured screen states rather than requiring one
+equivalent ANSI encoding. Keep manual emulator checks separate from automated PTY
+results. Actual cancellation/reaping tests use controllable children; do not interpret
+one timeout measurement as a universal kernel-termination guarantee.
+
+## Platform conformance
+
+| ID  | Contract                                                                                                                                |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| P01 | PATH absent, empty, relative components, slash bypass, EACCES, and ENOEXEC follow the launch policy                                     |
+| P02 | Child argv and environment preserve bytes; duplicate/malformed imported names follow the explicit import rule                           |
+| P03 | cd commits physical PWD/OLDPWD or rolls back; rollback failure reports actual state and invalidates PWD                                 |
+| P04 | XDG unset, empty, relative, absolute, and missing-HOME cases never fall back to the cwd                                                 |
+| P05 | State creation uses private modes; unwritable history leaves a usable prompt; unused directories are not created                        |
+| P06 | C, available UTF-8, and comma-decimal locale environments do not change language numbers, JSON, or sorting                              |
+| P07 | Child locale variables remain unchanged; malformed UTF-8 text is rejected and non-UTF-8 Path/Bytes round-trip                           |
+| P08 | TERM missing, dumb, unknown, recognized, and console profiles select the documented rich/plain behavior                                 |
+| P09 | Color precedence covers empty/nonempty NO_COLOR, explicit CLI modes, RGB hints, and redirected output                                   |
+| P10 | Ctrl-Z at the prompt restores the terminal and resumes the same buffer; Ctrl-_ remains undo                                             |
+| P11 | Incomplete escape sequences, slow paste, resize, and job notifications do not indefinitely block supervision                            |
+| P12 | Grapheme editing is locale-independent; all renderers share one width policy; malformed source and arbitrary path bytes remain distinct |
+| P13 | Noninteractive launch does not seize the terminal or initialize editor/history; explicit -- and shebang invocation work                 |
+| P14 | Editor initialization leaves supervisor and sanitizer handlers intact; prompt writes do not leak into redirected stdout                 |
+
+## Fuzzing and failure injection
+
+Dedicated libFuzzer targets cover lexer/parser, pattern matching, JSON conversion,
+command argument encoding, input decoding/paste, grapheme segmentation, layout,
+edit/undo sequences, and a bounded pure evaluator. Targets must not launch processes or
+touch user files. Reset state per input, bound evaluation steps and allocations, and
+preserve crashing inputs as regressions. Use ASan/UBSan and the matching Clang fuzzer
+runtime. Keep target functions independent of the fuzzing driver.
+
+Fault injection applies at the allocator and POSIX adapter boundaries. Fail each
+allocation/pipe/open/fork/dup operation in small scenarios and verify unwind paths. Do
+not build a generic syscall mocking framework around the whole application. Stress GC at
+every permitted safepoint to expose missing C roots and references into freed
+source/yyjson buffers.
+
+Property checks cover chunk boundaries, argument round trips, stable sorting with one
+key evaluation per element, and JSON round trips for the supported finite-value subset.
+Explicitly test duplicate JSON keys, numeric range limits, NUL strings, deeply nested
+documents, and error paths through unsupported nested values.
+
+## Performance evidence
+
+Benchmarks run in release mode with recorded toolchain, CPU, architecture, OS, container
+image, and dataset. Compare against the preceding Rill Shell revision and report
+distributions. Startup is measured after the container is already running.
+
+Initial engineering budgets are less than 16 ms for ordinary local-buffer highlighting
+and expiration of a pending completion request at its 200 ms deadline. Completion never
+blocks editing. These are acceptance targets on the recorded reference machine, not
+universal claims about every host or kernel scheduling latency. Measure pipeline
+throughput, bounded queue behavior, allocation per row, retained heap after repeated
+REPL entries, and explicit collection/sorting costs. Keep functional correctness
+independent of noisy wall-clock benchmark thresholds.
+
+## Delivery gates
+
+Formatting, static analysis, generated-data verification, and documentation checks follow
+[development](development.md). The `api-docs` target must succeed without warnings;
+review rendered C23 declarations and ownership contracts as well as diagnostic output.
+Check Markdown links, anchors, tables, and examples, and exclude personal paths from
+published artifacts. These are development checks, separate from runtime contract IDs.
+
+The [implementation plan](implementation-plan.md) owns the four delivery stages and
+maps them to these contracts. Each stage includes its relevant tests and failure paths;
+subsequent gates retain the earlier regressions. Until a feature is complete, record
+partial/pending contract coverage explicitly rather than treating absent cases as passes.
+The final gate requires the complete platform matrix and all contracts above.
