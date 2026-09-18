@@ -117,7 +117,12 @@ fault_test = executable(
     include_directories: inc,
     link_with: [fault_subject, posix, pure, library_core],
 )
-foreach scenario, suites : {'memory': ['syntax', 'runtime'], 'library': ['language'], 'directory': ['platform'], 'launch': ['platform']}
+foreach scenario, suites : {
+    'memory': ['syntax', 'runtime'],
+    'library': ['language'],
+    'directory': ['platform'],
+    'launch': ['platform'],
+}
     test(
         'faults-' + scenario,
         fault_test,
@@ -126,7 +131,11 @@ foreach scenario, suites : {'memory': ['syntax', 'runtime'], 'library': ['langua
         timeout: 30,
     )
 endforeach
-foreach name, suites : {'shell': ['process', 'platform'], 'terminal': ['pty'], 'language': ['language']}
+foreach name, suites : {
+    'shell': ['process', 'platform'],
+    'terminal': ['pty'],
+    'language': ['language'],
+}
     test(
         name + '-system',
         python,
@@ -151,14 +160,24 @@ foreach name, suites : {'shell': ['process', 'platform'], 'terminal': ['pty'], '
 endforeach
 
 library_test = executable(
-    'library-test', 'unit/library.c',
+    'library-test',
+    'unit/library.c',
     include_directories: inc,
     link_with: [pure, library_core],
 )
 test('library-stress', library_test, suite: ['runtime', 'language'])
 
 # Benchmarks are separate from correctness tests and run serially through Meson.
-foreach name : ['tail', 'curry', 'equal', 'text', 'map', 'closures', 'dag', 'records']
+foreach name : [
+    'tail',
+    'curry',
+    'equal',
+    'text',
+    'map',
+    'closures',
+    'dag',
+    'records',
+]
     benchmark(
         'runtime-' + name,
         shell,
@@ -169,7 +188,8 @@ endforeach
 
 foreach name : ['syntax', 'gc', 'bindings', 'captures', 'sharing']
     component_benchmark = executable(
-        name + '-benchmark', 'benchmarks/' + name + '.c',
+        name + '-benchmark',
+        'benchmarks/' + name + '.c',
         include_directories: inc,
         link_with: pure,
     )

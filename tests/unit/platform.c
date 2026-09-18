@@ -8,7 +8,39 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
+#include <sys/select.h>
 #include <unistd.h>
+
+static void readiness() {
+  struct rlimit limit = {};
+  CHECK(getrlimit(RLIMIT_NOFILE, &limit) == 0);
+  const int minimums[] = {3, FD_SETSIZE - 1, FD_SETSIZE, FD_SETSIZE + 17,
+                          2 * FD_SETSIZE + 1};
+  CHECK(!rill_platform_input_ready(-1));
+  for (size_t i = 0; i < sizeof(minimums) / sizeof(*minimums); ++i) {
+    if ((rlim_t)minimums[i] >= limit.rlim_cur)
+      continue;
+    int pipe[2];
+    CHECK(rill_platform_pipe(pipe, true));
+    int input = fcntl(pipe[0], F_DUPFD_CLOEXEC, minimums[i]);
+    CHECK(input >= minimums[i]);
+    int flags = fcntl(input, F_GETFL);
+    CHECK(flags >= 0 && !rill_platform_input_ready(input));
+    CHECK(write(pipe[1], "x", 1) == 1);
+    CHECK(rill_platform_input_ready(input));
+    char byte = {};
+    CHECK(read(input, &byte, 1) == 1 && byte == 'x');
+    CHECK(!rill_platform_input_ready(input));
+    rill_platform_close(&pipe[1]);
+    CHECK(rill_platform_input_ready(input));
+    CHECK(read(input, &byte, 1) == 0);
+    CHECK(fcntl(input, F_GETFL) == flags);
+    CHECK(close(input) == 0);
+    CHECK(!rill_platform_input_ready(input));
+    rill_platform_close(&pipe[0]);
+  }
+}
 
 static void environment() {
   char original[] = "A=first";
@@ -50,12 +82,49 @@ int main() {
   environment();
   int baseline = descriptor_count(0);
   CHECK(baseline >= 0);
-  const int signals[] = {SIGSEGV, SIGBUS, SIGINT, SIGTERM, SIGCHLD};
-  struct sigaction saved[5];
-  for (size_t i = 0; i < 5; ++i)
+  readiness();
+  const int signals[] = {SIGSEGV, SIGBUS,  SIGINT,  SIGTERM,
+                         SIGCHLD, SIGQUIT, SIGPIPE, SIGTTOU};
+  struct sigaction saved[sizeof(signals) / sizeof(*signals)];
+  for (size_t i = 0; i < sizeof(signals) / sizeof(*signals); ++i)
     CHECK(sigaction(signals[i], nullptr, &saved[i]) == 0);
+  // Managed signals must work even when exec inherited a blocked mask.
+  sigset_t blocked, original, current_mask;
+  CHECK(sigemptyset(&blocked) == 0);
+  CHECK(sigaddset(&blocked, SIGINT) == 0);
+  CHECK(sigaddset(&blocked, SIGTERM) == 0);
+  CHECK(sigaddset(&blocked, SIGCHLD) == 0);
+  CHECK(sigaddset(&blocked, SIGUSR1) == 0);
+  CHECK(sigprocmask(SIG_BLOCK, &blocked, &original) == 0);
   RillPlatform platform = {};
+  struct rlimit limit = {};
+  CHECK(getrlimit(RLIMIT_NOFILE, &limit) == 0);
+  struct rlimit exhausted = limit;
+  exhausted.rlim_cur = 0;
+  CHECK(setrlimit(RLIMIT_NOFILE, &exhausted) == 0);
+  bool initialized = rill_platform_init(&platform, false);
+  int failure = errno;
+  CHECK(setrlimit(RLIMIT_NOFILE, &limit) == 0);
+  CHECK(!initialized && failure == EMFILE);
+  CHECK(sigprocmask(SIG_SETMASK, nullptr, &current_mask) == 0);
+  CHECK(sigismember(&current_mask, SIGINT) == 1);
+  CHECK(sigismember(&current_mask, SIGUSR1) == 1);
+  CHECK(sigismember(&current_mask, SIGPIPE) == sigismember(&original, SIGPIPE));
+  CHECK(descriptor_count(0) == baseline);
+  CHECK(raise(SIGINT) == 0);
   CHECK(rill_platform_init(&platform, false));
+  CHECK(sigprocmask(SIG_SETMASK, nullptr, &current_mask) == 0);
+  CHECK(sigismember(&current_mask, SIGINT) == 0);
+  CHECK(sigismember(&current_mask, SIGTERM) == 0);
+  CHECK(sigismember(&current_mask, SIGCHLD) == 0);
+  CHECK(sigismember(&current_mask, SIGUSR1) == 1);
+  CHECK(rill_platform_signals(&platform) == RILL_SIG_INT);
+  const int ignored[] = {SIGQUIT, SIGPIPE, SIGTTOU};
+  for (size_t i = 0; i < sizeof(ignored) / sizeof(*ignored); ++i) {
+    struct sigaction current = {};
+    CHECK(sigaction(ignored[i], nullptr, &current) == 0);
+    CHECK(current.sa_handler == SIG_IGN);
+  }
   for (size_t i = 0; i < 2; ++i) {
     struct sigaction current = {};
     CHECK(sigaction(signals[i], nullptr, &current) == 0);
@@ -85,7 +154,13 @@ int main() {
   CHECK(rill_platform_signals(&platform) == 0);
   CHECK(!rill_platform_input_ready(platform.signals[0]));
   rill_platform_clear(&platform);
-  for (size_t i = 0; i < 5; ++i) {
+  CHECK(sigprocmask(SIG_SETMASK, nullptr, &current_mask) == 0);
+  CHECK(sigismember(&current_mask, SIGINT) == 1);
+  CHECK(sigismember(&current_mask, SIGTERM) == 1);
+  CHECK(sigismember(&current_mask, SIGCHLD) == 1);
+  CHECK(sigismember(&current_mask, SIGUSR1) == 1);
+  CHECK(sigprocmask(SIG_SETMASK, &original, nullptr) == 0);
+  for (size_t i = 0; i < sizeof(signals) / sizeof(*signals); ++i) {
     struct sigaction current = {};
     CHECK(sigaction(signals[i], nullptr, &current) == 0);
     if (current.sa_flags & SA_SIGINFO)

@@ -332,7 +332,7 @@ RillJob *rill_exec_launch(RillExec *e, const RillExecSpec *spec,
                       ? O_RDONLY
                       : O_WRONLY | O_CREAT | (r->append ? O_APPEND : O_TRUNC);
       int fd = rill_platform_internal(
-          openat(out->cwd, path, flags | O_CLOEXEC, 0666));
+          openat(out->cwd, path, flags | O_CLOEXEC | O_NOCTTY, 0666));
       int saved = errno;
       free(path);
       errno = saved;

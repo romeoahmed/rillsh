@@ -1,4 +1,5 @@
 #include "diagnostic.h"
+#include "private.h"
 #include "runtime.h"
 #include "text/text.h"
 #include <stdckdint.h>
@@ -7,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+static constexpr size_t MAX_DATA_DEPTH = 65'536;
 size_t rill_runtime_count(RillValue list) {
   return list.kind == RILL_V_SLICE ? list.as.object->extent
                                    : list.as.object->count;
@@ -51,7 +53,7 @@ bool rill_runtime_record_finish(RillValue record) {
   for (size_t i = 0; i < o->count; i += 2)
     if (o->values[i].kind != RILL_V_STRING)
       return false;
-  if (o->count < 32) {
+  if (o->count < RECORD_INDEX_MIN_SLOTS) {
     for (size_t i = 0; i < o->count; i += 2)
       for (size_t j = 0; j < i; j += 2)
         if (!compare_key(o->values[i].as.object->bytes,
@@ -231,7 +233,7 @@ static RillError comparable(RillValue value, Seen *seen) {
       if (seen && !v->next) {
         Memo *memo = find_memo(seen, x.as.object);
         if (memo->object) {
-          if (memo->height > 65536 - depth) {
+          if (memo->height > MAX_DATA_DEPTH - depth) {
             status = RILL_LIMIT; // Includes an active (cyclic) object.
             break;
           }
@@ -251,7 +253,7 @@ static RillError comparable(RillValue value, Seen *seen) {
         goto complete;
       }
       RillValue child = rill_runtime_at(x, v->next++);
-      if (depth == 65536) {
+      if (depth == MAX_DATA_DEPTH) {
         status = RILL_LIMIT;
         break;
       }
@@ -376,7 +378,7 @@ static RillError compare(RillValue a, RillValue b, bool *equal, Seen *seen) {
         x = rill_runtime_at(a, f->next);
         y = rill_runtime_at(b, f->next++);
       }
-      if (depth == 65536) {
+      if (depth == MAX_DATA_DEPTH) {
         status = RILL_LIMIT;
         break;
       }

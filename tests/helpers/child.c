@@ -27,6 +27,13 @@ int main(int argc, char **argv) {
   if (argc < 2)
     return 2;
   const char *mode = argv[1];
+  if (!strcmp(mode, "no-terminal")) {
+    int fd = open("/dev/tty", O_RDONLY | O_NOCTTY | O_CLOEXEC);
+    if (fd < 0)
+      return 0;
+    (void)close(fd);
+    return 3;
+  }
   if (!strcmp(mode, "terminal-owner")) {
     pid_t foreground = tcgetpgrp(0);
     return foreground > 0 && foreground != getpgrp() &&

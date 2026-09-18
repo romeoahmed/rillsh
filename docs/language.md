@@ -18,23 +18,23 @@ implicit laziness, text coercion, truthiness, or string-to-code conversion.
 
 ## Values
 
-| Kind | Contract |
-| --- | --- |
-| Unit | `()`; successful operations with no data result |
-| Null | `null`; explicit absence in data, including JSON |
-| Bool | `true` or `false`; the only accepted conditional values |
-| Int | Signed 64-bit integer; checked arithmetic |
-| Float | IEEE binary64; finite results only |
-| String | Valid UTF-8, explicit byte length, possibly containing NUL |
-| Bytes | Arbitrary bytes with explicit length |
-| Path | POSIX path bytes without NUL; no automatic Unicode normalization |
-| List | Immutable, ordered sequence of values |
-| Record | Immutable mapping from unique String keys to values |
-| ADT value | Nominal type identity, constructor identity, immutable payload |
-| Function | First-class unary callable, including native and constructor functions |
-| JobPlan | Immutable external execution description |
-| Job handle | Opaque, session-owned reference to a live or completed job |
-| Stream handle | Opaque, scoped, single-consumer resource reference |
+| Kind          | Contract                                                               |
+| ------------- | ---------------------------------------------------------------------- |
+| Unit          | `()`; successful operations with no data result                        |
+| Null          | `null`; explicit absence in data, including JSON                       |
+| Bool          | `true` or `false`; the only accepted conditional values                |
+| Int           | Signed 64-bit integer; checked arithmetic                              |
+| Float         | IEEE binary64; finite results only                                     |
+| String        | Valid UTF-8, explicit byte length, possibly containing NUL             |
+| Bytes         | Arbitrary bytes with explicit length                                   |
+| Path          | POSIX path bytes without NUL; no automatic Unicode normalization       |
+| List          | Immutable, ordered sequence of values                                  |
+| Record        | Immutable mapping from unique String keys to values                    |
+| ADT value     | Nominal type identity, constructor identity, immutable payload         |
+| Function      | First-class unary callable, including native and constructor functions |
+| JobPlan       | Immutable external execution description                               |
+| Job handle    | Opaque, session-owned reference to a live or completed job             |
+| Stream handle | Opaque, scoped, single-consumer resource reference                     |
 
 Resource handles do not expose OS handles. A Job handle may be retained in persistent
 session data; a Stream handle cannot outlive its execution scope. Stream escape rules
@@ -276,17 +276,17 @@ constructor patterns, and nesting. There are no view patterns, regex patterns, i
 pinning of existing variables, user-defined matchers, or pattern alternatives. The same
 pattern language serves `match`, `let`, and function parameters.
 
-| Pattern | Meaning |
-| --- | --- |
-| `name` | Bind a fresh local name, regardless of an outer binding |
-| `[a, b]` | Exactly two elements |
-| `[head, ..tail]` | At least one element; bind the remaining list |
-| `{name, size}` | Anonymous record with exactly these keys |
-| `{name, ..}` | Anonymous record containing `name`; ignore other keys |
-| `{name, ..rest}` | Bind the remaining fields as an anonymous record |
-| `{name: n}` | Match the key `name`, bind `n` |
-| `Point {x, ..}` | Point value containing the declared field `x` |
-| `Outcome.Pending` | The fieldless constructor's singleton |
+| Pattern           | Meaning                                                 |
+| ----------------- | ------------------------------------------------------- |
+| `name`            | Bind a fresh local name, regardless of an outer binding |
+| `[a, b]`          | Exactly two elements                                    |
+| `[head, ..tail]`  | At least one element; bind the remaining list           |
+| `{name, size}`    | Anonymous record with exactly these keys                |
+| `{name, ..}`      | Anonymous record containing `name`; ignore other keys   |
+| `{name, ..rest}`  | Bind the remaining fields as an anonymous record        |
+| `{name: n}`       | Match the key `name`, bind `n`                          |
+| `Point {x, ..}`   | Point value containing the declared field `x`           |
+| `Outcome.Pending` | The fieldless constructor's singleton                   |
 
 Only one rest pattern is allowed, at the end. Shorthand `name` in a record pattern means
 `name: name`. Nominal patterns reject keys not in their descriptor. Anonymous record
@@ -349,7 +349,8 @@ let p = geometry.Point({x: 3, y: 4})
 Imports are top-level declarations with literal paths. Relative paths resolve against
 the importing source file, or the entry's working directory for a REPL source. `std:`
 names resolve only to the bundled standard library. There is no package registry,
-network import, automatic current-directory module search, or hot reload.
+network import, automatic current-directory module search, or hot reload. File modules
+must be regular files; directories, FIFOs, and devices are rejected with `IOError`.
 
 A module exports declarations explicitly with `export let`, `export fn`, `export
 struct`, or `export enum`. The resulting namespace is an immutable record of exports.
@@ -378,17 +379,17 @@ also exposes their public operations directly. `std:fs` and `std:json` are plann
 stage 3. The table below supplements the sequence/process contracts in
 [execution](execution.md#core-library-contracts).
 
-| Operations | Contract |
-| --- | --- |
-| `identity`, `compose(f, g, value)` | Ordinary unary functions; composition applies `g` before `f` |
-| `add`, `subtract`, `multiply`, `divide`, `equal`, `less` | Curried equivalents of the corresponding operators |
-| `int`, `float` | Numeric conversion; Float-to-Int truncates toward zero and checks range |
-| `text` | Explicit String conversion for String, Bool, Int, and Float |
-| `length` | List elements or anonymous Record fields; text requires explicit units |
-| `byte_length`, `scalars` | Encoded byte count; String to a List of one-scalar Strings |
-| `encode_utf8`, `decode_utf8` | String/Bytes conversion with strict UTF-8 validation |
-| `starts_with`, `ends_with` | String prefix/suffix predicates, configuration first |
-| `concat`, `reverse`, `drop` | Explicit List/Bytes concatenation; List reversal and shared suffix slicing |
+| Operations                                               | Contract                                                                   |
+| -------------------------------------------------------- | -------------------------------------------------------------------------- |
+| `identity`, `compose(f, g, value)`                       | Ordinary unary functions; composition applies `g` before `f`               |
+| `add`, `subtract`, `multiply`, `divide`, `equal`, `less` | Curried equivalents of the corresponding operators                         |
+| `int`, `float`                                           | Numeric conversion; Float-to-Int truncates toward zero and checks range    |
+| `text`                                                   | Explicit String conversion for String, Bool, Int, and Float                |
+| `length`                                                 | List elements or anonymous Record fields; text requires explicit units     |
+| `byte_length`, `scalars`                                 | Encoded byte count; String to a List of one-scalar Strings                 |
+| `encode_utf8`, `decode_utf8`                             | String/Bytes conversion with strict UTF-8 validation                       |
+| `starts_with`, `ends_with`                               | String prefix/suffix predicates, configuration first                       |
+| `concat`, `reverse`, `drop`                              | Explicit List/Bytes concatenation; List reversal and shared suffix slicing |
 
 Sequence callbacks and currying are authored in Rill. C primitives handle checked
 numeric conversion, representation access, stable sorting, and OS effects. The private

@@ -67,16 +67,16 @@ Source and diagnostic types are small shared contracts, not the seed of a `utils
 The following table lists allowed project dependencies; standard C facilities are
 available everywhere, and source/diagnostic types are omitted from individual rows.
 
-| Owner | Responsibility | Direct component dependencies |
-| --- | --- | --- |
-| `text` | Length-aware text, Unicode properties/metrics, literal/style spans | None |
-| `syntax` | Syntax, completeness, precedence, AST, highlight/indentation metadata | `text` |
-| `runtime` | Language values, code ownership, lexical resolution, GC, evaluation, resource tokens | `syntax`, `text` |
-| `platform` | Native descriptor, terminal, signal, filesystem, environment, and clock services | `text` where byte/text views are needed |
-| `exec` | Prepared launches, child identities, job state, reports, nonblocking byte transport | `platform`, `text` |
-| `editor` | Pure input/edit/layout state and rendering operations | `syntax`, `text` |
-| `library` | Callable primitives, codecs, filesystem/process adapters, library metadata | `runtime`, `exec`, `platform`, `text`; private yyjson |
-| Session | Scheduling, terminal handoff, startup, module I/O, history/completion coordination, presentation | Component interfaces above |
+| Owner      | Responsibility                                                                                   | Direct component dependencies                         |
+| ---------- | ------------------------------------------------------------------------------------------------ | ----------------------------------------------------- |
+| `text`     | Length-aware text, Unicode properties/metrics, literal/style spans                               | None                                                  |
+| `syntax`   | Syntax, completeness, precedence, AST, highlight/indentation metadata                            | `text`                                                |
+| `runtime`  | Language values, code ownership, lexical resolution, GC, evaluation, resource tokens             | `syntax`, `text`                                      |
+| `platform` | Native descriptor, terminal, signal, filesystem, environment, and clock services                 | `text` where byte/text views are needed               |
+| `exec`     | Prepared launches, child identities, job state, reports, nonblocking byte transport              | `platform`, `text`                                    |
+| `editor`   | Pure input/edit/layout state and rendering operations                                            | `syntax`, `text`                                      |
+| `library`  | Callable primitives, codecs, filesystem/process adapters, library metadata                       | `runtime`, `exec`, `platform`, `text`; private yyjson |
+| Session    | Scheduling, terminal handoff, startup, module I/O, history/completion coordination, presentation | Component interfaces above                            |
 
 This is a dependency direction, not a requirement for one archive per directory.
 `runtime` has no POSIX, editor, or yyjson dependency. `exec` accepts evaluated launch
@@ -157,10 +157,10 @@ gate requires it; ordinary shell builds do not. Cross-component includes must fo
 dependency table: include paths do not enforce encapsulation. The quality gate checks
 project boundaries, while review guards against private-representation dependencies.
 
-| Input | Output | Lifecycle |
-| --- | --- | --- |
-| Pinned Unicode data and manifest | `src/text/unicode_tables.inc` | Explicit regeneration; both inputs and output tracked |
-| Authored `stdlib/*.rill` | Read-only bytes in the executable | Native C23 `#embed`; compiler-tracked dependencies |
+| Input                            | Output                            | Lifecycle                                             |
+| -------------------------------- | --------------------------------- | ----------------------------------------------------- |
+| Pinned Unicode data and manifest | `src/text/unicode_tables.inc`     | Explicit regeneration; both inputs and output tracked |
+| Authored `stdlib/*.rill`         | Read-only bytes in the executable | Native C23 `#embed`; compiler-tracked dependencies    |
 
 Bundling gives `std:` modules a deterministic source versioned with the executable.
 Diagnostics use logical names such as `std:seq`; file imports retain their own identity
@@ -249,8 +249,7 @@ shutdown. Complete all library contracts and render results incrementally throug
 text/style spans on the existing prompt.
 
 **Boundary.** This is the complete language and execution model usable through scripts
-and plain interaction. Rich editing, persistent history, and completion UI remain stage
-4. There is still only one active user evaluator; no background callback scheduler is
+and plain interaction. Rich editing, persistent history, and completion UI remain stage 4. There is still only one active user evaluator; no background callback scheduler is
 added.
 
 **Accept when:**

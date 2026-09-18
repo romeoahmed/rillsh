@@ -14,14 +14,14 @@ facilities it uses rather than full platform certification. Missing required fac
 are build errors; Linux/macOS API differences belong in the platform adapter. Older
 compiler modes, obsolete terminal dialects, and speculative ports are outside scope.
 
-| Area | Baseline | Project boundary |
-| --- | --- | --- |
-| Implementation language | GNU C23, based on ISO/IEC 9899:2024 | Standard facilities first, selected GCC/Clang extensions; no older-C fallback or C2y dependency |
-| Processes and system services | POSIX.1-2024 / Issue 8 | Linux/macOS user-space APIs; no POSIX shell grammar claim |
-| User directories | XDG Base Directory 0.8 | Same config/state policy on both platforms |
-| Text and segmentation | Unicode 18.0.0; matching UAX #29 and data | UTF-8 language text; extended grapheme editing |
-| JSON | RFC 8259 | Stricter duplicate-key and numeric-range policy in execution |
-| Terminal UI | Modern VT/xterm-compatible UTF-8 profile | SGR, cursor control, bracketed paste; plain fallback |
+| Area                          | Baseline                                  | Project boundary                                                                                |
+| ----------------------------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| Implementation language       | GNU C23, based on ISO/IEC 9899:2024       | Standard facilities first, selected GCC/Clang extensions; no older-C fallback or C2y dependency |
+| Processes and system services | POSIX.1-2024 / Issue 8                    | Linux/macOS user-space APIs; no POSIX shell grammar claim                                       |
+| User directories              | XDG Base Directory 0.8                    | Same config/state policy on both platforms                                                      |
+| Text and segmentation         | Unicode 18.0.0; matching UAX #29 and data | UTF-8 language text; extended grapheme editing                                                  |
+| JSON                          | RFC 8259                                  | Stricter duplicate-key and numeric-range policy in execution                                    |
+| Terminal UI                   | Modern VT/xterm-compatible UTF-8 profile  | SGR, cursor control, bracketed paste; plain fallback                                            |
 
 `termios` controls a terminal device; `terminfo` describes capabilities. The shell uses
 the former and a fixed modern protocol profile, with no terminfo dependency or
@@ -34,11 +34,27 @@ according to their native contracts. `poll`, monotonic clocks, `sigaction`, and
 `waitpid` are shared services. The terminal adapter contains the system's window-size
 query and `/dev/tty` access. These are platform services rather than ISO C facilities.
 
+Input readiness must not impose a fixed descriptor-number ceiling. Linux uses `poll`;
+macOS retains `select` for `/dev/tty`, with a bitmap sized to the descriptor under
+`_DARWIN_C_SOURCE`. Ordinary descriptor numbers use stack storage; see Apple's
+[select contract](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/select.2.html).
+
 Do not create a new session per command. Interactive terminal jobs receive the
 foreground process group; background jobs remain subject to terminal access rules.
 Noninteractive execution does not acquire interactive terminal control, although managed
 children may have private groups for cancellation. Launch and restoration ordering
 belongs to [architecture](architecture.md#process-launch-and-io).
+
+Initialization saves the inherited signal mask and dispositions, installs handlers and
+their wakeup pipe, then unblocks the signals owned by the session. Unrelated mask bits
+remain unchanged. Cleanup and failed initialization restore the inherited state;
+children reset their mask and the shell's dispositions before exec. An inherited mask
+is not implicitly cleared by [exec](https://pubs.opengroup.org/onlinepubs/9799919799/functions/exec.html).
+
+Script, configuration, module, and redirection opens use `O_NOCTTY` to prevent accidental
+terminal acquisition. File modules must be regular files; opening with `O_NONBLOCK`
+allows type validation to reject a FIFO without waiting for a writer. These flags use
+the native [open contract](https://pubs.opengroup.org/onlinepubs/9799919799/functions/open.html).
 
 Executable lookup uses the launch environment's PATH. A slash bypasses lookup; missing
 PATH uses `/usr/bin:/bin`. An empty component explicitly means the launch cwd, including
@@ -86,13 +102,13 @@ LANG, LC_ALL, and LC_* pass unchanged to children for their own locale policy.
 
 ## XDG storage
 
-| Purpose | Base variable | Default | Use |
-| --- | --- | --- | --- |
-| Configuration | `XDG_CONFIG_HOME` | `$HOME/.config` | `rillsh/init.rill`, interactive only |
-| Persistent state | `XDG_STATE_HOME` | `$HOME/.local/state` | `rillsh/history` and separate lock file |
-| Disposable cache | `XDG_CACHE_HOME` | `$HOME/.cache` | Reserved; completion cache is in memory |
-| User data | `XDG_DATA_HOME` | `$HOME/.local/share` | Reserved; no implicit module discovery |
-| Session files | `XDG_RUNTIME_DIR` | No general default | Not needed; helper communication uses pipes |
+| Purpose          | Base variable     | Default              | Use                                         |
+| ---------------- | ----------------- | -------------------- | ------------------------------------------- |
+| Configuration    | `XDG_CONFIG_HOME` | `$HOME/.config`      | `rillsh/init.rill`, interactive only        |
+| Persistent state | `XDG_STATE_HOME`  | `$HOME/.local/state` | `rillsh/history` and separate lock file     |
+| Disposable cache | `XDG_CACHE_HOME`  | `$HOME/.cache`       | Reserved; completion cache is in memory     |
+| User data        | `XDG_DATA_HOME`   | `$HOME/.local/share` | Reserved; no implicit module discovery      |
+| Session files    | `XDG_RUNTIME_DIR` | No general default   | Not needed; helper communication uses pipes |
 
 An unset, empty, or relative base value selects its default. If that default needs HOME
 and HOME is not absolute/nonempty, disable the optional facility with one diagnostic. A

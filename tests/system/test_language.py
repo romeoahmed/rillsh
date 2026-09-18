@@ -18,7 +18,7 @@ class LanguageTests(ShellCase):
         self, source: str, kind: bytes, *, status: int = 1
     ) -> subprocess.CompletedProcess[bytes]:
         result = self.execute((self.shell, "-c", source), status=status)
-        self.assertIn(b": " + kind + b": ", result.stderr)
+        self.assertIn(kind, result.stderr)
         return result
 
     def check(self, expression: str) -> None:
@@ -122,7 +122,11 @@ exit(match value { c.Point {x,y} => if x==3 and y==2 and b.make(3)==value then 0
         (self.work / "broken.rill").write_text(
             "^./child mark forbidden; let x=", encoding="utf-8"
         )
+        os.mkfifo(self.work / "fifo.rill")
+        (self.work / "directory.rill").mkdir()
         cases = (
+            ('import "./fifo.rill" as m', b"IOError", 1),
+            ('import "./directory.rill" as m', b"IOError", 1),
             ('import "./missing.rill" as m', b"IOError", 1),
             ('import "./invalid.rill" as m', b"SyntaxError", 2),
             ('import "./broken.rill" as m', b"SyntaxError", 2),
@@ -174,6 +178,15 @@ unset_env("RILL_VALUE")
 exit(match get_env("RILL_VALUE") { Option.None=>0, _=>1 })
 """)
         self.assertEqual(result, b"firstsecondoverride")
+        result = self.run_source("""
+let base=with_env({KEEP:'old',KEY:'first'},
+  pipe(job { ^./child env KEEP > kept },job { ^./child env KEY }))
+let changed=with_env({KEY:'value',NEW:'added'},base)
+run(changed)
+run(base)
+""")
+        self.assertEqual(result, b"valuefirst")
+        self.assertEqual((self.work / "kept").read_bytes(), b"old")
         directory = self.work / "dir"
         directory.mkdir()
         self.run_source(

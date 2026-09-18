@@ -267,7 +267,7 @@ static void configure(Session *s) {
     return;
   }
   [[gnu::cleanup(rill_platform_close)]] int fd =
-      rill_platform_internal(open(path.data, O_RDONLY | O_CLOEXEC));
+      rill_platform_internal(open(path.data, O_RDONLY | O_CLOEXEC | O_NOCTTY));
   if (fd < 0) {
     if (errno != ENOENT)
       (void)diagnostic(
@@ -489,8 +489,9 @@ int rill_session_main(int argc, char **argv, char **environment) {
   else if (command)
     status = execute(&s, "<command>", command, strlen(command));
   else {
-    int fd =
-        file ? rill_platform_internal(open(file, O_RDONLY | O_CLOEXEC)) : 0;
+    int fd = file ? rill_platform_internal(
+                        open(file, O_RDONLY | O_CLOEXEC | O_NOCTTY))
+                  : 0;
     [[gnu::cleanup(rill_text_clear)]] RillBuffer source = {};
     if (fd < 0 || !read_source(&s, fd, &source))
       status =

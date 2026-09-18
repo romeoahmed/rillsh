@@ -4,15 +4,24 @@
 #include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <sys/select.h>
 #include <sys/types.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <limits.h>
+#include <stdlib.h>
+#include <sys/select.h>
+#else
+#include <poll.h>
+#endif
 static volatile sig_atomic_t pending;
 static volatile sig_atomic_t notify_fd = -1;
 static const int handled[] = {SIGCHLD, SIGINT,  SIGTERM, SIGHUP,
                               SIGTSTP, SIGQUIT, SIGPIPE, SIGTTOU};
+static_assert(sizeof(handled) / sizeof(*handled) <=
+              sizeof(((RillPlatform *)nullptr)->saved) /
+                  sizeof(struct sigaction));
 static void handler(int sig) {
   int saved = errno;
   unsigned char byte = 0;
@@ -91,10 +100,13 @@ bool rill_platform_block(sigset_t *previous) {
 }
 bool rill_platform_init(RillPlatform *p, bool interactive) {
   *p = (RillPlatform){.signals = {-1, -1}, .tty = -1, .group = getpgrp()};
+  if (!rill_platform_block(&p->mask))
+    return false;
+  p->mask_saved = true;
   if (interactive) {
     p->tty = rill_platform_internal(open("/dev/tty", O_RDWR | O_CLOEXEC));
     if (p->tty < 0)
-      return false;
+      goto fail;
     pid_t foreground = {};
     while ((foreground = tcgetpgrp(p->tty)) != p->group) {
       if (foreground < 0)
@@ -103,7 +115,11 @@ bool rill_platform_init(RillPlatform *p, bool interactive) {
       if (sigemptyset(&action.sa_mask) < 0 ||
           sigaction(SIGTTIN, &action, &previous) < 0)
         goto fail;
-      int stopped = kill(-p->group, SIGTTIN);
+      sigset_t input;
+      int stopped = -1;
+      if (sigemptyset(&input) == 0 && sigaddset(&input, SIGTTIN) == 0 &&
+          sigprocmask(SIG_UNBLOCK, &input, nullptr) == 0)
+        stopped = kill(-p->group, SIGTTIN);
       int saved = errno;
       if (sigaction(SIGTTIN, &previous, nullptr) < 0)
         goto fail;
@@ -123,15 +139,24 @@ bool rill_platform_init(RillPlatform *p, bool interactive) {
   pending = 0;
   notify_fd = p->signals[1];
   for (size_t i = 0; i < sizeof(handled) / sizeof(handled[0]); ++i) {
-    struct sigaction action = {.sa_handler = i >= 5 ? SIG_IGN : handler};
+    int sig = handled[i];
+    bool ignored = sig == SIGQUIT || sig == SIGPIPE || sig == SIGTTOU;
+    struct sigaction action = {.sa_handler = ignored ? SIG_IGN : handler};
     if (sigfillset(&action.sa_mask) < 0 ||
-        sigaction(handled[i], &action, &p->saved[i]) < 0)
+        sigaction(sig, &action, &p->saved[i]) < 0)
       goto fail;
     ++p->installed;
   }
   if (p->tty >= 0 && tcsetpgrp(p->tty, p->group) < 0)
     goto fail;
   p->owns_terminal = p->tty >= 0;
+  sigset_t active = p->mask;
+  for (size_t i = 0; i < sizeof(handled) / sizeof(*handled); ++i)
+    if (sigdelset(&active, handled[i]) < 0)
+      goto fail;
+  // Install handlers and their wakeup pipe before delivering inherited events.
+  if (sigprocmask(SIG_SETMASK, &active, nullptr) < 0)
+    goto fail;
   return true;
 fail:
   {
@@ -142,6 +167,9 @@ fail:
   }
 }
 void rill_platform_clear(RillPlatform *p) {
+  sigset_t old;
+  if (p->mask_saved)
+    (void)rill_platform_block(&old);
   if (p->owns_terminal)
     (void)rill_platform_reclaim(p, nullptr);
   notify_fd = -1;
@@ -152,6 +180,10 @@ void rill_platform_clear(RillPlatform *p) {
   rill_platform_close(&p->signals[1]);
   rill_platform_close(&p->tty);
   p->owns_terminal = false;
+  if (p->mask_saved) {
+    (void)sigprocmask(SIG_SETMASK, &p->mask, nullptr);
+    p->mask_saved = false;
+  }
 }
 unsigned rill_platform_signals(RillPlatform *p) {
   sigset_t old;
@@ -221,12 +253,27 @@ int64_t rill_platform_now() {
 }
 
 bool rill_platform_input_ready(int fd) {
-  if (fd < 0 || fd >= FD_SETSIZE)
+  if (fd < 0)
     return false;
-  fd_set set;
-  FD_ZERO(&set);
-  FD_SET(fd, &set);
+#ifdef __APPLE__
+  if (fd == INT_MAX)
+    return false;
+  // Darwin's /dev/tty supports select, not poll. _DARWIN_C_SOURCE enables
+  // extended select bitmaps; keep each FD_SET within one actual fd_set.
+  fd_set local = {};
+  size_t count = (size_t)fd / FD_SETSIZE + 1;
+  fd_set *sets = count == 1 ? &local : calloc(count, sizeof(*sets));
+  if (!sets)
+    return false;
+  FD_SET(fd % FD_SETSIZE, &sets[count - 1]);
   struct timeval timeout = {};
-  // Darwin's /dev/tty returns POLLNVAL from poll; select supports this device.
-  return select(fd + 1, &set, nullptr, nullptr, &timeout) > 0;
+  bool ready = select(fd + 1, sets, nullptr, nullptr, &timeout) > 0;
+  if (sets != &local)
+    free(sets);
+  return ready;
+#else
+  struct pollfd input = {.fd = fd, .events = POLLIN};
+  return poll(&input, 1, 0) > 0 &&
+         (input.revents & (POLLIN | POLLHUP | POLLERR));
+#endif
 }

@@ -37,6 +37,7 @@ static bool same(RillBytes a, RillBytes b) {
   return a.size == b.size && (!a.size || !memcmp(a.data, b.data, a.size));
 }
 enum { SMALL_FRAME_VALUES = 16, SPARE_FRAMES = 32 };
+static constexpr size_t MAX_CONTINUATIONS = 65'536;
 static void pop(RillEval *e) {
   Frame *f = e->frame;
   rill_runtime_unroot(&e->heap, &f->root);
@@ -52,7 +53,7 @@ static void pop(RillEval *e) {
 }
 static bool push(RillEval *e, const RillNode *node, RillValue env,
                  RillValue code) {
-  if (e->depth == 65536) {
+  if (e->depth == MAX_CONTINUATIONS) {
     rill_eval_error(e, RILL_LIMIT, "continuation limit exceeded");
     return false;
   }
@@ -587,6 +588,23 @@ static void nominal_declaration(RillEval *e, Frame *f) {
   publish(e, f, f->values[ENV]);
   export_bindings(e, n, f->values[ENV]);
 }
+static RillPlanRedirect lower_redirect(RillRedirect redirect) {
+  switch (redirect) {
+  case RILL_INPUT:
+    return RILL_PLAN_INPUT;
+  case RILL_OUTPUT:
+    return RILL_PLAN_OUTPUT;
+  case RILL_APPEND:
+    return RILL_PLAN_APPEND;
+  case RILL_ERROR_OUTPUT:
+    return RILL_PLAN_ERROR_OUTPUT;
+  case RILL_ERROR_APPEND:
+    return RILL_PLAN_ERROR_APPEND;
+  case RILL_ERROR_TO_OUTPUT:
+    return RILL_PLAN_ERROR_TO_OUTPUT;
+  }
+  unreachable();
+}
 RillEvalEvent rill_runtime_step(RillEval *e) {
   for (unsigned quantum = 0; quantum < 1024; ++quantum) {
     if (e->error.kind) {
@@ -985,7 +1003,7 @@ RillEvalEvent rill_runtime_step(RillEval *e) {
                                                  : RILL_V_REDIRECT,
                            args, count, nullptr, 0);
       if (kind == RILL_REDIRECT && v.kind != RILL_V_UNIT)
-        v.as.object->tag = n->integer;
+        v.as.object->tag = lower_redirect(n->redirect);
       break;
     case RILL_IMPORT:
       f->phase = IMPORT_WAIT;

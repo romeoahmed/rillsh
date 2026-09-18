@@ -8,12 +8,12 @@ are design examples. [Current status](status.md) records coverage.
 
 ## Plans, jobs, reports, and streams
 
-| Object | Meaning | Lifetime |
-| --- | --- | --- |
-| JobPlan | Immutable external pipeline description | Ordinary GC-managed value |
-| Job | Process group, children, descriptors, state | Explicit session/job ownership |
-| JobReport | Immutable completion data for all stages | Ordinary GC-managed value |
-| Stream | Single-consumer traversal with possible failure | Explicit execution scope |
+| Object    | Meaning                                         | Lifetime                       |
+| --------- | ----------------------------------------------- | ------------------------------ |
+| JobPlan   | Immutable external pipeline description         | Ordinary GC-managed value      |
+| Job       | Process group, children, descriptors, state     | Explicit session/job ownership |
+| JobReport | Immutable completion data for all stages        | Ordinary GC-managed value      |
+| Stream    | Single-consumer traversal with possible failure | Explicit execution scope       |
 
 A JobPlan contains evaluated, validated command arguments and can be launched
 repeatedly. Each launch creates a distinct Job. A JobReport retains completion data
@@ -100,18 +100,18 @@ redirection does not promise atomic file replacement.
 
 ## Execution functions
 
-| Function | Behavior |
-| --- | --- |
-| `run(plan)` | Foreground execution, inherited terminal streams; check all stage policies; return Unit |
-| `capture(plan)` | Foreground execution, concurrent stdout/stderr capture; return report and Bytes; nonzero exit is data |
-| `stream(plan)` | Foreground job source producing stdout Bytes chunks; stderr inherited; completion checked at stream end |
-| `start(plan)` | Start external-only background job; return session Job handle |
-| `wait(handle)` | Wait for a background job's report; nonzero exit is data; a stopped job raises JobStopped |
-| `check(report)` | Reject cancelled or failed reports; otherwise Unit |
-| `fg(handle)` | Resume a job/context; return Unit for an external-only checked job or the resumed evaluation's result |
-| `bg(handle)` | Resume a stopped external-only job without terminal ownership; return Unit |
-| `cancel(handle)` | Cancel and await cleanup; return Unit; completed jobs are unchanged |
-| `jobs()` | Immutable snapshots of session jobs |
+| Function         | Behavior                                                                                                |
+| ---------------- | ------------------------------------------------------------------------------------------------------- |
+| `run(plan)`      | Foreground execution, inherited terminal streams; check all stage policies; return Unit                 |
+| `capture(plan)`  | Foreground execution, concurrent stdout/stderr capture; return report and Bytes; nonzero exit is data   |
+| `stream(plan)`   | Foreground job source producing stdout Bytes chunks; stderr inherited; completion checked at stream end |
+| `start(plan)`    | Start external-only background job; return session Job handle                                           |
+| `wait(handle)`   | Wait for a background job's report; nonzero exit is data; a stopped job raises JobStopped               |
+| `check(report)`  | Reject cancelled or failed reports; otherwise Unit                                                      |
+| `fg(handle)`     | Resume a job/context; return Unit for an external-only checked job or the resumed evaluation's result   |
+| `bg(handle)`     | Resume a stopped external-only job without terminal ownership; return Unit                              |
+| `cancel(handle)` | Cancel and await cleanup; return Unit; completed jobs are unchanged                                     |
+| `jobs()`         | Immutable snapshots of session jobs                                                                     |
 
 `start`, `stream`, and `through` initiate launch when called. They complete the launch
 handshake before returning a handle; setup/exec error records raise a launch error. A
@@ -310,22 +310,22 @@ cancellation are checked during long pure evaluations, not only on syscalls.
 
 ## Core library contracts
 
-| Operation | Contract |
-| --- | --- |
-| `map(f, sequence)` | Preserve category; one result per item |
-| `filter(p, sequence)` | Require Bool predicate; preserve category |
-| `fold(f, initial, sequence)` | Apply `f(accumulator, item)` in order; return the final accumulator |
-| `each(f, sequence)` | Run in order, discard callback values, return Unit |
-| `take(n, sequence)` | Nonnegative Int; successful early cutoff |
-| `close(stream)` | Consume the handle and clean up without draining; return Unit |
-| `sort_by(key, sequence)` | Stable order, homogeneous comparable keys, return List |
-| `sum(sequence)` | Homogeneous numeric kind; checked Int arithmetic |
-| `files(path)` | Value stream of anonymous records from filesystem APIs |
-| `glob(pattern)` | Explicit filesystem expansion to List of Paths; sorted by path bytes |
-| `read_text(path)` | Read bounded content, decode strict UTF-8 |
-| `from_json(bytes_or_string)` | One JSON document; return an ordinary value |
-| `to_json(value)` | One JSON document as UTF-8 Bytes |
-| `write_stdout(byte_stream)` | Drain bytes exactly, then finalize associated jobs |
+| Operation                    | Contract                                                             |
+| ---------------------------- | -------------------------------------------------------------------- |
+| `map(f, sequence)`           | Preserve category; one result per item                               |
+| `filter(p, sequence)`        | Require Bool predicate; preserve category                            |
+| `fold(f, initial, sequence)` | Apply `f(accumulator, item)` in order; return the final accumulator  |
+| `each(f, sequence)`          | Run in order, discard callback values, return Unit                   |
+| `take(n, sequence)`          | Nonnegative Int; successful early cutoff                             |
+| `close(stream)`              | Consume the handle and clean up without draining; return Unit        |
+| `sort_by(key, sequence)`     | Stable order, homogeneous comparable keys, return List               |
+| `sum(sequence)`              | Homogeneous numeric kind; checked Int arithmetic                     |
+| `files(path)`                | Value stream of anonymous records from filesystem APIs               |
+| `glob(pattern)`              | Explicit filesystem expansion to List of Paths; sorted by path bytes |
+| `read_text(path)`            | Read bounded content, decode strict UTF-8                            |
+| `from_json(bytes_or_string)` | One JSON document; return an ordinary value                          |
+| `to_json(value)`             | One JSON document as UTF-8 Bytes                                     |
+| `write_stdout(byte_stream)`  | Drain bytes exactly, then finalize associated jobs                   |
 
 `files` emits `name: Path`, `path: Path`, `kind: String`, and `size: Int`; `name`
 contains the entry's basename and `path` the source-relative path. It includes hidden
@@ -358,15 +358,15 @@ defaults; unknown keys and negative/non-Int limits are errors. There is no impli
 unlimited sentinel. Zero permits only an empty result for size/count limits; nesting
 depth must be at least one.
 
-| Operation | Option keys |
-| --- | --- |
-| `capture_with(options, plan)` | `max_bytes` |
-| `collect_with(options, stream)` | `max_items`, `max_bytes` |
-| `collect_bytes_with(options, stream)` | `max_bytes` |
-| `lines_with(options, byte_stream)` | `max_line_bytes` |
-| `read_text_with(options, path)` | `max_bytes` |
-| `from_json_with(options, input)` | `max_bytes`, `max_depth` |
-| `to_json_with(options, value)` | `max_bytes`, `max_depth` |
+| Operation                              | Option keys              |
+| -------------------------------------- | ------------------------ |
+| `capture_with(options, plan)`          | `max_bytes`              |
+| `collect_with(options, stream)`        | `max_items`, `max_bytes` |
+| `collect_bytes_with(options, stream)`  | `max_bytes`              |
+| `lines_with(options, byte_stream)`     | `max_line_bytes`         |
+| `read_text_with(options, path)`        | `max_bytes`              |
+| `from_json_with(options, input)`       | `max_bytes`, `max_depth` |
+| `to_json_with(options, value)`         | `max_bytes`, `max_depth` |
 | `sort_by_with(options, key, sequence)` | `max_items`, `max_bytes` |
 
 The unqualified functions are ordinary wrappers supplying empty options records.

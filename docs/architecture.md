@@ -202,14 +202,14 @@ no OS resources. Nested materializations use independent budgets.
 
 The ownership map includes the planned stream, codec, and editor components:
 
-| Owner | Resources |
-| --- | --- |
-| Session | Terminal, signal channel, history, background jobs, active editor |
-| Execution context | Continuations, launch snapshots, resource scopes |
-| Job | Child identities, process group, launch channels, captured descriptors |
-| Stream control block | Producer, queues, generation, transferred upstream ownership |
-| Editor state | Text, undo records, revision, completion view, layout caches |
-| Codec invocation | yyjson document and temporary conversion storage |
+| Owner                | Resources                                                              |
+| -------------------- | ---------------------------------------------------------------------- |
+| Session              | Terminal, signal channel, history, background jobs, active editor      |
+| Execution context    | Continuations, launch snapshots, resource scopes                       |
+| Job                  | Child identities, process group, launch channels, captured descriptors |
+| Stream control block | Producer, queues, generation, transferred upstream ownership           |
+| Editor state         | Text, undo records, revision, completion view, layout caches           |
+| Codec invocation     | yyjson document and temporary conversion storage                       |
 
 Codec invocations own their yyjson documents and copy decoded values into the runtime
 heap. They never parse in-situ over immutable String/Bytes storage or retain document
@@ -226,14 +226,14 @@ recoverable Result. Ordinary failures use explicit status values and cleanup blo
 
 Stage 4 adds an editor implemented in project code with six narrow responsibilities:
 
-| Part | Input and output | Excludes |
-| --- | --- | --- |
-| Terminal adapter | Device reads/writes, dimensions, saved modes | Grammar, editing decisions |
-| Input decoder | Byte chunks and deadlines to typed input events | Evaluation and filesystem access |
-| Edit state | Events to text/cursor/undo changes and requested actions | Syscalls and terminal escapes |
-| Syntax integration | Buffer revision to parse status, indentation, highlight spans | Running user code |
-| Layout | Text, styles, viewport to rows/cells and cursor coordinates | Terminal I/O |
-| Renderer | Previous/next layout to bounded output bytes | Parsing or modifying source |
+| Part               | Input and output                                              | Excludes                         |
+| ------------------ | ------------------------------------------------------------- | -------------------------------- |
+| Terminal adapter   | Device reads/writes, dimensions, saved modes                  | Grammar, editing decisions       |
+| Input decoder      | Byte chunks and deadlines to typed input events               | Evaluation and filesystem access |
+| Edit state         | Events to text/cursor/undo changes and requested actions      | Syscalls and terminal escapes    |
+| Syntax integration | Buffer revision to parse status, indentation, highlight spans | Running user code                |
+| Layout             | Text, styles, viewport to rows/cells and cursor coordinates   | Terminal I/O                     |
+| Renderer           | Previous/next layout to bounded output bytes                  | Parsing or modifying source      |
 
 Use explicit events such as Text, Key, PasteBegin/Chunk/End, Resize, Interrupt, Suspend,
 and CompletionReady. The session routes signal/process events and calls editor steps;

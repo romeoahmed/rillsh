@@ -91,10 +91,9 @@ RillValue rill_runtime_object(RillHeap *h, RillValueKind kind,
               kind == RILL_V_PATH || kind == RILL_V_ENV ||
               kind == RILL_V_BINDINGS || kind == RILL_V_DESCRIPTOR;
   assert(text || !len);
+  bool indexed = kind == RILL_V_RECORD && n >= RECORD_INDEX_MIN_SLOTS;
   size_t edges = {}, index = 0, bytes = {}, total = {};
-  size_t keys = kind == RILL_V_BINDINGS            ? n
-                : kind == RILL_V_RECORD && n >= 32 ? n / 2
-                                                   : 0;
+  size_t keys = kind == RILL_V_BINDINGS ? n : indexed ? n / 2 : 0;
   size_t key_size =
       kind == RILL_V_BINDINGS ? sizeof(const char *) : sizeof(RillValue *);
   if (ckd_mul(&index, keys, key_size))
@@ -143,7 +142,7 @@ RillValue rill_runtime_object(RillHeap *h, RillValueKind kind,
   h->objects = o;
   h->bytes = total;
   RillValue out = {.kind = kind, .as.object = o};
-  if (kind == RILL_V_RECORD && n >= 32 && v && !rill_runtime_record_finish(out))
+  if (indexed && v && !rill_runtime_record_finish(out))
     return (RillValue){};
   return out;
 }

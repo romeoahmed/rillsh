@@ -84,17 +84,17 @@ gates.
 Prefer ISO/IEC 9899:2024 facilities and selected GNU extensions that express intent
 clearly. Require the facilities actually used, without older-C fallbacks or C2y syntax.
 
-| Need | Convention |
-| --- | --- |
-| Boolean/null values and assertions | `bool`, `true`, `false`, `nullptr`, `static_assert` |
-| Interface annotations | `[[nodiscard]]`, `[[maybe_unused]]`, `[[fallthrough]]` |
-| Checked integer arithmetic | `<stdckdint.h>`: `ckd_add`, `ckd_sub`, `ckd_mul` |
-| Constants and local inference | `constexpr`, `auto`, `typeof` when clearer |
-| Bit operations | `<stdbit.h>` when needed |
-| Initialization and representation | `{}`, designated initializers, compound literals, tagged unions |
-| Headers and no-argument functions | `#pragma once`; `f()` declarations and definitions |
-| Variadic formatting | C23 `va_start(args)` and `[[gnu::format(printf, ...)]]` |
-| Simple scope-owned storage | `[[gnu::cleanup(function)]]` with an exactly typed, infallible callback |
+| Need                               | Convention                                                              |
+| ---------------------------------- | ----------------------------------------------------------------------- |
+| Boolean/null values and assertions | `bool`, `true`, `false`, `nullptr`, `static_assert`                     |
+| Interface annotations              | `[[nodiscard]]`, `[[maybe_unused]]`, `[[fallthrough]]`                  |
+| Checked integer arithmetic         | `<stdckdint.h>`: `ckd_add`, `ckd_sub`, `ckd_mul`                        |
+| Constants and local inference      | `constexpr`, `auto`, `typeof` when clearer                              |
+| Bit operations                     | `<stdbit.h>` when needed                                                |
+| Initialization and representation  | `{}`, designated initializers, compound literals, tagged unions         |
+| Headers and no-argument functions  | `#pragma once`; `f()` declarations and definitions                      |
+| Variadic formatting                | C23 `va_start(args)` and `[[gnu::format(printf, ...)]]`                 |
+| Simple scope-owned storage         | `[[gnu::cleanup(function)]]` with an exactly typed, infallible callback |
 
 Use libc for allocation, copying, formatting, and sorting when its contract fits. A
 helper should add ownership, bounds, or meaningful errors rather than rename libc.

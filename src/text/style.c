@@ -6,8 +6,8 @@ RillPalette rill_style_palette(RillColorMode mode, bool tty, const char *term,
                                const char *ct, const char *nc) {
   if (mode == RILL_COLOR_NEVER)
     return RILL_PALETTE_PLAIN;
-  const char *families[] = {"xterm", "screen", "tmux",     "rxvt",
-                            "foot",  "kitty",  "alacritty"};
+  static const char *const families[] = {"xterm", "screen", "tmux",     "rxvt",
+                                         "foot",  "kitty",  "alacritty"};
   bool known = false;
   if (term)
     for (size_t i = 0; i < sizeof(families) / sizeof(families[0]); ++i)

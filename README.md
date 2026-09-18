@@ -97,14 +97,14 @@ Start with [current status](docs/status.md) for implemented features and validat
 Structured streams, filesystem/JSON bridges, grapheme editing, completion, and
 persistent history remain in the [implementation plan](docs/implementation-plan.md).
 
-| Guide | Contents |
-| --- | --- |
-| [Language](docs/language.md) | Values, functions, ADTs, patterns, errors, and modules |
-| [Execution](docs/execution.md) | Commands, plans, jobs, and planned stream contracts |
-| [Interaction](docs/interaction.md) · [Platform](docs/platform.md) | Invocation, planned editing, and Linux/macOS conventions |
-| [Architecture](docs/architecture.md) | Components, ownership, evaluation, and memory |
-| [Development](docs/development.md) · [Testing](docs/testing.md) | Build profiles, contribution conventions, and acceptance contracts |
-| [References](docs/references.md) | Standards, upstream documentation, and design sources |
+| Guide                                                             | Contents                                                           |
+| ----------------------------------------------------------------- | ------------------------------------------------------------------ |
+| [Language](docs/language.md)                                      | Values, functions, ADTs, patterns, errors, and modules             |
+| [Execution](docs/execution.md)                                    | Commands, plans, jobs, and planned stream contracts                |
+| [Interaction](docs/interaction.md) · [Platform](docs/platform.md) | Invocation, planned editing, and Linux/macOS conventions           |
+| [Architecture](docs/architecture.md)                              | Components, ownership, evaluation, and memory                      |
+| [Development](docs/development.md) · [Testing](docs/testing.md)   | Build profiles, contribution conventions, and acceptance contracts |
+| [References](docs/references.md)                                  | Standards, upstream documentation, and design sources              |
 
 For changes, read the development guide and the specification that owns the behavior.
 Keep process bytes, language values, and display text separate; update the relevant

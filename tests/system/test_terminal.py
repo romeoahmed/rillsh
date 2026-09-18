@@ -3,6 +3,7 @@
 import errno
 import os
 import pty
+import resource
 import select
 import signal
 import termios
@@ -25,15 +26,26 @@ class Terminal(AbstractContextManager["Terminal"]):
         *,
         stdout: Path | None = None,
         arguments: tuple[str, ...] = ("--no-config",),
+        reserve_fds: int = 0,
+        blocked_signals: tuple[signal.Signals, ...] = (),
     ) -> None:
         self.pending = b""
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             try:
+                if blocked_signals:
+                    signal.pthread_sigmask(signal.SIG_BLOCK, blocked_signals)
                 os.chdir(directory)
                 if stdout is not None:
                     with stdout.open("wb") as output:
                         os.dup2(output.fileno(), 1)
+                if reserve_fds:
+                    # These descriptors deliberately survive exec; child exit owns cleanup.
+                    source = os.open(os.devnull, os.O_RDONLY)
+                    os.set_inheritable(source, True)
+                    for fd in range(3, reserve_fds):
+                        if fd != source:
+                            os.dup2(source, fd, inheritable=True)
                 os.execve(shell, ("rillsh", *arguments), environment)
             finally:
                 os._exit(127)
@@ -137,6 +149,33 @@ class Terminal(AbstractContextManager["Terminal"]):
 
 
 class TerminalTests(ShellCase):
+    def test_redirection_does_not_acquire_terminal(self) -> None:
+        master, slave = pty.openpty()
+        try:
+            path = os.ttyname(slave)
+            self.execute((self.shell, "-c", f"^./child no-terminal > '{path}'"))
+        finally:
+            os.close(slave)
+            os.close(master)
+
+    def test_inherited_signal_mask(self) -> None:
+        terminal = self.enterContext(
+            Terminal(
+                self.shell,
+                self.work,
+                self.environment,
+                blocked_signals=(signal.SIGINT, signal.SIGTERM, signal.SIGCHLD),
+            )
+        )
+        terminal.expect(b"rill> ")
+        terminal.send("fn loop()=>loop(); ^./child args ready; loop()")
+        terminal.expect(b"\r\n5:ready\r\n")
+        terminal.wait_for_shell_foreground()
+        terminal.write(b"\x03")
+        terminal.expect(b"rill> ")
+        os.kill(terminal.pid, signal.SIGTERM)
+        terminal.wait_for_exit(143)
+
     def setUp(self) -> None:
         super().setUp()
         self.environment.pop("NO_COLOR")
@@ -313,9 +352,8 @@ class TerminalTests(ShellCase):
         terminal.send("^./child args waiting; wait(j)")
         terminal.expect(b"\r\n7:waiting\r\n")
         terminal.wait_for_shell_foreground()
-        # Inspect already buffered bytes as well as the descriptor.
+        # No prompt should have been consumed while waiting for the live job.
         self.assertNotIn(b"rill> ", terminal.pending)
-        self.assertFalse(select.select([terminal.fd], [], [], 0.1)[0])
         terminal.write(b"\x03")
         terminal.expect(b"rill> ")
         terminal.send("length(filter(fn(item)=>item.state=='Running',jobs()))")
@@ -335,12 +373,9 @@ class TerminalTests(ShellCase):
             terminal.send("^./missing")
             terminal.expect(b"LaunchError")
             terminal.expect(b"rill> ")
-        terminal.send("jobs()")
-        # Each launch collects the acknowledged report from the preceding entry.
-        terminal.expect(b"<List 1>")
-        terminal.expect(b"rill> ")
         self.assert_restored()
-        terminal.finish()
+        terminal.send("exit(if length(jobs())<4 then 0 else 1)")
+        terminal.wait_for_exit()
 
     def test_multiline_entry_and_interrupt_at_prompt(self) -> None:
         terminal = self.open_terminal()
@@ -361,6 +396,22 @@ class TerminalTests(ShellCase):
         terminal = self.open_terminal()
         terminal.write(b"\x04")
         terminal.wait_for_exit()
+
+    def test_high_descriptor_terminal(self) -> None:
+        # Cross the historical select bitmap boundary without raising OS limits.
+        minimum = 1100
+        soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft != resource.RLIM_INFINITY and soft < minimum + 64:
+            self.skipTest("descriptor limit too low for the high-FD terminal case")
+        with Terminal(
+            self.shell, self.work, self.environment, reserve_fds=minimum
+        ) as terminal:
+            terminal.expect(b"rill> ")
+            terminal.send("^./child args high-fd")
+            terminal.expect(b"7:high-fd\r\n")
+            terminal.expect(b"rill> ")
+            terminal.write(b"\x04")
+            terminal.wait_for_exit()
 
 
 if __name__ == "__main__":

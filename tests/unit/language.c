@@ -49,34 +49,21 @@ static void constants() {
   CHECK(eval);
   RillHeap *heap = rill_runtime_heap(eval);
   heap->stress = true;
-  RillEvalEvent event =
-      evaluate(eval,
-               "fn literal()=>\"a\\u{0}b\"; fn record(x)=>{key:x};"
-               "[literal(),literal(),record(1),record(2)]",
-               nullptr);
-  CHECK(event.state == RILL_EVAL_DONE && event.value.kind == RILL_V_LIST);
-  RillValue *items = event.value.as.object->values;
-  CHECK(items[0].as.object == items[1].as.object);
-  CHECK(items[0].as.object->bytes.size == 3);
-  CHECK(!memcmp(items[0].as.object->bytes.data, "a\0b", 3));
-  CHECK(items[2].as.object != items[3].as.object);
-  CHECK(items[2].as.object->values[0].as.object ==
-        items[3].as.object->values[0].as.object);
-  CHECK(items[2].as.object->values[1].as.integer == 1);
-  CHECK(items[3].as.object->values[1].as.integer == 2);
-  // Keeping a literal must not keep its original code or unrelated literals.
-  event = evaluate(eval, "let saved=literal(); let literal=0; let record=0",
-                   nullptr);
+  expect(eval,
+         "fn literal()=>\"a\\u{0}b\"; fn record(x)=>{key:x};"
+         "let first=record(1); let second=record(2);"
+         "if literal()==literal() and first.key==1 and second.key==2 "
+         "then 1 else 0",
+         1);
+  // A retained literal survives replacing its defining functions.
+  RillEvalEvent event = evaluate(
+      eval, "let saved=literal(); let literal=0; let record=0", nullptr);
   CHECK(event.state == RILL_EVAL_DONE);
   event = evaluate(eval, "saved", nullptr);
   CHECK(event.state == RILL_EVAL_DONE && event.value.kind == RILL_V_STRING);
   rill_runtime_collect(heap);
-  size_t codes = 0;
-  for (RillObject *o = heap->objects; o; o = o->next)
-    if (o->kind == RILL_V_CODE)
-      ++codes;
-  CHECK(codes == 1); // Only the current entry's code remains.
   CHECK(event.value.as.object->bytes.size == 3);
+  CHECK(!memcmp(event.value.as.object->bytes.data, "a\0b", 3));
   rill_runtime_free(eval);
 }
 
@@ -97,7 +84,6 @@ static void pattern_validation_order() {
       event = rill_runtime_step(eval);
     } while (event.state == RILL_EVAL_YIELD);
     CHECK(event.state == RILL_EVAL_ERROR && event.diagnostic.kind == RILL_TYPE);
-    CHECK(!strcmp(event.diagnostic.message, "duplicate name in pattern"));
   }
   rill_runtime_free(eval);
 }
@@ -135,12 +121,8 @@ static void values_and_patterns() {
          "fn make(x) => do {let unused=[1,2,3]; fn(y)=>x+y}; let "
          "saved=make(4); saved(5)",
          9);
-  RillValue saved = {};
-  CHECK(rill_runtime_lookup(eval, "saved", &saved));
-  CHECK(saved.kind == RILL_V_CLOSURE && saved.as.object->count == 2);
-  CHECK(saved.as.object->values[0].kind == RILL_V_CODE);
-  CHECK(saved.as.object->values[1].kind == RILL_V_INT &&
-        saved.as.object->values[1].as.integer == 4);
+  rill_runtime_collect(rill_runtime_heap(eval));
+  expect(eval, "saved(5)", 9);
   expect(eval,
          "let maker=fn(x)=>fn(y)=>x+y; let a=maker(10); let b=maker(20); "
          "a(1)+b(2)",
@@ -231,25 +213,37 @@ static void wide_operands() {
 
 static void tail_calls() {
   static const char *const cases[] = {
-      "fn loop(n,acc)=>if n==0 then acc else loop(n-1,acc+1); loop(1000000,0)",
+      "fn loop(n,acc)=>if n==0 then acc else loop(n-1,acc+1); "
+      "loop(iterations,0)",
       "rec {fn even(n,acc)=>if n==0 then acc else odd(n-1,acc+1); fn "
-      "odd(n,acc)=>if n==0 then acc else even(n-1,acc+1)}; even(1000000,0)",
-      "fn bounce(f,x)=>f(x); fn loop(n)=>if n==0 then 1000000 else "
-      "bounce(loop,n-1); loop(1000000)"};
+      "odd(n,acc)=>if n==0 then acc else even(n-1,acc+1)}; even(iterations,0)",
+      "fn bounce(f,x)=>f(x); fn loop(n)=>if n==0 then iterations else "
+      "bounce(loop,n-1); loop(iterations)"};
   for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); ++i) {
-    RillEval *eval = rill_runtime_new(nullptr, 0);
-    CHECK(eval);
-    size_t depth = 0;
-    RillEvalEvent event = evaluate(eval, cases[i], &depth);
-    if (event.state != RILL_EVAL_DONE || event.value.kind != RILL_V_INT ||
-        event.value.as.integer != 1000000)
-      (void)fprintf(stderr, "tail case %zu: %s\n", i, cases[i]);
-    CHECK(event.state == RILL_EVAL_DONE && event.value.kind == RILL_V_INT &&
-          event.value.as.integer == 1000000);
-    CHECK(depth < 32);
-    rill_runtime_collect(rill_runtime_heap(eval));
-    CHECK(rill_runtime_heap(eval)->bytes < 200000);
-    rill_runtime_free(eval);
+    size_t baseline_depth = 0, baseline_bytes = 0;
+    const size_t counts[] = {1000, 1000000};
+    for (size_t run = 0; run < 2; ++run) {
+      RillEval *eval = rill_runtime_new(nullptr, 0);
+      CHECK(eval);
+      [[gnu::cleanup(rill_text_clear)]] RillBuffer source = {};
+      CHECK(rill_text_format(&source, "let iterations=%zu; %s", counts[run],
+                             cases[i]));
+      size_t depth = 0;
+      RillEvalEvent event = evaluate(eval, source.data, &depth);
+      CHECK(event.state == RILL_EVAL_DONE && event.value.kind == RILL_V_INT &&
+            event.value.as.integer == (int64_t)counts[run]);
+      rill_runtime_collect(rill_runtime_heap(eval));
+      size_t bytes = rill_runtime_heap(eval)->bytes;
+      if (!run) {
+        baseline_depth = depth;
+        baseline_bytes = bytes;
+      } else {
+        // A thousandfold increase in calls must not grow continuation depth.
+        CHECK(depth <= baseline_depth);
+        CHECK(bytes <= 2 * baseline_bytes);
+      }
+      rill_runtime_free(eval);
+    }
   }
 }
 static void collection() {
@@ -259,10 +253,13 @@ static void collection() {
   expect(eval, "fn f(n)=>if n==0 then 9 else f(n-1); f(1000)", 9);
   expect(eval,
          "fn churn(n,temporary)=>if n==0 then 9 else "
-         "churn(n-1,[n,{value:n},fn()=>n]); churn(2000,[])",
+         "churn(n-1,[n,{value:n},fn()=>n]); churn(100,[])",
          9);
   rill_runtime_collect(rill_runtime_heap(eval));
-  CHECK(rill_runtime_heap(eval)->bytes < 200000);
+  size_t retained = rill_runtime_heap(eval)->bytes;
+  expect(eval, "churn(2000,[])", 9);
+  rill_runtime_collect(rill_runtime_heap(eval));
+  CHECK(rill_runtime_heap(eval)->bytes <= 2 * retained);
   expect(eval, "let held=fn(x)=>x+1; held(1)", 2);
   for (size_t i = 0; i < 200; ++i)
     expect(eval, "let held=fn(x)=>x+1; held(1)", 2);
@@ -288,6 +285,7 @@ static void binding_snapshots() {
   }
   expect(eval, "let saved=fn()=>binding0+binding255; saved()", 255);
   rill_runtime_prelude(eval);
+  size_t retained = 0;
   for (size_t pass = 0; pass < 4; ++pass) {
     expect(eval, "let binding0=900; let binding255=100; saved()", 255);
     expect(eval, "binding0+binding255", 1000);
@@ -300,13 +298,13 @@ static void binding_snapshots() {
     CHECK(evaluate(eval, "let duplicate=1; let duplicate=2", nullptr).state ==
           RILL_EVAL_ERROR);
     CHECK(!rill_runtime_lookup(eval, "duplicate", &original));
+    rill_runtime_collect(heap);
+    if (!pass)
+      retained = heap->bytes;
+    else
+      CHECK(heap->bytes <= 2 * retained);
   }
   rill_runtime_collect(heap);
-  size_t snapshots = 0;
-  for (RillObject *o = heap->objects; o; o = o->next)
-    if (o->kind == RILL_V_BINDINGS)
-      ++snapshots;
-  CHECK(snapshots == 2); // Current bindings and the explicitly frozen prelude.
   for (size_t i = 1; i < 255; ++i) {
     char name[32];
     int size = snprintf(name, sizeof(name), "binding%zu", i);

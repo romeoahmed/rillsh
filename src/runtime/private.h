@@ -3,6 +3,8 @@
 #include "runtime.h"
 #include "syntax/syntax.h"
 #include <stddef.h>
+// Allocation and finalization must reserve the same Record index storage.
+static constexpr size_t RECORD_INDEX_MIN_SLOTS = 32;
 enum {
   GLOBAL,
   ENTRY,

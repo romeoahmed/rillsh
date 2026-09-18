@@ -33,15 +33,15 @@ pipelines, and ordered redirection. `job { ... }`, `command`, and `pipe` constru
 reusable plans without launching processes or opening redirection files. `with_cwd`,
 `with_env`, and `accept_exit` attach explicit per-stage policies.
 
-| Operations | Current behavior |
-| --- | --- |
-| `run`, `start` | Run a plan in the foreground or create an independent background job |
-| `wait`, `check` | Inspect a nominal JobReport or raise its selected failure |
-| `fg`, `bg`, `cancel` | Control external jobs; mixed suspended evaluations belong to stage 3 |
-| `jobs` | Return records containing `id`, `handle`, `kind`, and named `state` |
-| `cd`, `pwd` | Change directory transactionally; return the physical directory as Path |
-| `get_env`, `set_env`, `unset_env` | Read and update the session environment explicitly |
-| `exit`, `exit_force` | Refuse live jobs or explicitly clean them up before exit |
+| Operations                        | Current behavior                                                        |
+| --------------------------------- | ----------------------------------------------------------------------- |
+| `run`, `start`                    | Run a plan in the foreground or create an independent background job    |
+| `wait`, `check`                   | Inspect a nominal JobReport or raise its selected failure               |
+| `fg`, `bg`, `cancel`              | Control external jobs; mixed suspended evaluations belong to stage 3    |
+| `jobs`                            | Return records containing `id`, `handle`, `kind`, and named `state`     |
+| `cd`, `pwd`                       | Change directory transactionally; return the physical directory as Path |
+| `get_env`, `set_env`, `unset_env` | Read and update the session environment explicitly                      |
+| `exit`, `exit_force`              | Refuse live jobs or explicitly clean them up before exit                |
 
 The prompt still uses canonical terminal editing. Rich editing, completion, persistent
 history, and Unicode-aware value presentation are pending. Current display escapes
@@ -78,19 +78,19 @@ Python tests exercise scripts, module files, real processes, and controlling PTY
 Counts are a snapshot, not a coverage target. [Testing](testing.md) defines the
 contracts.
 
-| Contracts | Evidence and boundary |
-| --- | --- |
-| L01–L04 | Syntax matrices; application and value-pipe effect-order scripts |
-| L05–L08 | Retained closures, exact captures, three million-call tail scenarios, continuation limits, stress GC, and retained-heap plateau checks |
-| L09–L12 | Arithmetic/conversion/index failures, distinct data values, Result conversion, script/REPL behavior, and uncaught Ctrl-C; Stream branches pending |
-| L13–L14 | Cached module identities/cycles, retry after failed import, nominal redeclaration, and atomic REPL publication with preserved effects |
-| A01–A06 | Nominal identity, first-class constructors, payload validation, nested/exact/open/rest patterns, and curried parameter checks |
-| A07–A12 | Subject/guard order, failed-guard scope, repeated names, immutable updates, equality validation, and shared list tails under GC |
-| E01–E02 | Reusable/programmatic plans, prelaunch validation, argument spreading, per-stage policies, and distinct launch snapshots |
-| E03–E08, E14–E16, E18–E20 | Retained command/supervisor regressions; direct feed/capture tests; codec and Stream branches pending |
-| P01–P03, P07, P13–P14 | PATH/environment bytes, directory transactions, UTF-8 boundaries, invocation, signal and terminal ownership |
-| P04, P08–P09 | XDG startup matrix and color selection; history storage and rich-terminal selection pending |
-| I02 | All 853 official grapheme cases and deterministic regeneration; no full display-width claim |
+| Contracts                 | Evidence and boundary                                                                                                                             |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| L01–L04                   | Syntax matrices; application and value-pipe effect-order scripts                                                                                  |
+| L05–L08                   | Retained closures, lexical capture semantics, three million-call tail scenarios, continuation limits, stress GC, and retained-heap plateau checks |
+| L09–L12                   | Arithmetic/conversion/index failures, distinct data values, Result conversion, script/REPL behavior, and uncaught Ctrl-C; Stream branches pending |
+| L13–L14                   | Cached module identities/cycles, retry after failed import, nominal redeclaration, and atomic REPL publication with preserved effects             |
+| A01–A06                   | Nominal identity, first-class constructors, payload validation, nested/exact/open/rest patterns, and curried parameter checks                     |
+| A07–A12                   | Subject/guard order, failed-guard scope, repeated names, immutable updates, equality validation, and shared list tails under GC                   |
+| E01–E02                   | Reusable/programmatic plans, prelaunch validation, argument spreading, per-stage policies, and distinct launch snapshots                          |
+| E03–E08, E14–E16, E18–E20 | Retained command/supervisor regressions; direct feed/capture tests; codec and Stream branches pending                                             |
+| P01–P03, P07, P13–P14     | PATH/environment bytes, directory transactions, UTF-8 boundaries, invocation, signal and terminal ownership                                       |
+| P04, P08–P09              | XDG startup matrix and color selection; history storage and rich-terminal selection pending                                                       |
+| I02                       | All 853 official grapheme cases and deterministic regeneration; no full display-width claim                                                       |
 
 Allocation-budget tests exercise production parser/runtime code, including closures,
 ADTs, patterns, and equality. Single-failure library sweeps cover rooted builders and
@@ -105,37 +105,34 @@ a passing language suite.
 
 ## Validation checkpoint
 
-The 2026-09-18 test checkpoint passed **29/29** Meson tests in each profile below.
-Versions identify tested configurations, not compiler or platform version requirements.
+The 2026-09-18 C audit passed **29/29** Meson tests in each profile below.
+Versions identify tested configurations, not compiler or platform requirements.
 
-| Platform | Profiles |
-| --- | --- |
-| Linux/glibc, AArch64 | Clang 23.1.0 ASan/UBSan and release; GCC 16.2.1 release |
-| macOS, arm64 | Clang 23.1.1 ASan/UBSan and release |
+| Platform             | Profiles                                    |
+| -------------------- | ------------------------------------------- |
+| Linux/glibc, AArch64 | Clang 23.1.0 ASan/UBSan; GCC 16.2.1 release |
+| macOS, arm64         | Clang 23.1.1 ASan/UBSan and release         |
 
-Both complete quality gates passed formatting, clang-tidy, Doxygen, generated-data,
+Both sanitizer quality gates passed formatting, clang-tidy, Doxygen, generated-data,
 repository checks, and tests. Ruff lint/format and ty passed for Python tools and system
-tests. The system suites contain 12 language, 19 process/invocation, and 14
-controlling-PTY methods. Five repeated macOS release PTY suite runs passed. Separate
-timeout probes verified cooperative exit and forced termination, with pipe closure and
-child reaping.
+tests. The system suites contain 12 language, 19 process/invocation, and 17 PTY methods.
 
-Unoptimized syntax/runtime/language suites passed **12/12**, including one million calls
-each for direct, mutual, and indirect tail recursion. Release benchmark result checks
-passed **13/13**; these are correctness results, not speed thresholds. Linux leak
-checking was exercised. x86-64, macOS LeakSanitizer, rich-editor emulator behavior, and
-fuzz targets remain unverified or unimplemented.
+Regressions cover inherited blocked and pending signals, signal-state restoration after
+initialization failure and cleanup, noninteractive terminal ownership, nonregular module
+rejection, and all six redirection operations. Terminal input and EOF work with inherited
+high-numbered descriptors. Low-limit fixtures adapt without raising the inherited limit;
+the high-FD PTY case reports a skip if its setup cannot fit.
+
+Earlier checkpoints also passed unoptimized syntax/runtime/language tests (**12/12**),
+release benchmark result checks (**13/13**), repeated PTY runs, README examples, and
+cooperative/forced timeout cleanup probes. These were not rerun for this audit and do not
+establish performance gains. Linux leak checking was exercised; x86-64, macOS
+LeakSanitizer, rich-editor emulator behavior, and fuzz targets remain unverified or
+unimplemented.
 
 Reproduce the gate and selected suites with the commands in
 [development](development.md#quality-gate) and
-[testing](testing.md#test-infrastructure). These results apply to that checkpoint; rerun
-affected checks after changes.
-
-The documentation review reran the complete macOS Clang ASan/UBSan gate (**29/29**),
-Ruff, and ty. All four README examples passed through both command and file input.
-Generated API pages include C23 attributes and the documented static limits. C token
-comparison confirmed that the review changed comments, not executable C. Linux and
-release profiles above were not rerun for this documentation-only review.
+[testing](testing.md#test-infrastructure). Rerun affected checks after changes.
 
 ## Performance evidence
 

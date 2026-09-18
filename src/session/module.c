@@ -89,12 +89,21 @@ void rill_module_event(RillModules *m, RillEval *eval, RillEvalEvent event) {
   }
   [[gnu::cleanup(rill_platform_close)]] int fd =
       bundled ? -1
-              : rill_platform_internal(open(canonical, O_RDONLY | O_CLOEXEC));
-  if (!bundled &&
-      (fd < 0 || fstat(fd, &identity) < 0 || !S_ISREG(identity.st_mode))) {
-    free(canonical);
-    resume_error(eval, RILL_IO, "cannot open regular module source");
-    return;
+              : rill_platform_internal(open(
+                    canonical, O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOCTTY));
+  if (!bundled) {
+    // Opening a FIFO must not wait for a writer before type validation.
+    if (fd < 0 || fstat(fd, &identity) < 0) {
+      free(canonical);
+      resume_error(eval, RILL_IO, "cannot open module source");
+      return;
+    }
+    if (!S_ISREG(identity.st_mode)) {
+      free(canonical);
+      errno = EINVAL;
+      resume_error(eval, RILL_IO, "module source must be a regular file");
+      return;
+    }
   }
   for (RillModule *entry = m->entries; entry; entry = entry->next) {
     bool same = bundled ? entry->bundled && !strcmp(entry->name, canonical)

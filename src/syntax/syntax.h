@@ -69,7 +69,8 @@ typedef struct RillNode {
   bool repeated;   ///< Duplicate pattern names, set during code preparation.
   struct RillNode *pattern; ///< Parameter or binding pattern.
   union {
-    int64_t integer; ///< Integer literal, redirection tag, or module flag.
+    int64_t integer;       ///< Integer literal, precedence, or module flag.
+    RillRedirect redirect; ///< Syntax redirection operation.
     size_t constant; ///< String/key slot assigned after code consumes syntax.
   }; ///< Kind selects the payload; the parser leaves constant slots unset.
   struct RillNode *children;       ///< Ordered operands.

@@ -25,6 +25,8 @@ typedef struct {
   bool owns_terminal;        ///< Interactive initialization acquired the tty.
   struct sigaction saved[8]; ///< Original dispositions restored on destruction.
   size_t installed;          ///< Successfully installed handlers.
+  sigset_t mask;   ///< Inherited signal mask, restored on destruction.
+  bool mask_saved; ///< Initialization acquired the signal mask.
 } RillPlatform;
 /**
  * @brief Create a close-on-exec pipe with both descriptors above 2.
@@ -49,11 +51,12 @@ void rill_platform_close(int *fd);
  * terminal.
  *
  * Only one initialized owner may exist; the destination must own no resources.
+ * Managed signals are unblocked; unrelated mask bits are preserved.
  * Interactive setup waits for foreground ownership. Failure releases acquired
- * resources and restores dispositions.
+ * resources and restores dispositions and the inherited mask.
  */
 [[nodiscard]] bool rill_platform_init(RillPlatform *platform, bool interactive);
-/** @brief Restore terminal/dispositions and close descriptors after init. */
+/** @brief Restore terminal, dispositions and mask; close owned descriptors. */
 void rill_platform_clear(RillPlatform *platform);
 /**
  * @brief Drain notifications and atomically exchange pending event bits.
@@ -121,6 +124,6 @@ const char *rill_platform_env_get(const RillEnvironment *env, const char *name);
 /**
  * @brief Test input readiness without blocking or changing descriptor flags.
  *
- * Returns false for errors and descriptors outside the select range.
+ * Supports any valid descriptor number. EOF is readable; errors return false.
  */
 bool rill_platform_input_ready(int fd);

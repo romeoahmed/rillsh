@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+static constexpr size_t MAX_SYNTAX_DEPTH = 256;
 struct RillNodes {
   struct RillNodes *next;
   size_t used, capacity;
@@ -366,7 +367,7 @@ static RillNode *aggregate(Parser *p, bool pat, char closing) {
   return n;
 }
 static RillNode *pattern(Parser *p) {
-  if (++p->depth > 256) {
+  if (++p->depth > MAX_SYNTAX_DEPTH) {
     fail(p, "pattern nesting limit exceeded");
     --p->depth;
     return nullptr;
@@ -645,7 +646,7 @@ static RillNode *suffix(Parser *p) {
   return n;
 }
 static RillNode *binary(Parser *p, unsigned minimum) {
-  if (++p->depth > 256) {
+  if (++p->depth > MAX_SYNTAX_DEPTH) {
     fail(p, "syntax nesting limit exceeded");
     --p->depth;
     return nullptr;
@@ -826,7 +827,7 @@ static RillNode *pipeline(Parser *p) {
         part = node(p, RILL_REDIRECT, at);
         if (!part)
           return nullptr;
-        part->integer = op;
+        part->redirect = (RillRedirect)op;
         if (op != RILL_ERROR_TO_OUTPUT) {
           space(p, false);
           part->children = word(p);
@@ -890,7 +891,7 @@ static RillNode *declaration(Parser *p, bool top) {
     if (!n || !require(p, '{', "expected recursive group"))
       return nullptr;
     // Invalid nested groups still recurse before member validation below.
-    if (++p->depth > 256) {
+    if (++p->depth > MAX_SYNTAX_DEPTH) {
       fail(p, "syntax nesting limit exceeded");
       --p->depth;
       return nullptr;
@@ -1022,7 +1023,7 @@ static void validate_depth(Parser *p) {
   struct {
     const RillNode *node;
     unsigned phase;
-  } stack[257];
+  } stack[MAX_SYNTAX_DEPTH];
   size_t depth = 1;
   stack[0].node = p->out.first;
   stack[0].phase = 0;
@@ -1045,7 +1046,7 @@ static void validate_depth(Parser *p) {
       continue;
     }
     if (child) {
-      if (depth == 256) {
+      if (depth == MAX_SYNTAX_DEPTH) {
         p->at = n->offset;
         fail(p, "syntax nesting limit exceeded");
         return;

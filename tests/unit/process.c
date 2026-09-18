@@ -110,8 +110,15 @@ static void streaming() {
 }
 
 static void child_state() {
-  int high = fcntl(platform.signals[0], F_DUPFD_CLOEXEC, 256);
-  CHECK(high >= 256);
+  int baseline = descriptor_count(3);
+  CHECK(baseline >= 0);
+  struct rlimit limit = {};
+  CHECK(getrlimit(RLIMIT_NOFILE, &limit) == 0 && limit.rlim_cur > 3);
+  // Descriptor numbers must be below the inherited soft limit.
+  int minimum = limit.rlim_cur > 256 ? 256 : (int)limit.rlim_cur - 1;
+  int high = fcntl(platform.signals[0], F_DUPFD_CLOEXEC, minimum);
+  CHECK(high >= minimum);
+  CHECK(descriptor_count(3) == baseline + 1);
   RillJob *job = launch("fds");
   finish(job);
   CHECK(rill_exec_result(job) == 0);

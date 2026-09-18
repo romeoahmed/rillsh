@@ -82,13 +82,13 @@ references, not requirements to add badges, banners, or duplicate documentation.
 
 ## Language and interaction ideas
 
-| Source | Idea retained |
-| --- | --- |
-| [R7RS](https://standards.scheme.org/r7rs-html5/index.html) | First-class functions, lexical scope, proper tail recursion |
-| [Chez Scheme editor](https://cisco.github.io/ChezScheme/csug10.0/use.html) | Whole-expression input and history |
-| [Haskell expressions](https://www.haskell.org/onlinereport/haskell2010/haskellch3.html) | Unary application, currying, patterns; Rill evaluates strictly |
-| [Nushell PipelineData](https://github.com/nushell/nushell/blob/main/crates/nu-protocol/src/pipeline/pipeline_data.rs) and [ByteStream](https://github.com/nushell/nushell/blob/main/crates/nu-protocol/src/pipeline/byte_stream.rs) | Reusable values versus consumable streams; process byte transport |
-| [fish reader](https://github.com/fish-shell/fish-shell/blob/master/src/reader/reader.rs) and [highlighting](https://github.com/fish-shell/fish-shell/blob/master/src/highlight/highlight.rs) | Responsive input, stale-result rejection, nonblocking highlighting |
+| Source                                                                                                                                                                                                                              | Idea retained                                                      |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| [R7RS](https://standards.scheme.org/r7rs-html5/index.html)                                                                                                                                                                          | First-class functions, lexical scope, proper tail recursion        |
+| [Chez Scheme editor](https://cisco.github.io/ChezScheme/csug10.0/use.html)                                                                                                                                                          | Whole-expression input and history                                 |
+| [Haskell expressions](https://www.haskell.org/onlinereport/haskell2010/haskellch3.html)                                                                                                                                             | Unary application, currying, patterns; Rill evaluates strictly     |
+| [Nushell PipelineData](https://github.com/nushell/nushell/blob/main/crates/nu-protocol/src/pipeline/pipeline_data.rs) and [ByteStream](https://github.com/nushell/nushell/blob/main/crates/nu-protocol/src/pipeline/byte_stream.rs) | Reusable values versus consumable streams; process byte transport  |
+| [fish reader](https://github.com/fish-shell/fish-shell/blob/master/src/reader/reader.rs) and [highlighting](https://github.com/fish-shell/fish-shell/blob/master/src/highlight/highlight.rs)                                        | Responsive input, stale-result rejection, nonblocking highlighting |
 
 These are design references, not compatibility promises.
 

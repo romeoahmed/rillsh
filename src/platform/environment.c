@@ -101,26 +101,21 @@ void rill_platform_env_clear(RillEnvironment *e) {
 }
 bool rill_platform_cd(RillEnvironment *e, const char *path,
                       RillDiagnostic *error) {
-  int fd =
+  RillEnvironment next = {};
+  [[gnu::cleanup(rill_platform_close)]] int fd =
       rill_platform_internal(open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC));
   if (fd < 0)
     goto fail;
   char *old = getcwd(nullptr, 0);
-  if (!old && errno == ENOMEM) {
-    rill_platform_close(&fd);
+  if (!old && errno == ENOMEM)
     goto fail;
-  }
   // Prepare a separate map so a failed directory transaction cannot publish it.
-  RillEnvironment next = {};
   if (!rill_platform_env_init(&next, e->entries)) {
     free(old);
-    rill_platform_close(&fd);
     goto fail;
   }
   if (chdir(path) < 0) {
     free(old);
-    rill_platform_env_clear(&next);
-    rill_platform_close(&fd);
     goto fail;
   }
   char *cwd = getcwd(nullptr, 0);
@@ -143,17 +138,16 @@ bool rill_platform_cd(RillEnvironment *e, const char *path,
     free(cwd);
     free(old);
     rill_platform_env_clear(&next);
-    rill_platform_close(&fd);
     return false;
   }
   free(cwd);
   free(old);
-  rill_platform_close(&fd);
   rill_platform_env_clear(e);
   *e = next;
   return true;
 fail:
   *error = (RillDiagnostic){
       .kind = RILL_IO, .code = errno, .message = "cannot change directory"};
+  rill_platform_env_clear(&next);
   return false;
 }

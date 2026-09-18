@@ -89,6 +89,11 @@ class ShellTests(ShellCase):
         self.assertEqual(output.read_bytes(), b"out\n")
         self.invoke("^./child both >> output")
         self.assertEqual(output.read_bytes(), b"out\nout\n")
+        errors = self.work / "errors"
+        self.assertEqual(self.invoke("^./child both 2> errors").stdout, b"out\n")
+        self.assertEqual(errors.read_bytes(), b"err\n")
+        self.assertEqual(self.invoke("^./child both 2>> errors").stdout, b"out\n")
+        self.assertEqual(errors.read_bytes(), b"err\nerr\n")
         self.assertEqual(
             self.invoke("^./child both > output | ^./child echo").stdout, b""
         )
@@ -134,7 +139,7 @@ class ShellTests(ShellCase):
         result = self.invoke(
             "^denied", status=1, environment=self.environment | {"PATH": "."}
         )
-        self.assertIn(b"Permission denied", result.stderr)
+        self.assertIn(b"LaunchError", result.stderr)
 
     def test_directory_and_locale(self) -> None:
         destination = self.work / "directory"
