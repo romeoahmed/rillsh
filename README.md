@@ -1,11 +1,11 @@
 # Rill Shell
 
-A shell for Linux and macOS, written in GNU C23. Rill Shell combines explicit Unix
-process pipelines with a small, dynamically typed functional language.
+A shell designed for explicit pipelines, reusable job plans, and functional composition.
+Arguments stay intact, plans describe work, and job handles control each execution.
 
-The executable is `rillsh`. The command foundation is implemented; the complete
-language and expression editor are still in development. This is an experimental
-shell with its own syntax, not a replacement for running existing shell scripts.
+The executable is `rillsh`, for Linux and macOS. Command execution and job control
+work today; the full functional language, structured streams, and expression editor
+are still in development. Rill uses its own syntax.
 
 ## A first look
 
