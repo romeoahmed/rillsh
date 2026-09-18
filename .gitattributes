@@ -1,0 +1,9 @@
+# Normalize text to LF while preserving binary files.
+* text=auto eol=lf
+
+# These shared extensions contain C in this repository.
+*.h linguist-language=C
+*.inc linguist-language=C
+
+# Keep generated tables out of language statistics and collapsed in GitHub diffs.
+src/text/unicode_tables.inc linguist-generated
