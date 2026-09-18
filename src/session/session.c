@@ -11,10 +11,10 @@
 #include "config.h"
 #include "diagnostic.h"
 #include "exec/exec.h"
-#include "library/bundle.h"
-#include "library/library.h"
-#include "library/stream.h"
 #include "module.h"
+#include "native/bundle.h"
+#include "native/native.h"
+#include "native/stream.h"
 #include "platform/posix.h"
 #include "private.h"
 #include "runtime/runtime.h"
@@ -24,7 +24,6 @@
 #include "text/text.h"
 #include <errno.h>
 #include <fcntl.h>
-#include <poll.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -141,8 +140,9 @@ static int execute(Session *s, const char *name, const char *data,
   if (error != RILL_OK)
     return rill_session_diagnostic(
         s, nullptr,
-        (RillDiagnostic){.kind = error,
-                         .message = "source must be UTF-8 without NUL"});
+        (RillDiagnostic){
+            .kind = error,
+            .message = "source must contain valid UTF-8 and no NUL bytes"});
   [[gnu::cleanup(rill_syntax_clear)]] RillSyntax syntax =
       rill_syntax_parse(&source);
   return rill_session_evaluate(s, &source, &syntax);
@@ -150,11 +150,11 @@ static int execute(Session *s, const char *name, const char *data,
 static bool read_source(Session *s, int fd, RillBuffer *out) {
   char buf[16384];
   for (;;) {
-    struct pollfd input[] = {{.fd = fd, .events = POLLIN},
-                             {.fd = s->platform.signals[0], .events = POLLIN}};
-    int ready = poll(input, 2, -1);
+    int ready = rill_platform_ready(fd, false);
     if (ready < 0 && errno != EINTR)
       return false;
+    if (!ready)
+      (void)rill_exec_poll(s->exec, 20, fd);
     if (rill_session_events(s) & RILL_SIG_INT) {
       s->library.exit_requested = true;
       s->library.exit_code = 130;
@@ -163,11 +163,7 @@ static bool read_source(Session *s, int fd, RillBuffer *out) {
       errno = ECANCELED;
       return false;
     }
-    if (input[0].revents & POLLNVAL) {
-      errno = EBADF;
-      return false;
-    }
-    if (!(input[0].revents & (POLLIN | POLLHUP | POLLERR)))
+    if (ready <= 0)
       continue;
     ssize_t n = read(fd, buf, sizeof(buf));
     if (n == 0)
@@ -197,8 +193,9 @@ static void configure(Session *s) {
       (void)rill_session_diagnostic(
           s, nullptr,
           (RillDiagnostic){.kind = RILL_IO,
-                           .message = "configuration disabled: no absolute "
-                                      "HOME or XDG_CONFIG_HOME"});
+                           .message =
+                               "startup configuration skipped; set HOME "
+                               "or XDG_CONFIG_HOME to an absolute path"});
       return;
     }
     ok = rill_text_format(&path, "%s/.config/rillsh/init.rill", home);
@@ -281,9 +278,9 @@ static int interactive(Session *s) {
       if (s->contexts || rill_exec_outstanding(s->exec, false)) {
         s->status = rill_session_diagnostic(
             s, nullptr,
-            (RillDiagnostic){
-                .kind = RILL_PROCESS,
-                .message = "live jobs remain; wait, cancel, or exit_force"});
+            (RillDiagnostic){.kind = RILL_PROCESS,
+                             .message = "jobs are still active; use 'wait', "
+                                        "'cancel', or 'exit_force'"});
         shown = false;
         continue;
       }
@@ -301,8 +298,9 @@ static int interactive(Session *s) {
     if (error != RILL_OK) {
       s->status = rill_session_diagnostic(
           s, nullptr,
-          (RillDiagnostic){.kind = error,
-                           .message = "source must be UTF-8 without NUL"});
+          (RillDiagnostic){
+              .kind = error,
+              .message = "source must contain valid UTF-8 and no NUL bytes"});
       rill_text_clear(&input);
       shown = false;
       continue;
@@ -321,6 +319,7 @@ int rill_session_main(int argc, char **argv, char **environment) {
   bool force = false, options = true, no_config = false;
   int argument_start = argc;
   const char *command = nullptr, *file = nullptr;
+  const char *usage_error = "unknown option";
   RillColorMode color = RILL_COLOR_AUTO;
   for (int i = 1; i < argc; ++i) {
     const char *a = argv[i];
@@ -331,11 +330,25 @@ int rill_session_main(int argc, char **argv, char **environment) {
     if (options && !strcmp(a, "--help")) {
       const char *help =
           "Rill Shell " RILL_VERSION
-          "\nUsage: rillsh [-i] [--color=auto|always|never] [-c SOURCE | FILE "
-          "[ARG...]]\nFunctional pipelines, pattern matching, modules, and "
-          "reusable job plans.\nUse ^command for external commands, | for byte "
-          "pipelines, and |> for function application.\n--no-config skips "
-          "interactive startup configuration.\n";
+          "\nA shell with functional pipelines and reusable job plans.\n"
+          "\nUsage: rillsh [OPTIONS] [-c SOURCE | FILE [ARG...]]\n"
+          "\nWith no source or file, read stdin; show a prompt on a terminal.\n"
+          "Script arguments are available as Bytes through 'args ()'.\n"
+          "\nOptions:\n"
+          "  -c SOURCE                 Evaluate source text and exit\n"
+          "  -i                        Force interactive input\n"
+          "                            Cannot combine with -c or FILE\n"
+          "  --color=auto|always|never  Select color output (default: auto)\n"
+          "  --no-config               Skip interactive startup configuration\n"
+          "  --help                    Show this help and exit\n"
+          "  --version                 Show the version and exit\n"
+          "  --                        End options (for file names starting "
+          "with '-')\n"
+          "\nUse ^command for external commands, | for byte pipelines,\n"
+          "and |> to pass a value to a function.\n"
+          "\nExamples:\n"
+          "  rillsh -c '^printf hello'\n"
+          "  rillsh script.rill argument\n";
       return rill_session_write(1, help, strlen(help)) ? 0 : 1;
     }
     if (options && !strcmp(a, "--version"))
@@ -358,13 +371,17 @@ int rill_session_main(int argc, char **argv, char **environment) {
         color = RILL_COLOR_ALWAYS;
       else if (!strcmp(a + 8, "never"))
         color = RILL_COLOR_NEVER;
-      else
+      else {
+        usage_error = "--color must be auto, always, or never";
         goto usage;
+      }
       continue;
     }
     if (options && !strcmp(a, "-c")) {
-      if (i != argc - 2)
+      if (i != argc - 2) {
+        usage_error = "-c requires exactly one source argument";
         goto usage;
+      }
       command = argv[i + 1];
       break;
     }
@@ -374,8 +391,10 @@ int rill_session_main(int argc, char **argv, char **environment) {
     argument_start = i + 1;
     break;
   }
-  if (force && (file || command))
+  if (force && (file || command)) {
+    usage_error = "-i cannot be combined with -c or a source file";
     goto usage;
+  }
   Session s = {.color = color,
                .interactive = force || (!file && !command && isatty(0))};
   if (!rill_platform_env_init(&s.env, environment))
@@ -393,7 +412,8 @@ int rill_session_main(int argc, char **argv, char **environment) {
   }
   if (!rill_platform_init(&s.platform, s.interactive)) {
     rill_platform_env_clear(&s.env);
-    const char *msg = "rillsh: cannot initialize signal/terminal services\n";
+    const char *msg =
+        "rillsh: cannot initialize signal handling or terminal control\n";
     bool wrote = rill_session_write(2, msg, strlen(msg));
     (void)wrote;
     return 1;
@@ -420,7 +440,8 @@ int rill_session_main(int argc, char **argv, char **environment) {
   s.interactive = false;
   const char *prelude = rill_library_source("std:prelude");
   int bootstrap = execute(&s, "std:prelude", prelude, strlen(prelude));
-  rill_runtime_prelude(s.eval);
+  if (!bootstrap && !rill_runtime_prelude(s.eval))
+    bootstrap = rill_session_memory(&s);
   s.interactive = user_interactive;
   if (!bootstrap && s.interactive && !no_config)
     configure(&s);
@@ -454,7 +475,9 @@ int rill_session_main(int argc, char **argv, char **environment) {
       status = rill_session_diagnostic(
           &s, nullptr,
           (RillDiagnostic){.kind = RILL_PROCESS,
-                           .message = "script ended with unjoined jobs"});
+                           .message =
+                               "script ended before jobs were acknowledged; "
+                               "use 'wait', 'fg', or 'cancel'"});
   }
   rill_session_context_clear(&s);
   rill_exec_cancel_all(s.exec);
@@ -470,8 +493,10 @@ int rill_session_main(int argc, char **argv, char **environment) {
   return status;
 usage:
   {
-    const char *msg = "rillsh: invalid options; use --help\n";
-    bool wrote = rill_session_write(2, msg, strlen(msg));
+    static const char hint[] = "; see 'rillsh --help'\n";
+    bool wrote = rill_session_write(2, "rillsh: ", 8) &&
+                 rill_session_write(2, usage_error, strlen(usage_error)) &&
+                 rill_session_write(2, hint, sizeof(hint) - 1);
     (void)wrote;
     return 2;
   }

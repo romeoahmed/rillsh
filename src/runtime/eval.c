@@ -70,22 +70,15 @@ static void pop(RillEval *e) {
   } else
     free(f);
 }
-static size_t frame_slots(RillEval *e, const RillNode *node) {
-  size_t count = OPERANDS;
-  // Only aggregates retain all operands. Sequential forms need fixed-size
-  // frames regardless of syntax width, keeping them within the frame cache.
-  if (node && (node->kind == RILL_LIST || node->kind == RILL_RECORD ||
-               node->kind == RILL_ENUM || node->kind == RILL_PLAN ||
-               node->kind == RILL_STAGE))
-    for (const RillNode *c = node->children; c; c = c->next) {
-      size_t slots =
-          node->kind == RILL_RECORD || node->kind == RILL_ENUM ? 2 : 1;
-      if (ckd_add(&count, count, slots)) {
-        rill_eval_error(e, RILL_MEMORY, "frame size overflow");
-        return 0;
-      }
-    }
-  return count < SMALL_FRAME_VALUES ? SMALL_FRAME_VALUES : count;
+static size_t frame_slots(const RillNode *node) {
+  // Preparation counts aggregate operands once; sequential forms stay small.
+  if (node &&
+      (node->kind == RILL_LIST || node->kind == RILL_RECORD ||
+       node->kind == RILL_ENUM || node->kind == RILL_PLAN ||
+       node->kind == RILL_STAGE) &&
+      node->slots > SMALL_FRAME_VALUES)
+    return node->slots;
+  return SMALL_FRAME_VALUES;
 }
 static bool push(RillEval *e, const RillNode *node, RillValue env,
                  RillValue code) {
@@ -93,9 +86,7 @@ static bool push(RillEval *e, const RillNode *node, RillValue env,
     rill_eval_error(e, RILL_LIMIT, "continuation limit exceeded");
     return false;
   }
-  size_t count = frame_slots(e, node), bytes = {};
-  if (!count)
-    return false;
+  size_t count = frame_slots(node), bytes = {};
   if (ckd_mul(&bytes, count, sizeof(RillValue)) ||
       ckd_add(&bytes, bytes, sizeof(Frame))) {
     rill_eval_error(e, RILL_MEMORY, "frame size overflow");
@@ -134,7 +125,7 @@ static bool atomic_operand(RillEval *e, Frame *f, const RillNode *n) {
     return true;
   RillValue value = {};
   if (n->kind == RILL_NAME) {
-    if (!rill_eval_lookup(e, f->values[ENV], n->text.data, &value)) {
+    if (!rill_eval_reference(e, f->values[ENV], n, &value)) {
       rill_eval_error(e, RILL_TYPE, "unknown binding");
       e->error.offset = n->offset;
       return true;
@@ -159,9 +150,7 @@ static void done(RillEval *e, RillValue v) {
 static void replace(RillEval *e, const RillNode *node, RillValue env,
                     RillValue code) {
   Frame *f = e->frame;
-  size_t count = frame_slots(e, node);
-  if (!count)
-    return;
+  size_t count = frame_slots(node);
   if (count == f->capacity) {
     // Keep root registration stable. Reset control state and the live prefix;
     // discarded operands must not survive the next allocation or suspension.
@@ -204,7 +193,7 @@ static RillValue numeric(RillEval *e, RillOperator op, RillValue a,
   bool order = op == RILL_OP_LT || op == RILL_OP_GT || op == RILL_OP_LE ||
                op == RILL_OP_GE;
   if (a.kind != b.kind) {
-    rill_eval_error(e, RILL_TYPE, "operands must have the same kind");
+    rill_eval_error(e, RILL_TYPE, "operands must have the same type");
     return (RillValue){};
   }
   int cmp = 0;
@@ -221,7 +210,8 @@ static RillValue numeric(RillEval *e, RillOperator op, RillValue a,
       return v;
     }
     if (!order) {
-      rill_eval_error(e, RILL_TYPE, "invalid String operation");
+      rill_eval_error(e, RILL_TYPE,
+                      "Strings support '+' and comparisons, not this operator");
       return (RillValue){};
     }
     size_t n = x.size < y.size ? x.size : y.size;
@@ -240,7 +230,9 @@ static RillValue numeric(RillEval *e, RillOperator op, RillValue a,
       else if (op == RILL_OP_MUL)
         overflow = ckd_mul(&z, x, y);
       else {
-        rill_eval_error(e, RILL_TYPE, "/ requires Float operands");
+        rill_eval_error(
+            e, RILL_TYPE,
+            "'/' requires Float operands; use 'div' for integer division");
         return (RillValue){};
       }
       if (overflow)
@@ -282,15 +274,17 @@ static RillValue construct(RillEval *e, RillValue ctor, RillValue arg) {
   RillValue desc = ctor.as.object->values[0];
   if (arg.kind != RILL_V_RECORD ||
       arg.as.object->count != desc.as.object->count * 2) {
-    rill_eval_error(e, RILL_TYPE,
-                    "constructor requires its exact anonymous record shape");
+    rill_eval_error(
+        e, RILL_TYPE,
+        "constructor requires a Record with exactly its declared fields");
     return (RillValue){};
   }
   for (size_t i = 0; i < desc.as.object->count; ++i) {
     RillValue ignored = {};
     if (!rill_runtime_field(arg, desc.as.object->values[i].as.object->bytes,
                             &ignored)) {
-      rill_eval_error(e, RILL_TYPE, "constructor field mismatch");
+      rill_eval_error(e, RILL_TYPE,
+                      "Record fields do not match the constructor fields");
       return (RillValue){};
     }
   }
@@ -423,20 +417,13 @@ static void call(RillEval *e, Frame *f, RillValue function_value,
   if (function_value.kind == RILL_V_CLOSURE) {
     RillObject *o = function_value.as.object;
     const RillNode *pattern = o->captures->node->pattern;
-    // A single parameter cannot duplicate a sibling binding. Blocks introduce
-    // their own scope boundary; no empty environment is needed for this call.
-    bool simple = pattern && pattern->kind == RILL_NAME;
-    RillValue env =
-        simple ? function_value : rill_eval_scope(e, function_value);
+    // A closure is already a lexical boundary: duplicate checks stop when the
+    // new parameter bindings reach it. No empty ENV marker is needed.
+    RillValue env = function_value;
     RillRoot root = {};
     rill_runtime_root(&e->heap, &root, &env, 1);
-    bool ok = {};
-    if (simple) {
-      env = rill_eval_bind(e, env, pattern->text.data, argument, false);
-      ok = !e->error.kind;
-    } else
-      ok = rill_eval_bind_pattern(e, pattern, argument, function_value,
-                                  o->values[0], &env);
+    bool ok = rill_eval_bind_pattern(e, pattern, argument, function_value,
+                                     o->values[0], &env);
     rill_runtime_unroot(&e->heap, &root);
     if (!ok) {
       if (!e->error.kind)
@@ -452,7 +439,28 @@ static void call(RillEval *e, Frame *f, RillValue function_value,
     return;
   }
   if (function_value.kind != RILL_V_FUNCTION) {
-    rill_eval_error(e, RILL_TYPE, "application requires a function");
+    static const char *const errors[] = {
+        [RILL_V_UNIT] = "cannot call a Unit",
+        [RILL_V_INT] =
+            "cannot call an Int; separate statements with a newline or ';'",
+        [RILL_V_JOB] = "cannot call a Job",
+        [RILL_V_BOOL] = "cannot call a Bool",
+        [RILL_V_NULL] = "cannot call a Null",
+        [RILL_V_FLOAT] = "cannot call a Float",
+        [RILL_V_STRING] = "cannot call a String",
+        [RILL_V_BYTES] = "cannot call a Bytes value",
+        [RILL_V_PATH] = "cannot call a Path",
+        [RILL_V_LIST] = "cannot call a List",
+        [RILL_V_RECORD] =
+            "cannot call a Record; write a closure as '{ parameter => body }'",
+        [RILL_V_PLAN] = "cannot call a JobPlan",
+        [RILL_V_ADT] = "cannot call a struct or enum value",
+        [RILL_V_SLICE] = "cannot call a List",
+        [RILL_V_STREAM] = "cannot call a Stream",
+    };
+    const char *message = errors[function_value.kind];
+    rill_eval_error(e, RILL_TYPE,
+                    message ? message : "application requires Function");
     return;
   }
   if (function_value.as.integer == -1) {
@@ -468,26 +476,6 @@ static void call(RillEval *e, Frame *f, RillValue function_value,
   }
   f->phase = CALL_WAIT;
   e->waiting = true;
-}
-static void export_bindings(RillEval *e, const RillNode *n, RillValue env) {
-  if (!n->exported || (e->frame && e->frame->values[OWNER].as.object->tag))
-    return;
-  if (n->kind == RILL_BIND) {
-    Bound *names = nullptr;
-    if (rill_eval_pattern_names(e, n->pattern, &names))
-      for (Bound *b = names; b; b = b->parent) {
-        RillValue value = {};
-        if (rill_eval_lookup(e, env, b->name, &value))
-          e->roots[EXPORTS] =
-              rill_eval_bind(e, e->roots[EXPORTS], b->name, value, false);
-      }
-    rill_eval_names_free(names);
-  } else {
-    RillValue value = {};
-    if (rill_eval_lookup(e, env, n->text.data, &value))
-      e->roots[EXPORTS] =
-          rill_eval_bind(e, e->roots[EXPORTS], n->text.data, value, false);
-  }
 }
 RillEval *rill_runtime_new(const RillNative *n, size_t count) {
   RillEval *e = malloc(sizeof(*e));
@@ -515,33 +503,10 @@ bool rill_runtime_lookup(RillEval *e, const char *name, RillValue *value) {
   return rill_eval_lookup(e, e->roots[GLOBAL], name, value);
 }
 RillValue rill_runtime_exports(RillEval *e) {
-  RillValue env = e->roots[EXPORTS];
-  size_t count = 0;
-  for (RillValue p = env; p.kind == RILL_V_ENV; p = p.as.object->values[0])
-    count += 2;
-  RillValue v = rill_eval_object(e, RILL_V_RECORD, nullptr, count, nullptr, 0);
-  if (e->error.kind)
-    return (RillValue){};
-  RillRoot root = {};
-  rill_runtime_root(&e->heap, &root, &v, 1);
-  RillValue *pairs = v.as.object->values;
-  size_t i = 0;
-  for (RillValue p = env; p.kind == RILL_V_ENV && !e->error.kind;
-       p = p.as.object->values[0]) {
-    RillObject *o = p.as.object;
-    pairs[i++] = rill_eval_text(e, o->bytes.data, o->bytes.size);
-    RillValue value = o->values[1];
-    if (value.kind == RILL_V_CELL)
-      value = value.as.object->values[0];
-    pairs[i++] = value;
-  }
-  if (!e->error.kind && !rill_runtime_record_finish(v))
-    rill_eval_error(e, RILL_TYPE, "duplicate export name");
-  if (e->error.kind)
-    v = (RillValue){};
-  rill_runtime_unroot(&e->heap, &root);
-  e->roots[RESULT] = v;
-  return v;
+  if (e->roots[EXPORTS].kind == RILL_V_RECORD)
+    return e->roots[EXPORTS];
+  e->roots[RESULT] = rill_eval_object(e, RILL_V_RECORD, nullptr, 0, nullptr, 0);
+  return e->roots[RESULT];
 }
 void rill_runtime_abort(RillEval *e) {
   while (e->frame)
@@ -594,7 +559,6 @@ static void recursive(RillEval *e, Frame *f) {
       return;
   }
   publish(e, f, f->values[OPERANDS]);
-  export_bindings(e, f->node, f->values[OPERANDS]);
 }
 static void nominal_declaration(RillEval *e, Frame *f) {
   const RillNode *n = f->node;
@@ -631,7 +595,6 @@ static void nominal_declaration(RillEval *e, Frame *f) {
     return;
   // The registry is published only with the entry, below.
   publish(e, f, f->values[ENV]);
-  export_bindings(e, n, f->values[ENV]);
 }
 static RillPlanRedirect lower_redirect(RillRedirect redirect) {
   switch (redirect) {
@@ -698,16 +661,9 @@ RillEvalEvent rill_runtime_step(RillEval *e) {
                                .value = e->roots[RESULT]};
       }
       if (!e->statement) {
-        RillValue merged = e->roots[GLOBAL];
-        RillRoot merge_root = {};
-        rill_runtime_root(&e->heap, &merge_root, &merged, 1);
-        for (RillValue p = e->roots[ENTRY];
-             p.kind == RILL_V_ENV && p.as.object->count == 2 && !e->error.kind;
-             p = p.as.object->values[0])
-          merged = rill_eval_bind(e, merged, p.as.object->bytes.data,
-                                  p.as.object->values[1], false);
-        RillValue pending[] = {rill_eval_compact(e, merged), e->roots[TYPES]};
-        rill_runtime_unroot(&e->heap, &merge_root);
+        RillValue pending[] = {
+            rill_eval_compact(e, e->roots[ENTRY], e->roots[GLOBAL]),
+            e->roots[TYPES]};
         RillRoot root = {};
         rill_runtime_root(&e->heap, &root, pending, 2);
         RillSyntax *syntax = e->roots[CODE].kind == RILL_V_CODE
@@ -784,7 +740,7 @@ RillEvalEvent rill_runtime_step(RillEval *e) {
       } else if (kind == RILL_MATCH && f->phase == MATCH_GUARD) {
         RillValue guard = e->roots[RESULT];
         if (guard.kind != RILL_V_BOOL) {
-          rill_eval_error(e, RILL_TYPE, "guard requires Bool");
+          rill_eval_error(e, RILL_TYPE, "match guard must return Bool");
           continue;
         }
         if (guard.as.integer) {
@@ -816,40 +772,15 @@ RillEvalEvent rill_runtime_step(RillEval *e) {
       if (!f->phase) {
         f->values[ENV] = rill_eval_scope(e, f->values[ENV]);
         f->phase = 1;
+        if (n->integer)
+          save(f, (RillValue){});
         e->roots[RESULT] = (RillValue){};
       }
       if (!f->next) {
         if (n->integer) {
-          RillValue exported = {};
-          RillRoot root = {};
-          rill_runtime_root(&e->heap, &root, &exported, 1);
-          for (const RillNode *decl = n->children; decl && !e->error.kind;
-               decl = decl->next)
-            if (decl->exported) {
-              Bound *names = nullptr;
-              if (decl->kind == RILL_BIND) {
-                bool valid = rill_eval_pattern_names(e, decl->pattern, &names);
-                (void)valid;
-              } else {
-                names = malloc(sizeof(*names));
-                if (names)
-                  *names = (Bound){nullptr, decl->text.data};
-                else
-                  rill_eval_error(e, RILL_MEMORY, "allocation failed");
-              }
-              for (Bound *b = names; b && !e->error.kind; b = b->parent) {
-                RillValue item = {};
-                if (rill_eval_lookup(e, f->values[ENV], b->name, &item))
-                  exported = rill_eval_bind(e, exported, b->name, item, false);
-              }
-              rill_eval_names_free(names);
-            }
-          RillValue old = e->roots[EXPORTS];
-          save(f, old);
-          e->roots[EXPORTS] = exported;
-          RillValue ns = rill_runtime_exports(e);
-          e->roots[EXPORTS] = old;
-          rill_runtime_unroot(&e->heap, &root);
+          RillValue ns = f->values[OPERANDS];
+          if (ns.kind == RILL_V_UNIT)
+            ns = rill_eval_object(e, RILL_V_RECORD, nullptr, 0, nullptr, 0);
           e->roots[RESULT] = ns;
           if (e->error.kind)
             continue;
@@ -872,7 +803,7 @@ RillEvalEvent rill_runtime_step(RillEval *e) {
     if (kind == RILL_IF && f->used > OPERANDS) {
       RillValue condition = f->values[OPERANDS];
       if (condition.kind != RILL_V_BOOL) {
-        rill_eval_error(e, RILL_TYPE, "if requires Bool");
+        rill_eval_error(e, RILL_TYPE, "'if' condition must be Bool");
         continue;
       }
       replace(
@@ -887,7 +818,7 @@ RillEvalEvent rill_runtime_step(RillEval *e) {
         save(f, (RillValue){});
       }
       if (!f->arm) {
-        rill_eval_error(e, RILL_MATCH_ERROR, "no matching arm");
+        rill_eval_error(e, RILL_MATCH_ERROR, "no match arm accepts this value");
         continue;
       }
       f->values[OPERANDS + 1] = rill_eval_scope(e, f->values[ENV]);
@@ -905,7 +836,8 @@ RillEvalEvent rill_runtime_step(RillEval *e) {
         (n->op == RILL_OP_AND || n->op == RILL_OP_OR)) {
       RillValue left = f->values[OPERANDS];
       if (left.kind != RILL_V_BOOL) {
-        rill_eval_error(e, RILL_TYPE, "logical operands require Bool");
+        rill_eval_error(e, RILL_TYPE,
+                        "logical operators require Bool operands");
         continue;
       }
       if ((n->op == RILL_OP_AND && !left.as.integer) ||
@@ -937,8 +869,19 @@ RillEvalEvent rill_runtime_step(RillEval *e) {
     case RILL_STRING:
       v = rill_eval_literal(n, f->values[OWNER]);
       break;
+    case RILL_EXPORT:
+      if (f->parent && f->parent->node && f->parent->node->integer &&
+          f->parent->node->kind == RILL_BLOCK)
+        f->parent->values[OPERANDS] = args[0];
+      else
+        e->roots[EXPORTS] = args[0];
+      break;
+    case RILL_BUILTIN:
+      if (!rill_runtime_builtin(e, n->text.data, &v))
+        rill_eval_error(e, RILL_TYPE, "standard operation unavailable");
+      break;
     case RILL_NAME:
-      if (!rill_eval_lookup(e, f->values[ENV], n->text.data, &v))
+      if (!rill_eval_reference(e, f->values[ENV], n, &v))
         rill_eval_error(e, RILL_TYPE, "unknown binding");
       break;
     case RILL_CALL:
@@ -955,7 +898,6 @@ RillEvalEvent rill_runtime_step(RillEval *e) {
       if (rill_eval_bind_pattern(e, n->pattern, args[0], f->values[ENV],
                                  f->values[OWNER], &f->values[ENV])) {
         publish(e, f, f->values[ENV]);
-        export_bindings(e, n, f->values[ENV]);
       } else if (!e->error.kind)
         rill_eval_error(e, RILL_MATCH_ERROR, "binding pattern did not match");
       break;
@@ -967,14 +909,19 @@ RillEvalEvent rill_runtime_step(RillEval *e) {
                   args[0].kind != RILL_V_SLICE) ||
                  args[1].kind != RILL_V_INT || args[1].as.integer < 0 ||
                  (uint64_t)args[1].as.integer >= rill_runtime_count(args[0]))
-        rill_eval_error(e, RILL_TYPE, "invalid List index");
+        rill_eval_error(
+            e, RILL_TYPE,
+            args[0].kind == RILL_V_LIST || args[0].kind == RILL_V_SLICE
+                ? "List index must be a nonnegative Int within bounds"
+                : "indexing requires a List and Int or a Record and String");
       else
         v = rill_runtime_at(args[0], (size_t)args[1].as.integer);
       break;
     case RILL_FIELD:
       if (args[0].kind != RILL_V_RECORD && args[0].kind != RILL_V_ADT)
-        rill_eval_error(e, RILL_TYPE,
-                        "field access requires Record or nominal data");
+        rill_eval_error(
+            e, RILL_TYPE,
+            "field access requires a Record, struct, or enum value");
       else if (!rill_runtime_field(args[0],
                                    (RillBytes){n->text.data, n->text.size}, &v))
         rill_eval_error(e, RILL_MISSING_FIELD, "missing record field");
@@ -982,7 +929,8 @@ RillEvalEvent rill_runtime_step(RillEval *e) {
     case RILL_BINARY:
       if (n->op == RILL_OP_AND || n->op == RILL_OP_OR) {
         if (args[1].kind != RILL_V_BOOL)
-          rill_eval_error(e, RILL_TYPE, "logical operands require Bool");
+          rill_eval_error(e, RILL_TYPE,
+                          "logical operators require Bool operands");
         else
           v = args[1];
       } else
@@ -1010,7 +958,7 @@ RillEvalEvent rill_runtime_step(RillEval *e) {
       RillValue base =
           args[0].kind == RILL_V_ADT ? args[0].as.object->values[1] : args[0];
       if (base.kind != RILL_V_RECORD || args[1].kind != RILL_V_RECORD) {
-        rill_eval_error(e, RILL_TYPE, "with requires records");
+        rill_eval_error(e, RILL_TYPE, "'with' requires Records");
         break;
       }
       v = rill_runtime_record_copy(&e->heap, base);
@@ -1023,7 +971,9 @@ RillEvalEvent rill_runtime_step(RillEval *e) {
         RillValue key = args[1].as.object->values[i];
         size_t index = rill_runtime_field_index(v, key.as.object->bytes);
         if (index == v.as.object->count) {
-          rill_eval_error(e, RILL_MISSING_FIELD, "with cannot insert fields");
+          rill_eval_error(
+              e, RILL_MISSING_FIELD,
+              "'with' updates existing fields; use 'extend' to add fields");
           break;
         }
         v.as.object->values[index + 1] = args[1].as.object->values[i + 1];
@@ -1168,10 +1118,35 @@ void rill_runtime_free(RillEval *e) {
   free(e);
 }
 
-void rill_runtime_prelude(RillEval *e) { e->roots[PRELUDE] = e->roots[GLOBAL]; }
+bool rill_runtime_prelude(RillEval *e) {
+  RillValue exports = e->roots[EXPORTS];
+  if (exports.kind == RILL_V_RECORD) {
+    RillValue bindings = {};
+    RillRoot root = {};
+    rill_runtime_root(&e->heap, &root, &bindings, 1);
+    for (size_t i = 0; i < exports.as.object->count && !e->error.kind; i += 2)
+      bindings = rill_eval_bind(
+          e, bindings, exports.as.object->values[i].as.object->bytes.data,
+          exports.as.object->values[i + 1], false);
+    if (!e->error.kind)
+      bindings = rill_eval_compact(e, bindings, (RillValue){});
+    if (!e->error.kind && bindings.kind == RILL_V_UNIT)
+      bindings = rill_eval_object(e, RILL_V_BINDINGS, nullptr, 0, nullptr, 0);
+    if (!e->error.kind)
+      e->roots[GLOBAL] = bindings;
+    rill_runtime_unroot(&e->heap, &root);
+  }
+  if (e->error.kind)
+    return false;
+  e->roots[PRELUDE] = e->roots[GLOBAL];
+  return true;
+}
 void rill_runtime_module(RillEval *e, RillSyntax *s) {
   e->waiting = false;
-  RillValue values[2] = {e->roots[PRELUDE], rill_eval_code(e, s)};
+  RillValue values[2] = {e->roots[PRELUDE].kind == RILL_V_UNIT
+                             ? e->roots[GLOBAL]
+                             : e->roots[PRELUDE],
+                         rill_eval_code(e, s)};
   if (e->error.kind)
     return;
   RillCode *code = values[1].as.object->code;

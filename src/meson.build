@@ -7,28 +7,31 @@ api_headers = files(
     'runtime/runtime.h',
     'platform/posix.h',
     'exec/exec.h',
-    'library/library.h',
-    'library/pure.h',
-    'library/value.h',
-    'library/json.h',
-    'library/fs.h',
-    'library/stream.h',
-    'library/bundle.h',
+    'native/native.h',
+    'native/pure.h',
+    'native/value.h',
+    'native/json.h',
+    'native/fs.h',
+    'native/stream.h',
+    'native/bundle.h',
     'session/module.h',
     'session/session.h',
 )
-pure = static_library(
-    'rill-pure',
+pure_sources = files(
     'source.c',
     'diagnostic.c',
     'text/text.c',
     'text/style.c',
-    'syntax/syntax.c',
+    'syntax/parse.c',
     'runtime/heap.c',
-    'runtime/code.c',
+    'runtime/prepare.c',
     'runtime/value.c',
     'runtime/scope.c',
     'runtime/eval.c',
+)
+pure = static_library(
+    'rill-pure',
+    pure_sources,
     include_directories: inc,
 )
 posix = static_library(
@@ -36,15 +39,21 @@ posix = static_library(
     'platform/posix.c',
     'platform/environment.c',
     'exec/launch.c',
-    'exec/job.c',
+    'exec/supervisor.c',
     include_directories: inc,
 )
-library_core = static_library(
-    'rill-library',
-    'library/pure.c',
-    'library/value.c',
-    'library/json.c',
-    'library/bundle.c',
+native_sources = files(
+    'native/pure.c',
+    'native/value.c',
+    'native/json.c',
+    'native/bundle.c',
+    'native/dispatch.c',
+    'native/fs.c',
+    'native/stream.c',
+)
+native = static_library(
+    'rill-native',
+    native_sources,
     dependencies: yyjson,
     include_directories: inc,
 )
@@ -54,10 +63,7 @@ shell = executable(
     'session/session.c',
     'session/evaluation.c',
     'session/module.c',
-    'library/library.c',
-    'library/fs.c',
-    'library/stream.c',
-    link_with: [posix, pure, library_core],
+    link_with: [posix, pure, native],
     include_directories: inc,
     install: true,
 )

@@ -15,6 +15,8 @@ typedef enum {
   RILL_INTEGER,
   RILL_UNIT,
   RILL_NAME,
+  RILL_BUILTIN,
+  RILL_EXPORT,
   RILL_CALL,
   RILL_BIND,
   RILL_PLAN,
@@ -74,17 +76,18 @@ typedef enum {
   RILL_ERROR_TO_OUTPUT
 } RillRedirect;
 /**
- * @brief Node owned by a parse result, with copied text and a source byte
- * offset.
+ * @brief Stable node owned by syntax, then by prepared code after transfer.
+ *
+ * Text is owned, not a view of caller source. Preparation may replace decoded
+ * literals with constant slots; inspect payloads according to kind and flags.
  */
 typedef struct RillNode {
   RillNodeKind kind; ///< Syntactic form.
+  bool grouped;      ///< Explicit parentheses permit nested comparisons.
+  bool captured;     ///< Name resolves to a prepared closure slot.
   size_t offset;     ///< Source byte offset.
   RillBuffer text; ///< Decoded text; code preparation replaces String text with
                    ///< a slot.
-  bool grouped;    ///< Explicit parentheses permit nested comparisons.
-  bool exported;   ///< Top-level export declaration.
-  bool repeated;   ///< Duplicate pattern names, set during code preparation.
   struct RillNode *pattern; ///< Parameter or binding pattern.
   union {
     double real;           ///< Finite floating literal.
@@ -93,6 +96,9 @@ typedef struct RillNode {
     RillRedirect redirect; ///< Syntax redirection operation.
     size_t constant; ///< String/key slot assigned after code consumes syntax.
     size_t function; ///< Capture-layout slot assigned during code preparation.
+    size_t capture;  ///< Closure Value slot for a captured Name.
+    size_t
+        slots; ///< Aggregate frame capacity assigned during code preparation.
   }; ///< Kind selects the payload; the parser leaves preparation slots unset.
   struct RillNode *children;       ///< Ordered operands.
   struct RillNode *next;           ///< Next sibling.

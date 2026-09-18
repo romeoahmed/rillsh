@@ -1,2 +1,4 @@
-fn loop(n, acc) => if n == 0 then acc else loop(n - 1, acc + 1)
-if loop(1000000, 0) == 1000000 then () else raise(error("Benchmark", "curried result"))
+fn loop n acc = if n == 0 then acc else loop (n - 1) (acc + 1)
+
+if loop 1000000 0 == 1000000 then ()
+else raise (error "Benchmark" "curried result")

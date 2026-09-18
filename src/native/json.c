@@ -20,6 +20,51 @@
 #include <string.h>
 #include <yyjson.h>
 
+RillValue rill_library_json_number(bool real, RillValue input,
+                                   RillDiagnostic *error) {
+  if (input.kind != RILL_V_STRING) {
+    *error = (RillDiagnostic){.kind = RILL_TYPE,
+                              .message = "numeric parsing requires String"};
+    return (RillValue){};
+  }
+  // Runtime Strings include a trailing NUL; the length check rejects embedded
+  // NUL and any unconsumed suffix without copying the input.
+  RillBytes data = input.as.object->bytes;
+  yyjson_val number = {};
+  yyjson_read_err problem = {};
+  const char *end =
+      yyjson_read_number(data.data, &number, 0, nullptr, &problem);
+  // On conversion failure, validate the token without converting its magnitude.
+  // This distinguishes overflow from malformed input, including trailing junk.
+  if (!end && problem.code != YYJSON_READ_ERROR_MEMORY_ALLOCATION)
+    end = yyjson_read_number(data.data, &number, YYJSON_READ_NUMBER_AS_RAW,
+                             nullptr, &problem);
+  if (!end && problem.code == YYJSON_READ_ERROR_MEMORY_ALLOCATION)
+    *error = (RillDiagnostic){.kind = RILL_MEMORY,
+                              .message = "numeric parsing allocation failed"};
+  else if (!end || end != data.data + data.size)
+    *error = (RillDiagnostic){.kind = RILL_DECODE,
+                              .message = "expected one JSON decimal number"};
+  else if (yyjson_is_raw(&number))
+    *error = (RillDiagnostic){.kind = RILL_ARITHMETIC,
+                              .message = "number outside Rill numeric range"};
+  else if (real) {
+    double value = yyjson_get_num(&number);
+    if (isfinite(value))
+      return (RillValue){.kind = RILL_V_FLOAT, .as.real = value};
+    *error = (RillDiagnostic){.kind = RILL_ARITHMETIC,
+                              .message = "number outside Float range"};
+  } else if (yyjson_is_int(&number) && (!yyjson_is_uint(&number) ||
+                                        yyjson_get_uint(&number) <= INT64_MAX))
+    return (RillValue){.kind = RILL_V_INT,
+                       .as.integer = yyjson_get_sint(&number)};
+  else
+    *error =
+        (RillDiagnostic){.kind = RILL_ARITHMETIC,
+                         .message = "expected an integer within Int range"};
+  return (RillValue){};
+}
+
 typedef struct {
   yyjson_val *input;
   RillValue *output;

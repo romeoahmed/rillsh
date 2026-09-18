@@ -6,8 +6,8 @@
  * intervals remain distinct. Report observed time and retained bytes, without
  * asserting a latency bound.
  */
-#include "bench.h"
 #include "runtime/runtime.h"
+#include "timing.h"
 #include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -41,6 +41,13 @@ int main() {
   CHECK(printf("{\"retained_bytes\":%zu,\"collections\":50,"
                "\"total_ns\":%" PRIu64 ",\"max_ns\":%" PRIu64 "}\n",
                live, total, maximum) > 0);
+  // Validate survivors outside the timed collection intervals.
+  RillValue cursor = retained;
+  for (size_t i = 0; i < 100000; ++i) {
+    CHECK(cursor.kind == RILL_V_LIST && rill_runtime_count(cursor) == 2);
+    cursor = rill_runtime_at(cursor, 0);
+  }
+  CHECK(cursor.kind == RILL_V_UNIT);
   rill_runtime_unroot(&heap, &root);
   rill_runtime_collect(&heap);
   CHECK(heap.bytes == 0);

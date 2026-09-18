@@ -4,7 +4,7 @@
  *
  * Slices retain backing Lists; Record indexes borrow keys in their own payload.
  * Equality validates supported data before identity or mismatch shortcuts. A
- * bounded tree walk handles small values; graph validation and union/find avoid
+ * bounded tree walk handles small values; graph validation and union-find avoid
  * repeated expansion of shared data. Scratch never crosses a GC safepoint.
  */
 #include "diagnostic.h"

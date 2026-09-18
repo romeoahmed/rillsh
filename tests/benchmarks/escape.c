@@ -5,9 +5,9 @@
  * Keep an unrelated Stream token live so the graph walk cannot be skipped.
  * Report traversal time and additional charged heap storage.
  */
-#include "bench.h"
 #include "diagnostic.h"
 #include "runtime/runtime.h"
+#include "timing.h"
 #include <inttypes.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -30,16 +30,19 @@ int main() {
   rill_runtime_collect(&heap);
   size_t retained = heap.bytes, extra = 0;
   uint64_t total = 0;
-  for (size_t round = 0; round < 200; ++round) {
+  constexpr size_t iterations = 200;
+  for (size_t round = 0; round < iterations; ++round) {
     uint64_t start = nanoseconds();
-    CHECK(rill_runtime_persistent(&heap, values[1]) == RILL_OK);
+    RillError error = rill_runtime_persistent(&heap, values[1]);
     total += nanoseconds() - start;
+    CHECK(error == RILL_OK);
     if (heap.bytes > retained && heap.bytes - retained > extra)
       extra = heap.bytes - retained;
     rill_runtime_collect(&heap);
   }
-  CHECK(printf("{\"walk_ns\":%" PRIu64 ",\"extra_heap_bytes\":%zu}\n", total,
-               extra) > 0);
+  CHECK(printf("{\"iterations\":%zu,\"walk_ns\":%" PRIu64
+               ",\"retained_bytes\":%zu,\"extra_heap_bytes\":%zu}\n",
+               iterations, total, retained, extra) > 0);
   rill_runtime_unroot(&heap, &root);
   rill_runtime_heap_clear(&heap);
 }

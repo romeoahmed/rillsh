@@ -1,4 +1,23 @@
-export let files = files
-export let glob = glob
-export let read_text = read_text
-export let read_text_with = read_text_with
+fn files directory = __stream ["files", directory]
+
+fn glob pattern = __data ["glob", pattern]
+
+fn read_text_with options file = __data ["read_text", options, file]
+
+let read_text = read_text_with {}
+
+fn join_path base child = __pure ["join_path", base, child]
+
+fn basename value = __pure ["basename", value]
+
+fn dirname value = __pure ["dirname", value]
+
+export {
+  files,
+  glob,
+  read_text,
+  read_text_with,
+  join_path,
+  basename,
+  dirname
+}

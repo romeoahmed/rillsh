@@ -68,7 +68,10 @@ RillValue rill_eval_text(RillEval *e, const char *data, size_t size);
 bool rill_eval_lookup_env(RillValue env, const char *name, RillValue *out);
 bool rill_eval_lookup(RillEval *e, RillValue env, const char *name,
                       RillValue *out);
-RillValue rill_eval_compact(RillEval *e, RillValue env);
+bool rill_eval_reference(RillEval *e, RillValue env, const RillNode *node,
+                         RillValue *out);
+// Merge rooted pending bindings (up to their scope boundary) into rooted base.
+RillValue rill_eval_compact(RillEval *e, RillValue env, RillValue base);
 RillValue rill_eval_scope(RillEval *e, RillValue parent);
 RillValue rill_eval_bind(RillEval *e, RillValue env, const char *name,
                          RillValue value, bool duplicate);
@@ -84,7 +87,7 @@ void rill_eval_names_free(Bound *names);
 
 // Code owns analysis; names borrow its syntax, never a closure environment.
 typedef struct Captures {
-  const RillNode *node;
+  RillNode *node;
   const char **names;
   size_t count, capacity;
   RillError error;

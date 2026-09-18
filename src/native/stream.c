@@ -18,7 +18,7 @@
 #include "stream.h"
 #include "diagnostic.h"
 #include "exec/exec.h"
-#include "library.h"
+#include "native.h"
 #include "platform/posix.h"
 #include "runtime/runtime.h"
 #include "text/text.h"
@@ -28,7 +28,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
-#include <poll.h>
 #include <stdckdint.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -37,8 +36,29 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-enum SourceKind { CHUNKS, FILES, MAP, FILTER, TAKE, LINES, PROCESS };
-enum SinkKind { CREATE, COLLECT, COLLECT_BYTES, FOLD, EACH, WRITE, CLOSE };
+enum SourceKind {
+  CHUNKS,
+  ITEMS,
+  INPUT,
+  UNFOLD,
+  FILES,
+  MAP,
+  FILTER,
+  TAKE,
+  DROP,
+  LINES,
+  PROCESS
+};
+enum SinkKind {
+  CREATE,
+  COLLECT,
+  COLLECT_BYTES,
+  FOLD,
+  FOLD_UNTIL,
+  EACH,
+  WRITE,
+  CLOSE
+};
 enum { DATA, FUNCTION, ITEM, NODE_ROOTS };
 typedef struct Stream {
   struct Stream *next, *previous, *input;
@@ -48,6 +68,7 @@ typedef struct Stream {
   RillRoot root;
   RillJob *job;
   DIR *directory;
+  bool *input_lease;
   RillBuffer buffer;
   size_t offset, remaining, limit;
   bool ready, done, demand, claimed, closing, callback;
@@ -115,7 +136,8 @@ static Stream *find(RillLibrary *l, RillValue value, RillDiagnostic *d) {
     if (s->id == value.as.object->values[0].as.integer) {
       if (s->claimed) {
         error(d, RILL_STREAM_CONSUMED,
-              "Stream ownership was transferred or consumed");
+              "Stream has already been transferred or consumed; create a new "
+              "Stream");
         return nullptr;
       }
       return s;
@@ -153,7 +175,14 @@ static Stream *node(RillLibrary *l, enum SourceKind kind, RillDiagnostic *d) {
   l->streams->nodes = s;
   return s;
 }
+static void release_input(Stream *s) {
+  if (s->input_lease) {
+    *s->input_lease = false;
+    s->input_lease = nullptr;
+  }
+}
 static void dispose_source(Stream *s, bool cutoff) {
+  release_input(s);
   if (s->directory) {
     (void)closedir(s->directory);
     s->directory = nullptr;
@@ -276,6 +305,7 @@ static void directory_next(RillLibrary *l, Stream *s) {
 }
 static void callback(RillLibrary *l, Sink *sink, Stream *source,
                      RillValue function, RillValue argument) {
+  l->idle = false;
   sink->awaiting = true;
   sink->callback_source = source;
   if (source)
@@ -284,6 +314,7 @@ static void callback(RillLibrary *l, Sink *sink, Stream *source,
 }
 static void lines_next(RillLibrary *l, Stream *s) {
   Stream *input = s->input;
+  assert(input);
   if (!input->ready) {
     if (!input->done) {
       input->demand = true;
@@ -291,7 +322,7 @@ static void lines_next(RillLibrary *l, Stream *s) {
     }
     if (s->buffer.size) {
       if (!rill_text_valid(s->buffer.data, s->buffer.size))
-        error(&s->error, RILL_DECODE, "line is not UTF-8");
+        error(&s->error, RILL_DECODE, "line contains invalid UTF-8");
       else
         (void)emit_bytes(l, s, s->buffer.data, s->buffer.size, RILL_V_STRING);
       rill_text_truncate(&s->buffer, 0);
@@ -312,24 +343,29 @@ static void lines_next(RillLibrary *l, Stream *s) {
     error(&s->error, RILL_LIMIT, "line byte limit exceeded");
     return;
   }
-  if (!rill_text_append(&s->buffer, start, n)) {
-    error(&s->error, RILL_MEMORY, "line allocation failed");
-    return;
+  RillBytes line = {start, n};
+  if (!lf || s->buffer.size) {
+    if (!rill_text_append(&s->buffer, start, n)) {
+      error(&s->error, RILL_MEMORY, "line allocation failed");
+      return;
+    }
+    line = (RillBytes){s->buffer.data, s->buffer.size};
+  }
+  if (lf) {
+    if (line.size && line.data[line.size - 1] == '\r')
+      --line.size;
+    if (!rill_text_valid(line.data, line.size))
+      error(&s->error, RILL_DECODE, "line contains invalid UTF-8");
+    else
+      // A complete in-chunk line needs no staging copy. Keep the input item
+      // rooted until emit_bytes has copied its borrowed bytes across GC.
+      (void)emit_bytes(l, s, line.data, line.size, RILL_V_STRING);
+    rill_text_truncate(&s->buffer, 0);
   }
   s->offset += n + (lf ? 1 : 0);
   if (s->offset == bytes.size) {
     release_item(input);
     s->offset = 0;
-  }
-  if (lf) {
-    size_t size = s->buffer.size;
-    if (size && s->buffer.data[size - 1] == '\r')
-      --size;
-    if (!rill_text_valid(s->buffer.data, size))
-      error(&s->error, RILL_DECODE, "line is not UTF-8");
-    else
-      (void)emit_bytes(l, s, s->buffer.data, size, RILL_V_STRING);
-    rill_text_truncate(&s->buffer, 0);
   }
 }
 static void process_next(RillLibrary *l, Stream *s) {
@@ -375,6 +411,27 @@ static void process_next(RillLibrary *l, Stream *s) {
       s->done = true;
   }
 }
+static void input_next(RillLibrary *l, Stream *s) {
+  int ready = rill_platform_ready(STDIN_FILENO, false);
+  if (!ready || (ready < 0 && errno == EINTR))
+    return;
+  if (ready < 0) {
+    s->error = (RillDiagnostic){.kind = RILL_IO,
+                                .code = errno,
+                                .message = "cannot check stdin readiness"};
+    return;
+  }
+  char data[RILL_EXEC_QUEUE_BYTES];
+  ssize_t count = read(STDIN_FILENO, data, sizeof(data));
+  if (count > 0)
+    (void)emit_bytes(l, s, data, (size_t)count, RILL_V_BYTES);
+  else if (!count) {
+    s->done = true;
+    release_input(s);
+  } else if (errno != EINTR && errno != EAGAIN)
+    s->error = (RillDiagnostic){
+        .kind = RILL_IO, .code = errno, .message = "cannot read stdin"};
+}
 static void source_next(RillLibrary *l, Sink *sink, Stream *s) {
   if (s->closing) {
     if (!chain_live(s))
@@ -403,6 +460,20 @@ static void source_next(RillLibrary *l, Sink *sink, Stream *s) {
       s->offset += n;
     break;
   }
+  case ITEMS:
+    if (s->offset == rill_runtime_count(s->values[DATA]))
+      s->done = true;
+    else {
+      s->values[ITEM] = rill_runtime_at(s->values[DATA], s->offset++);
+      s->ready = true;
+    }
+    break;
+  case INPUT:
+    input_next(l, s);
+    break;
+  case UNFOLD:
+    callback(l, sink, s, s->values[FUNCTION], s->values[DATA]);
+    break;
   case FILES:
     directory_next(l, s);
     break;
@@ -410,6 +481,7 @@ static void source_next(RillLibrary *l, Sink *sink, Stream *s) {
     lines_next(l, s);
     break;
   case TAKE:
+    assert(s->input);
     if (!s->remaining) {
       close_chain(s->input, true);
       s->closing = true;
@@ -418,13 +490,19 @@ static void source_next(RillLibrary *l, Sink *sink, Stream *s) {
       break;
     }
     [[fallthrough]];
+  case DROP:
   case MAP:
   case FILTER:
+    assert(s->input);
     if (s->input->ready) {
-      if (s->kind == TAKE) {
+      if (s->kind == DROP && s->remaining) {
+        --s->remaining;
+        release_item(s->input);
+      } else if (s->kind == TAKE || s->kind == DROP) {
         s->values[ITEM] = s->input->values[ITEM];
         s->ready = true;
-        --s->remaining;
+        if (s->kind == TAKE)
+          --s->remaining;
         release_item(s->input);
       } else
         callback(l, sink, s, s->values[FUNCTION], s->input->values[ITEM]);
@@ -461,6 +539,7 @@ static void destroy_chain(RillLibrary *l, Stream *node) {
     }
     if (node->next)
       node->next->previous = node->previous;
+    release_input(node);
     if (node->directory)
       (void)closedir(node->directory);
     if (node->job)
@@ -474,7 +553,7 @@ static void destroy_chain(RillLibrary *l, Stream *node) {
 static bool sink_finish(RillLibrary *l, Sink *s) {
   l->idle = false;
   RillValue result = s->error.kind ? s->raised : s->values[OUTPUT];
-  if (!s->error.kind && s->kind == FOLD)
+  if (!s->error.kind && (s->kind == FOLD || s->kind == FOLD_UNTIL))
     result = s->values[ACCUMULATOR];
   if (!s->error.kind && s->kind == COLLECT_BYTES)
     result = object(l, RILL_V_BYTES, nullptr, 0, s->buffer.data, s->buffer.size,
@@ -640,9 +719,16 @@ bool rill_stream_progress(RillLibrary *l) {
         else if (!rill_text_append(&s->buffer, bytes.data, bytes.size))
           error(&s->error, RILL_MEMORY, "collection allocation failed");
       } else {
-        struct pollfd output = {.fd = STDOUT_FILENO, .events = POLLOUT};
-        if (poll(&output, 1, 0) <= 0) {
+        int ready = rill_platform_ready(STDOUT_FILENO, true);
+        if (!ready || (ready < 0 && errno == EINTR)) {
           l->idle = true;
+          return false;
+        }
+        if (ready < 0) {
+          s->error =
+              (RillDiagnostic){.kind = RILL_IO,
+                               .code = errno,
+                               .message = "cannot check stdout readiness"};
           return false;
         }
         size_t size = bytes.size - s->used;
@@ -660,9 +746,9 @@ bool rill_stream_progress(RillLibrary *l) {
         s->used = 0;
       }
     }
-  } else if (s->kind == FOLD || s->kind == EACH) {
+  } else if (s->kind == FOLD || s->kind == FOLD_UNTIL || s->kind == EACH) {
     RillValue argument = value;
-    if (s->kind == FOLD) {
+    if (s->kind == FOLD || s->kind == FOLD_UNTIL) {
       RillValue pair[] = {s->values[ACCUMULATOR], value};
       argument = object(l, RILL_V_LIST, pair, 2, nullptr, 0, &s->error);
     }
@@ -695,20 +781,44 @@ void rill_stream_callback(RillLibrary *l, RillValue result) {
   } else if (!rill_runtime_field(result, (RillBytes){"value", 5}, &value))
     error(&s->error, RILL_TYPE, "invalid callback result");
   else if (n) {
-    if (n->kind == MAP) {
+    if (n->kind == UNFOLD) {
+      if (value.kind != RILL_V_LIST ||
+          (value.as.object->count != 0 && value.as.object->count != 2))
+        error(&s->error, RILL_TYPE, "invalid unfold step");
+      else if (!value.as.object->count)
+        n->done = true;
+      else {
+        n->values[ITEM] = value.as.object->values[0];
+        n->values[DATA] = value.as.object->values[1];
+        n->ready = true;
+      }
+    } else if (n->kind == MAP) {
       n->values[ITEM] = value;
       n->ready = true;
     } else if (value.kind != RILL_V_BOOL)
-      error(&s->error, RILL_TYPE, "filter predicate requires Bool");
+      error(&s->error, RILL_TYPE, "filter predicate must return Bool");
     else if (value.as.integer) {
       n->values[ITEM] = n->input->values[ITEM];
       n->ready = true;
+    }
+  } else if (s->kind == FOLD_UNTIL) {
+    if (value.kind != RILL_V_LIST || value.as.object->count != 2 ||
+        value.as.object->values[0].kind != RILL_V_BOOL)
+      error(&s->error, RILL_TYPE, "invalid fold control");
+    else {
+      s->values[ACCUMULATOR] = value.as.object->values[1];
+      if (value.as.object->values[0].as.integer) {
+        s->error = chain_error(s->source, true);
+        close_chain(s->source, true);
+        s->closing = true;
+      }
     }
   } else if (s->kind == FOLD)
     s->values[ACCUMULATOR] = value;
   if (n) {
     n->callback = false;
-    release_item(n->input);
+    if (n->input)
+      release_item(n->input);
   } else
     release_item(s->source);
 }
@@ -723,15 +833,40 @@ bool rill_stream_call(RillLibrary *l, RillValue request) {
             c = count > 3 ? request.as.object->values[3] : (RillValue){};
   RillDiagnostic d = {};
   Stream *s = nullptr, *input = nullptr;
-  if (named(name, "chunks")) {
+  if (named(name, "stdin")) {
+    if (l->input_claimed)
+      return fail(l, RILL_STREAM_CONSUMED, "stdin already has a reader");
+    s = node(l, INPUT, &d);
+    if (s) {
+      l->input_claimed = true;
+      s->input_lease = &l->input_claimed;
+    }
+  } else if (named(name, "items")) {
+    if (a.kind != RILL_V_LIST && a.kind != RILL_V_SLICE)
+      return fail(l, RILL_TYPE, "items requires List");
+    s = node(l, ITEMS, &d);
+    if (s)
+      s->values[DATA] = a;
+  } else if (named(name, "unfold")) {
+    if (!callable(a))
+      return fail(l, RILL_TYPE, "unfold requires Function");
+    s = node(l, UNFOLD, &d);
+    if (s) {
+      s->values[FUNCTION] = a;
+      s->values[DATA] = b;
+    }
+  } else if (named(name, "chunks")) {
     if (a.kind != RILL_V_BYTES)
       return fail(l, RILL_TYPE, "chunks requires Bytes");
     s = node(l, CHUNKS, &d);
     if (s)
       s->values[DATA] = a;
   } else if (named(name, "files")) {
-    if (a.kind != RILL_V_PATH)
-      return fail(l, RILL_TYPE, "files requires Path");
+    if ((a.kind != RILL_V_PATH && a.kind != RILL_V_STRING &&
+         a.kind != RILL_V_BYTES) ||
+        memchr(a.as.object->bytes.data, 0, a.as.object->bytes.size))
+      return fail(l, RILL_TYPE,
+                  "files requires Path, String or Bytes without NUL");
     s = node(l, FILES, &d);
     if (s) {
       s->values[DATA] = a;
@@ -772,27 +907,30 @@ bool rill_stream_call(RillLibrary *l, RillValue request) {
       }
     }
   } else if (named(name, "map") || named(name, "filter") ||
-             named(name, "take") || named(name, "lines")) {
+             named(name, "take") || named(name, "drop") ||
+             named(name, "lines")) {
     input = find(l, b, &d);
     if (!input)
       return finish(l, (RillValue){}, d);
     enum SourceKind kind = named(name, "map")      ? MAP
                            : named(name, "filter") ? FILTER
                            : named(name, "take")   ? TAKE
+                           : named(name, "drop")   ? DROP
                                                    : LINES;
     RillLimit limit = {"max_line_bytes", (size_t)8 * 1024 * 1024, 0};
     if ((kind == MAP || kind == FILTER) && !callable(a))
       return fail(l, RILL_TYPE, "stream callback requires Function");
-    if (kind == TAKE && (a.kind != RILL_V_INT || a.as.integer < 0 ||
-                         (uint64_t)a.as.integer > SIZE_MAX))
-      return fail(l, RILL_TYPE, "take count requires nonnegative Int");
+    if ((kind == TAKE || kind == DROP) &&
+        (a.kind != RILL_V_INT || a.as.integer < 0 ||
+         (uint64_t)a.as.integer > SIZE_MAX))
+      return fail(l, RILL_TYPE, "count must be a nonnegative Int");
     if (kind == LINES && !rill_library_limits(a, &limit, 1, &d))
       return finish(l, (RillValue){}, d);
     s = node(l, kind, &d);
     if (s) {
       s->input = input;
       input->claimed = true;
-      if (kind == TAKE)
+      if (kind == TAKE || kind == DROP)
         s->remaining = (size_t)a.as.integer;
       if (kind == LINES)
         s->limit = limit.value;
@@ -814,8 +952,8 @@ bool rill_stream_call(RillLibrary *l, RillValue request) {
       stream = b;
       if (!rill_library_limits(a, limits + 1, 1, &d))
         return finish(l, (RillValue){}, d);
-    } else if (named(name, "fold")) {
-      kind = FOLD;
+    } else if (named(name, "fold") || named(name, "fold_until")) {
+      kind = named(name, "fold") ? FOLD : FOLD_UNTIL;
       stream = c;
     } else if (named(name, "each")) {
       kind = EACH;
@@ -828,7 +966,7 @@ bool rill_stream_call(RillLibrary *l, RillValue request) {
       stream = a;
     } else
       return fail(l, RILL_TYPE, "unknown stream operation");
-    if ((kind == FOLD || kind == EACH) && !callable(a))
+    if ((kind == FOLD || kind == FOLD_UNTIL || kind == EACH) && !callable(a))
       return fail(l, RILL_TYPE, "sink callback requires Function");
     input = find(l, stream, &d);
     if (!input)
@@ -844,9 +982,9 @@ bool rill_stream_call(RillLibrary *l, RillValue request) {
       if (sink->values[BUDGET].kind == RILL_V_UNIT)
         error(&sink->error, RILL_MEMORY, "budget allocation failed");
     }
-    if (kind == FOLD || kind == EACH)
+    if (kind == FOLD || kind == FOLD_UNTIL || kind == EACH)
       sink->values[CALLBACK] = a;
-    if (kind == FOLD)
+    if (kind == FOLD || kind == FOLD_UNTIL)
       sink->values[ACCUMULATOR] = b;
     if (kind == CLOSE) {
       close_chain(input, false);
@@ -888,6 +1026,7 @@ void rill_stream_clear(RillLibrary *l) {
     l->streams->nodes = s->next;
     if (s->job)
       rill_exec_acknowledge(s->job);
+    release_input(s);
     if (s->directory)
       (void)closedir(s->directory);
     rill_text_clear(&s->buffer);

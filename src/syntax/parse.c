@@ -7,9 +7,9 @@
  * before evaluation. Complete, incomplete, and invalid results all own storage
  * and must be cleared or transferred to code preparation.
  */
-#include "syntax.h"
 #include "diagnostic.h"
 #include "source.h"
+#include "syntax.h"
 #include "text/text.h"
 #include <errno.h>
 #include <math.h>
@@ -29,6 +29,7 @@ typedef struct {
   const char *s;
   size_t size, at;
   unsigned depth;
+  bool soft_lines;
   RillSyntax out;
 } Parser;
 static void fail(Parser *p, const char *message) {
@@ -121,6 +122,14 @@ static RillNode *string(Parser *p) {
     return nullptr;
   char quote = p->s[p->at++];
   while (p->at < p->size) {
+    size_t start = p->at;
+    while (p->at < p->size && p->s[p->at] != quote &&
+           !(quote == '"' && p->s[p->at] == '\\'))
+      ++p->at;
+    if (p->at != start && !append(p, &n->text, p->s + start, p->at - start))
+      return nullptr;
+    if (p->at == p->size)
+      break;
     char c = p->s[p->at++];
     if (c == quote)
       return n;
@@ -143,7 +152,7 @@ static RillNode *string(Parser *p) {
         break;
       case 'u': {
         if (!take(p, '{')) {
-          expected(p, "expected { after Unicode escape");
+          expected(p, "expected '{' after Unicode escape");
           return nullptr;
         }
         uint32_t cp = 0;
@@ -162,17 +171,17 @@ static RillNode *string(Parser *p) {
             return nullptr;
           }
           if (++digits > 6) {
-            fail(p, "Unicode scalar out of range");
+            fail(p, "Unicode escape exceeds U+10FFFF");
             return nullptr;
           }
           cp = cp * 16 + v;
         }
         if (!take(p, '}')) {
-          expected(p, "expected } after Unicode escape");
+          expected(p, "expected '}' after Unicode escape");
           return nullptr;
         }
         if (!digits || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) {
-          fail(p, "invalid Unicode scalar");
+          fail(p, "Unicode escape must name a Unicode scalar value");
           return nullptr;
         }
         if (!rill_text_encode(&n->text, cp)) {
@@ -201,22 +210,31 @@ static RillNode *name(Parser *p) {
   while (p->at < p->size && (ident(p->s[p->at]) || digit(p->s[p->at])))
     ++p->at;
   RillNode *n = node(p, RILL_NAME, at);
-  if (n && !append(p, &n->text, p->s + at, p->at - at))
+  if (!n)
     return nullptr;
+  // Identifier spelling is complete and never grows. Do not retain a
+  // geometrically sized editing buffer for every name in long-lived code.
+  size_t size = p->at - at;
+  char *text = strndup(p->s + at, size);
+  if (!text) {
+    memory_error(p);
+    return nullptr;
+  }
+  n->text = (RillBuffer){.data = text, .size = size, .capacity = size + 1};
   return n;
 }
 static RillNode *binding_name(Parser *p, RillNode *n, bool wildcard) {
   if (!n)
     return nullptr;
   static const char *const reserved[] = {
-      "let",    "fn",     "rec",   "if",   "then", "else",   "do",
-      "match",  "struct", "enum",  "with", "job",  "import", "as",
-      "export", "true",   "false", "null", "and",  "or",     "not"};
+      "let",    "fn",   "rec",  "if",  "then",   "else", "do",     "match",
+      "struct", "enum", "with", "job", "import", "as",   "export", "true",
+      "false",  "null", "and",  "or",  "not",    "of"};
   bool invalid = !wildcard && !strcmp(n->text.data, "_");
   for (size_t i = 0; i < sizeof(reserved) / sizeof(*reserved); ++i)
     invalid |= !strcmp(n->text.data, reserved[i]);
   if (invalid) {
-    fail(p, "reserved word is not a binding name");
+    fail(p, "reserved word cannot be used as a binding name");
     return nullptr;
   }
   return n;
@@ -235,7 +253,7 @@ static bool require(Parser *p, char c, const char *message) {
   expected(p, message);
   return false;
 }
-static RillNode *pattern(Parser *p);
+static RillNode *pattern(Parser *p, bool parameter);
 static RillNode *statements(Parser *p, bool top, bool block);
 static RillNode *binary(Parser *p, unsigned precedence);
 static RillNode *number(Parser *p) {
@@ -252,7 +270,7 @@ static RillNode *number(Parser *p) {
       last_digit = true;
     else if (c == '_') {
       if (!last_digit || p->at + 1 == p->size || !digit(p->s[p->at + 1])) {
-        fail(p, "invalid numeric separator");
+        fail(p, "numeric separators must occur between digits");
         break;
       }
       ++p->at;
@@ -287,7 +305,7 @@ static RillNode *number(Parser *p) {
       break;
   }
   if (!last_digit) {
-    expected(p, "expected numeric digits");
+    expected(p, "expected digits in number");
     return nullptr;
   }
   if (!p->out.diagnostic.kind) {
@@ -299,7 +317,7 @@ static RillNode *number(Parser *p) {
     if (fractional) {
       n->real = strtod(text.data, &end);
       if (!isfinite(n->real) || *end)
-        fail(p, "invalid finite Float");
+        fail(p, "expected a finite Float literal");
     } else {
       n->integer = strtoll(text.data, &end, 10);
       if (errno == ERANGE || *end)
@@ -309,7 +327,7 @@ static RillNode *number(Parser *p) {
   }
   return nullptr;
 }
-static RillNode *aggregate(Parser *p, bool pat, char closing) {
+static RillNode *aggregate_items(Parser *p, bool pat, char closing) {
   RillNode *n = node(p, closing == ']' ? RILL_LIST : RILL_RECORD, p->at);
   if (!n)
     return nullptr;
@@ -332,7 +350,7 @@ static RillNode *aggregate(Parser *p, bool pat, char closing) {
       return n;
     }
     if (closing == ']')
-      item = pat ? pattern(p) : expression(p);
+      item = pat ? pattern(p, false) : expression(p);
     else {
       space(p, true);
       item = p->at < p->size && (p->s[p->at] == '\'' || p->s[p->at] == '"')
@@ -344,23 +362,18 @@ static RillNode *aggregate(Parser *p, bool pat, char closing) {
       item->kind = RILL_PAIR;
       space(p, true);
       if (take(p, ':'))
-        item->children = pat ? pattern(p) : expression(p);
-      else if (pat && shorthand) {
-        if (!binding_name(p, item, true))
+        item->children = pat ? pattern(p, false) : expression(p);
+      else if (shorthand) {
+        if (!binding_name(p, item, pat))
           return nullptr;
         item->children = node(p, RILL_NAME, item->offset);
         if (item->children &&
             !append(p, &item->children->text, item->text.data, item->text.size))
           return nullptr;
       } else
-        expected(p, "expected : after record key");
+        expected(p, "expected ':' after record key");
       if (!item->children)
         return nullptr;
-      for (RillNode *old = n->children; old; old = old->next)
-        if (old->text.size == item->text.size &&
-            (!item->text.size ||
-             !memcmp(old->text.data, item->text.data, item->text.size)))
-          fail(p, "duplicate record key");
     }
     if (!item || p->out.diagnostic.kind)
       return nullptr;
@@ -369,13 +382,62 @@ static RillNode *aggregate(Parser *p, bool pat, char closing) {
     space(p, true);
     if (take(p, closing))
       break;
-    if (!require(p, ',', "expected comma or closing delimiter"))
+    if (!require(p, ',', "expected ',' or closing delimiter"))
       return nullptr;
     space(p, true);
   }
   return n;
 }
-static RillNode *pattern(Parser *p) {
+static int field_order(const void *left, const void *right) {
+  const RillNode *const *a = left, *const *b = right;
+  RillBuffer x = (*a)->text, y = (*b)->text;
+  size_t size = x.size < y.size ? x.size : y.size;
+  int order = size ? memcmp(x.data, y.data, size) : 0;
+  return order ? order : (x.size > y.size) - (x.size < y.size);
+}
+static void unique_fields(Parser *p, const RillNode *record) {
+  size_t count = 0;
+  for (RillNode *n = record->children; n && n->kind == RILL_PAIR; n = n->next)
+    ++count;
+  if (count < 2)
+    return;
+  RillNode *local[32], **fields = local;
+  if (count > sizeof(local) / sizeof(*local)) {
+    size_t bytes = {};
+    if (ckd_mul(&bytes, count, sizeof(*fields))) {
+      memory_error(p);
+      return;
+    }
+    fields = malloc(bytes);
+    if (!fields) {
+      memory_error(p);
+      return;
+    }
+  }
+  size_t i = 0;
+  for (RillNode *n = record->children; i < count; n = n->next)
+    fields[i++] = n;
+  // Sort only borrowed pointers: source order remains the evaluation order.
+  qsort(fields, count, sizeof(*fields), field_order);
+  for (i = 1; i < count; ++i)
+    if (!field_order(fields + i - 1, fields + i)) {
+      p->at = fields[i]->offset;
+      fail(p, "duplicate record key");
+      break;
+    }
+  if (fields != local)
+    free(fields);
+}
+static RillNode *aggregate(Parser *p, bool pat, char closing) {
+  bool outer = p->soft_lines;
+  p->soft_lines = true;
+  RillNode *n = aggregate_items(p, pat, closing);
+  if (n && n->kind == RILL_RECORD && !p->out.diagnostic.kind)
+    unique_fields(p, n);
+  p->soft_lines = outer;
+  return n;
+}
+static RillNode *pattern(Parser *p, bool parameter) {
   if (++p->depth > MAX_SYNTAX_DEPTH) {
     fail(p, "pattern nesting limit exceeded");
     --p->depth;
@@ -392,8 +454,8 @@ static RillNode *pattern(Parser *p) {
     if (take(p, ')'))
       n = node(p, RILL_UNIT, p->at);
     else {
-      n = pattern(p);
-      (void)require(p, ')', "expected )");
+      n = pattern(p, false);
+      (void)require(p, ')', "expected ')'");
     }
   } else if (keyword(p, "true") || keyword(p, "false")) {
     n = node(p, RILL_BOOL, p->at);
@@ -419,8 +481,9 @@ static RillNode *pattern(Parser *p) {
       n = field;
       qualified = true;
     }
-    space(p, true);
-    if (n && (take(p, '{') || qualified)) {
+    if (!parameter)
+      space(p, true);
+    if (n && ((!parameter && take(p, '{')) || qualified)) {
       bool fields = p->at && p->s[p->at - 1] == '{';
       RillNode *nominal = node(p, RILL_NOMINAL, n->offset);
       if (!nominal)
@@ -435,39 +498,166 @@ static RillNode *pattern(Parser *p) {
   --p->depth;
   return n;
 }
-static RillNode *function(Parser *p) {
-  RillNode *n = node(p, RILL_FUNCTION, p->at);
-  if (!n || !require(p, '(', "expected parameter list"))
-    return nullptr;
-  RillNode *last = n;
-  space(p, true);
-  if (take(p, ')'))
-    last->pattern = node(p, RILL_UNIT, p->at);
-  else
-    for (;;) {
-      last->pattern = pattern(p);
-      if (!last->pattern)
-        return nullptr;
-      space(p, true);
-      if (take(p, ')'))
-        break;
-      if (!require(p, ',', "expected , or )"))
-        return nullptr;
-      space(p, true);
-      if (take(p, ')'))
-        break;
-      last->children = node(p, RILL_FUNCTION, p->at);
-      last = last->children;
-      if (!last)
-        return nullptr;
+// Only the header is inspected: nested patterns and quoted keys are skipped.
+// A colon, comma, or closing brace selects a Record; => selects a closure.
+static bool closure_header(const Parser *p) {
+  size_t depth = 0;
+  char quote = 0;
+  for (size_t i = p->at; i < p->size; ++i) {
+    char c = p->s[i];
+    if (quote) {
+      if (c == '\\' && quote == '"' && i + 1 < p->size)
+        ++i;
+      else if (c == quote)
+        quote = 0;
+    } else if (c == '"' || c == '\'')
+      quote = c;
+    else if (c == '#') {
+      while (i < p->size && p->s[i] != '\n')
+        ++i;
+    } else if (!depth && c == '=' && i + 1 < p->size && p->s[i + 1] == '>')
+      return true;
+    else if (!depth && (c == ':' || c == ',' || c == '}'))
+      return false;
+    else if (c == '(' || c == '[' || c == '{')
+      ++depth;
+    else if (c == ')' || c == ']' || c == '}') {
+      if (!depth)
+        return false;
+      --depth;
     }
+  }
+  // An unfinished header without Record punctuation remains incomplete.
+  return true;
+}
+static RillNode *function(Parser *p, bool closure) {
+  RillNode *first = nullptr, **body = &first;
+  for (;;) {
+    space(p, true);
+    bool end = closure ? token(p, "=>") : take(p, '=');
+    if (end) {
+      if (!first) {
+        fail(p, "expected parameter; use () for a Unit parameter");
+        return nullptr;
+      }
+      break;
+    }
+    size_t start = p->at;
+    RillNode *parameter = pattern(p, true);
+    RillNode *n = node(p, RILL_FUNCTION, start);
+    if (!parameter || !n)
+      return nullptr;
+    n->pattern = parameter;
+    *body = n;
+    body = &n->children;
+    if (p->at < p->size) {
+      char c = p->s[p->at];
+      if (c != ' ' && c != '\t' && c != '\r' && c != '\n' && c != '#' &&
+          c != '=') {
+        fail(p, "expected whitespace between parameters");
+        return nullptr;
+      }
+    }
+  }
+  if (closure) {
+    size_t at = p->at;
+    RillNode *items = statements(p, false, true);
+    if (items && !items->next && items->kind != RILL_BIND &&
+        items->kind != RILL_DECLARE && items->kind != RILL_REC)
+      *body = items;
+    else {
+      *body = node(p, RILL_BLOCK, at);
+      if (!*body)
+        return nullptr;
+      (*body)->children = items;
+    }
+  } else
+    *body = expression(p);
+  return *body ? first : nullptr;
+}
+// Lower a recursive expression to a private declaration and its value.
+static RillNode *recursive_function(Parser *p, size_t at) {
+  if (!require(p, '{', "expected '{' after 'rec'"))
+    return nullptr;
   space(p, true);
-  if (!token(p, "=>")) {
-    expected(p, "expected =>");
+  RillNode *decl = binding_name(p, name(p), false);
+  RillNode *block = node(p, RILL_BLOCK, at);
+  RillNode *value = node(p, RILL_NAME, at);
+  if (!decl || !block || !value ||
+      !append(p, &value->text, decl->text.data, decl->text.size))
+    return nullptr;
+  if (p->at < p->size && p->s[p->at] != ' ' && p->s[p->at] != '\t' &&
+      p->s[p->at] != '\r' && p->s[p->at] != '\n' && p->s[p->at] != '#') {
+    fail(p, "expected whitespace before parameters");
     return nullptr;
   }
-  last->children = expression(p);
-  return last->children ? n : nullptr;
+  decl->kind = RILL_DECLARE;
+  decl->children = function(p, true);
+  if (!decl->children)
+    return nullptr;
+  decl->next = value;
+  block->children = decl;
+  return block;
+}
+static bool recursive_group(Parser *p) {
+  size_t at = p->at;
+  bool group = false;
+  if (keyword(p, "rec")) {
+    space(p, true);
+    if (take(p, '{')) {
+      space(p, true);
+      group = keyword(p, "fn");
+    }
+  }
+  p->at = at;
+  return group;
+}
+static RillNode *delimited_expression(Parser *p, char closing) {
+  bool outer = p->soft_lines;
+  p->soft_lines = true;
+  RillNode *n = expression(p);
+  (void)require(p, closing, "expected closing delimiter");
+  p->soft_lines = outer;
+  return n;
+}
+static RillNode *match_arms(Parser *p, RillNode *n) {
+  RillNode **tail = &n->children->next;
+  space(p, true);
+  while (!take(p, '}')) {
+    RillNode *arm = node(p, RILL_ARM, p->at);
+    if (!arm)
+      return nullptr;
+    *tail = arm;
+    tail = &arm->next;
+    arm->pattern = pattern(p, false);
+    if (!arm->pattern)
+      return nullptr;
+    space(p, true);
+    if (keyword(p, "if"))
+      arm->children = expression(p);
+    else {
+      arm->children = node(p, RILL_BOOL, p->at);
+      if (arm->children)
+        arm->children->integer = 1;
+    }
+    if (!arm->children)
+      return nullptr;
+    space(p, true);
+    if (!token(p, "=>")) {
+      expected(p, "expected '=>' after match pattern");
+      return nullptr;
+    }
+    arm->children->next = expression(p);
+    if (!arm->children->next)
+      return nullptr;
+    space(p, true);
+    if (take(p, '}'))
+      break;
+    if (!require(p, ',', "expected ',' or '}'"))
+      return nullptr;
+    space(p, true);
+  }
+  return n;
 }
 static RillNode *atom(Parser *p) {
   space(p, true);
@@ -481,11 +671,11 @@ static RillNode *atom(Parser *p) {
     return string(p);
   if (digit(c) || (c == '-' && at + 1 < p->size && digit(p->s[at + 1])))
     return number(p);
-  if (keyword(p, "fn"))
-    return function(p);
+  if (keyword(p, "rec"))
+    return recursive_function(p, at);
   if (keyword(p, "do")) {
     RillNode *n = node(p, RILL_BLOCK, at);
-    if (!n || !require(p, '{', "expected { after do"))
+    if (!n || !require(p, '{', "expected '{' after 'do'"))
       return nullptr;
     n->children = statements(p, false, true);
     return n;
@@ -499,7 +689,7 @@ static RillNode *atom(Parser *p) {
       return nullptr;
     space(p, true);
     if (!keyword(p, "then")) {
-      expected(p, "expected then");
+      expected(p, "expected 'then' after condition");
       return nullptr;
     }
     n->children->next = expression(p);
@@ -507,7 +697,7 @@ static RillNode *atom(Parser *p) {
       return nullptr;
     space(p, true);
     if (!keyword(p, "else")) {
-      expected(p, "expected else");
+      expected(p, "expected 'else' after then-branch");
       return nullptr;
     }
     n->children->next->next = expression(p);
@@ -518,44 +708,17 @@ static RillNode *atom(Parser *p) {
     if (!n)
       return nullptr;
     n->children = expression(p);
-    if (!n->children || !require(p, '{', "expected match arms"))
-      return nullptr;
-    RillNode **tail = &n->children->next;
     space(p, true);
-    while (!take(p, '}')) {
-      RillNode *arm = node(p, RILL_ARM, p->at);
-      if (!arm)
-        return nullptr;
-      *tail = arm;
-      tail = &arm->next;
-      arm->pattern = pattern(p);
-      if (!arm->pattern)
-        return nullptr;
-      space(p, true);
-      if (keyword(p, "if"))
-        arm->children = expression(p);
-      else {
-        arm->children = node(p, RILL_BOOL, p->at);
-        if (arm->children)
-          arm->children->integer = 1;
-      }
-      if (!arm->children)
-        return nullptr;
-      space(p, true);
-      if (!token(p, "=>")) {
-        expected(p, "expected => in match");
-        return nullptr;
-      }
-      arm->children->next = expression(p);
-      if (!arm->children->next)
-        return nullptr;
-      space(p, true);
-      if (take(p, '}'))
-        break;
-      if (!require(p, ',', "expected , or }"))
-        return nullptr;
-      space(p, true);
+    if (!keyword(p, "of")) {
+      expected(p, "expected 'of' before match arms");
+      return nullptr;
     }
+    if (!n->children || !require(p, '{', "expected '{' before match arms"))
+      return nullptr;
+    bool outer = p->soft_lines;
+    p->soft_lines = true;
+    n = match_arms(p, n);
+    p->soft_lines = outer;
     return n;
   }
   if (keyword(p, "true")) {
@@ -569,18 +732,17 @@ static RillNode *atom(Parser *p) {
   if (keyword(p, "null"))
     return node(p, RILL_NULL, at);
   if (keyword(p, "job")) {
-    if (!require(p, '{', "expected { after job"))
+    if (!require(p, '{', "expected '{' after 'job'"))
       return nullptr;
     RillNode *n = pipeline(p);
-    (void)require(p, '}', "expected } after pipeline");
+    (void)require(p, '}', "expected '}' after pipeline");
     return n;
   }
   if (take(p, '(')) {
     space(p, true);
     if (take(p, ')'))
       return node(p, RILL_UNIT, at);
-    RillNode *n = expression(p);
-    (void)require(p, ')', "expected )");
+    RillNode *n = delimited_expression(p, ')');
     if (n)
       n->grouped = true;
     return n;
@@ -588,10 +750,72 @@ static RillNode *atom(Parser *p) {
   if (take(p, '['))
     return aggregate(p, false, ']');
   if (take(p, '{'))
-    return aggregate(p, false, '}');
+    return closure_header(p) ? function(p, true) : aggregate(p, false, '}');
   return binding_name(p, name(p), false);
 }
 static RillNode *suffix(Parser *p) {
+  RillNode *n = atom(p);
+  while (n && !p->out.diagnostic.kind) {
+    if (take(p, '[')) {
+      RillNode *index = delimited_expression(p, ']');
+      RillNode *access = node(p, RILL_INDEX, n->offset);
+      if (!index || !access)
+        return nullptr;
+      access->children = n;
+      n->next = index;
+      n = access;
+    } else if (take(p, '.')) {
+      RillNode *field = name(p);
+      if (!field)
+        return nullptr;
+      field->kind = RILL_FIELD;
+      field->children = n;
+      n = field;
+    } else {
+      if (p->at < p->size && p->s[p->at] == '(')
+        fail(p, "function calls require whitespace; write 'f x' or 'f "
+                "(expression)'");
+      break;
+    }
+  }
+  return n;
+}
+static bool argument_start(Parser *p) {
+  if (p->at == p->size)
+    return false;
+  char c = p->s[p->at];
+  if (c == '(' || c == '[' || c == '{' || c == '\'' || c == '"' || digit(c))
+    return true;
+  if (!ident(c))
+    return false;
+  size_t saved = p->at;
+  bool stop = keyword(p, "of") || keyword(p, "then") || keyword(p, "else") ||
+              keyword(p, "with") || keyword(p, "and") || keyword(p, "or") ||
+              keyword(p, "not") || keyword(p, "if") || keyword(p, "match") ||
+              keyword(p, "fn");
+  p->at = saved;
+  return !stop;
+}
+static RillNode *application(Parser *p) {
+  RillNode *left = suffix(p);
+  while (left && !p->out.diagnostic.kind) {
+    size_t saved = p->at;
+    space(p, p->soft_lines);
+    if (saved == p->at || !argument_start(p)) {
+      p->at = saved;
+      break;
+    }
+    size_t at = p->at;
+    RillNode *arg = suffix(p), *call = node(p, RILL_CALL, at);
+    if (!arg || !call)
+      return nullptr;
+    call->children = left;
+    left->next = arg;
+    left = call;
+  }
+  return left;
+}
+static RillNode *unary(Parser *p) {
   space(p, true);
   size_t at = p->at;
   bool neg = p->at < p->size && p->s[p->at] == '-' &&
@@ -604,56 +828,7 @@ static RillNode *suffix(Parser *p) {
     n->children = binary(p, 9);
     return n;
   }
-  RillNode *n = atom(p);
-  while (n && !p->out.diagnostic.kind) {
-    size_t saved = p->at;
-    space(p, false);
-    if (take(p, '[')) {
-      RillNode *index = expression(p), *access = node(p, RILL_INDEX, n->offset);
-      (void)require(p, ']', "expected ] after index");
-      if (!index || !access)
-        return nullptr;
-      access->children = n;
-      n->next = index;
-      n = access;
-      continue;
-    }
-    if (take(p, '.')) {
-      RillNode *field = name(p);
-      if (!field)
-        return nullptr;
-      field->kind = RILL_FIELD;
-      field->children = n;
-      n = field;
-      continue;
-    }
-    if (!take(p, '(')) {
-      p->at = saved;
-      break;
-    }
-    space(p, true);
-    bool empty = take(p, ')');
-    do {
-      RillNode *arg = empty ? node(p, RILL_UNIT, p->at) : expression(p);
-      RillNode *call = node(p, RILL_CALL, n->offset);
-      if (!arg || !call)
-        return nullptr;
-      call->children = n;
-      n->next = arg;
-      n = call;
-      if (empty)
-        break;
-      space(p, true);
-      if (take(p, ')'))
-        break;
-      if (!require(p, ',', "expected , or )"))
-        return nullptr;
-      space(p, true);
-      if (take(p, ')'))
-        break;
-    } while (!p->out.diagnostic.kind);
-  }
-  return n;
+  return application(p);
 }
 static RillNode *binary(Parser *p, unsigned minimum) {
   if (++p->depth > MAX_SYNTAX_DEPTH) {
@@ -661,10 +836,10 @@ static RillNode *binary(Parser *p, unsigned minimum) {
     --p->depth;
     return nullptr;
   }
-  RillNode *left = suffix(p);
+  RillNode *left = unary(p);
   while (left && !p->out.diagnostic.kind) {
     size_t saved = p->at;
-    space(p, false);
+    space(p, p->soft_lines);
     if (p->at < p->size && p->s[p->at] == '\n') {
       space(p, true);
       if (p->size - p->at < 2 || memcmp(p->s + p->at, "|>", 2) != 0) {
@@ -697,7 +872,7 @@ static RillNode *binary(Parser *p, unsigned minimum) {
     }
     if (ops[i].prec == 5 && left->kind == RILL_BINARY &&
         left->op >= RILL_OP_EQ && left->op <= RILL_OP_GT && !left->grouped) {
-      fail(p, "comparisons do not chain");
+      fail(p, "comparisons cannot be chained; combine them with 'and'");
       break;
     }
     RillOperator op = ops[i].op;
@@ -737,7 +912,7 @@ static RillNode *word(Parser *p) {
     if (!spread)
       return nullptr;
     if (p->at == p->size || p->s[p->at] != '$') {
-      expected(p, "spread requires substitution");
+      expected(p, "command spread requires a substitution: ...$(expression)");
       return nullptr;
     }
     spread->children = word(p);
@@ -749,10 +924,7 @@ static RillNode *word(Parser *p) {
     n = string(p);
   else if (take(p, '$')) {
     if (take(p, '(')) {
-      n = expression(p);
-      space(p, true);
-      if (!take(p, ')'))
-        expected(p, "expected ) after substitution");
+      n = delimited_expression(p, ')');
     } else
       n = binding_name(p, name(p), false);
   } else {
@@ -770,7 +942,7 @@ static RillNode *word(Parser *p) {
       return nullptr;
   }
   if (p->at < p->size && !delimiter(p->s[p->at]))
-    fail(p, "adjacent word fragments are not allowed");
+    fail(p, "command word fragments cannot be joined; quote the whole word");
   return n;
 }
 static RillNode *pipeline(Parser *p) {
@@ -781,7 +953,7 @@ static RillNode *pipeline(Parser *p) {
   for (;;) {
     space(p, true);
     if (!take(p, '^')) {
-      expected(p, "expected ^ before executable");
+      expected(p, "expected '^' before command name");
       return nullptr;
     }
     RillNode *stage = node(p, RILL_STAGE, p->at);
@@ -794,7 +966,7 @@ static RillNode *pipeline(Parser *p) {
     if (!stage->children)
       return nullptr;
     if (stage->children->kind == RILL_SPREAD) {
-      fail(p, "executable cannot be spread");
+      fail(p, "command name cannot use list spread");
       return nullptr;
     }
     RillNode **tail = &stage->children->next;
@@ -848,7 +1020,7 @@ static RillNode *pipeline(Parser *p) {
           if (!part->children)
             return nullptr;
           if (part->children->kind == RILL_SPREAD) {
-            fail(p, "redirection cannot be spread");
+            fail(p, "redirection path cannot use list spread");
             return nullptr;
           }
         } else if (p->at < p->size && !delimiter(p->s[p->at])) {
@@ -869,7 +1041,8 @@ static RillNode *pipeline(Parser *p) {
       break;
     }
     if (take(p, '>')) {
-      fail(p, "use an explicit stream bridge after commands");
+      fail(p,
+           "use 'stream' or 'through' to connect commands to a value pipeline");
       return nullptr;
     }
   }
@@ -877,15 +1050,27 @@ static RillNode *pipeline(Parser *p) {
 }
 static RillNode *declaration(Parser *p, bool top) {
   space(p, true);
-  bool exported = keyword(p, "export");
-  if (exported) {
-    if (!top)
-      fail(p, "export is top-level only");
-    space(p, true);
-  }
   RillNode *n = nullptr;
-  if (p->at < p->size && p->s[p->at] == '^') {
-    RillNode *plan = pipeline(p), *run = node(p, RILL_NAME, p->at);
+  if (keyword(p, "export")) {
+    if (!top || !require(p, '{', "expected '{' after 'export'")) {
+      fail(p, "'export' is only allowed at the top level");
+      return nullptr;
+    }
+    n = node(p, RILL_EXPORT, p->at);
+    if (!n)
+      return nullptr;
+    n->children = aggregate(p, false, '}');
+    if (!n->children)
+      return nullptr;
+    for (RillNode *field = n->children->children; field; field = field->next) {
+      const RillNode *value = field->children;
+      while (value && value->kind == RILL_FIELD)
+        value = value->children;
+      if (!value || value->kind != RILL_NAME)
+        fail(p, "exports require existing bindings or namespace fields");
+    }
+  } else if (p->at < p->size && p->s[p->at] == '^') {
+    RillNode *plan = pipeline(p), *run = node(p, RILL_BUILTIN, p->at);
     n = node(p, RILL_CALL, p->at);
     if (!plan || !run || !n || !append(p, &run->text, "run", 3))
       return nullptr;
@@ -896,13 +1081,14 @@ static RillNode *declaration(Parser *p, bool top) {
     n = node(p, RILL_BIND, p->at);
     if (!n)
       return nullptr;
-    n->pattern = pattern(p);
-    if (!n->pattern || !require(p, '=', "expected = in binding"))
+    n->pattern = pattern(p, false);
+    if (!n->pattern || !require(p, '=', "expected '=' after binding pattern"))
       return nullptr;
     n->children = expression(p);
-  } else if (keyword(p, "rec")) {
+  } else if (recursive_group(p)) {
+    (void)keyword(p, "rec");
     n = node(p, RILL_REC, p->at);
-    if (!n || !require(p, '{', "expected recursive group"))
+    if (!n || !require(p, '{', "expected '{' after 'rec'"))
       return nullptr;
     // Invalid nested groups still recurse before member validation below.
     if (++p->depth > MAX_SYNTAX_DEPTH) {
@@ -916,7 +1102,7 @@ static RillNode *declaration(Parser *p, bool top) {
       fail(p, "empty recursive group");
     for (RillNode *c = n->children; c; c = c->next)
       if (c->kind != RILL_DECLARE)
-        fail(p, "rec accepts named functions only");
+        fail(p, "recursive groups can contain only named functions");
   } else if (keyword(p, "struct") || keyword(p, "enum")) {
     bool sum = p->at >= 4 && !memcmp(p->s + p->at - 4, "enum", 4);
     if (!top)
@@ -926,7 +1112,7 @@ static RillNode *declaration(Parser *p, bool top) {
     if (!n)
       return nullptr;
     n->kind = sum ? RILL_ENUM : RILL_STRUCT;
-    if (!require(p, '{', "expected type fields"))
+    if (!require(p, '{', "expected '{' after type name"))
       return nullptr;
     RillNode **tail = &n->children;
     space(p, true);
@@ -948,7 +1134,7 @@ static RillNode *declaration(Parser *p, bool top) {
           space(p, true);
           if (take(p, '}'))
             break;
-          if (!require(p, ',', "expected , or }"))
+          if (!require(p, ',', "expected ',' or '}'"))
             return nullptr;
           space(p, true);
         }
@@ -956,7 +1142,7 @@ static RillNode *declaration(Parser *p, bool top) {
       space(p, true);
       if (take(p, '}'))
         break;
-      if (!require(p, ',', "expected , or }"))
+      if (!require(p, ',', "expected ',' or '}'"))
         return nullptr;
       space(p, true);
     }
@@ -973,7 +1159,7 @@ static RillNode *declaration(Parser *p, bool top) {
     RillNode *path = string(p);
     space(p, true);
     if (!keyword(p, "as")) {
-      expected(p, "expected as");
+      expected(p, "expected 'as' after module path");
       return nullptr;
     }
     space(p, true);
@@ -982,56 +1168,60 @@ static RillNode *declaration(Parser *p, bool top) {
       return nullptr;
     n->kind = RILL_IMPORT;
     n->children = path;
-  } else {
-    size_t at = p->at;
-    if (keyword(p, "fn")) {
-      space(p, true);
-      if (p->at < p->size && ident(p->s[p->at])) {
-        n = binding_name(p, name(p), false);
-        if (!n)
-          return nullptr;
-        n->kind = RILL_DECLARE;
-        n->children = function(p);
-      } else {
-        p->at = at;
-        n = expression(p);
-      }
-    } else
-      n = expression(p);
-  }
-  if (n) {
-    n->exported = exported;
-    if (exported && n->kind != RILL_BIND && n->kind != RILL_DECLARE &&
-        n->kind != RILL_STRUCT && n->kind != RILL_ENUM)
-      fail(p, "expected export declaration");
-  }
+  } else if (keyword(p, "fn")) {
+    space(p, true);
+    n = binding_name(p, name(p), false);
+    if (!n)
+      return nullptr;
+    n->kind = RILL_DECLARE;
+    if (p->at < p->size && p->s[p->at] != ' ' && p->s[p->at] != '\t' &&
+        p->s[p->at] != '\r' && p->s[p->at] != '\n' && p->s[p->at] != '#') {
+      fail(p, "expected whitespace before function parameters");
+      return nullptr;
+    }
+    n->children = function(p, false);
+  } else
+    n = expression(p);
   return n;
 }
-static RillNode *statements(Parser *p, bool top, bool block) {
+static RillNode *statement_items(Parser *p, bool top, bool block) {
   RillNode *first = nullptr, **tail = &first;
+  bool exported = false;
   while (!p->out.diagnostic.kind) {
     space(p, true);
     if (block && take(p, '}'))
       return first;
     if (p->at == p->size) {
       if (block)
-        expected(p, "expected }");
+        expected(p, "expected '}'");
       break;
     }
     RillNode *n = declaration(p, top);
     if (!n)
       break;
+    if (n->kind == RILL_EXPORT) {
+      if (exported)
+        fail(p, "only one export table is allowed");
+      exported = true;
+    }
     *tail = n;
     tail = &n->next;
     space(p, false);
     if (block && take(p, '}'))
       return first;
     if (p->at < p->size && !take(p, ';') && !take(p, '\n')) {
-      expected(p, "expected statement separator");
+      expected(p, "expected a newline or ';' between statements");
       break;
     }
   }
   return first;
+}
+static RillNode *statements(Parser *p, bool top, bool block) {
+  bool outer = p->soft_lines;
+  p->soft_lines = false;
+  RillNode *n = statement_items(p, top, block);
+  p->soft_lines = outer;
+  return n;
 }
 static void validate_depth(Parser *p) {
   struct {
@@ -1071,10 +1261,65 @@ static void validate_depth(Parser *p) {
     }
   }
 }
+// Collect binding leaves only; nominal descriptor paths are lexical references.
+static void pattern_names(RillNode *n, RillNode **names, size_t *count) {
+  if (!n)
+    return;
+  if (n->kind == RILL_NAME && strcmp(n->text.data, "_") != 0) {
+    if (names)
+      names[*count] = n;
+    ++*count;
+  }
+  for (RillNode *c = n->children; c; c = c->next)
+    pattern_names(c, names, count);
+}
+static int pattern_name_order(const void *left, const void *right) {
+  const RillNode *const *a = left, *const *b = right;
+  return strcmp((*a)->text.data, (*b)->text.data);
+}
+static void validate_patterns(Parser *p) {
+  size_t capacity = 0, bytes = {};
+  for (RillNode *n = p->out.allocated; n; n = n->allocated_next) {
+    if (n->kind != RILL_BIND && n->kind != RILL_FUNCTION && n->kind != RILL_ARM)
+      continue;
+    size_t count = 0;
+    pattern_names(n->pattern, nullptr, &count);
+    if (count > capacity)
+      capacity = count;
+  }
+  if (capacity < 2)
+    return;
+  if (ckd_mul(&bytes, capacity, sizeof(RillNode *))) {
+    memory_error(p);
+    return;
+  }
+  RillNode **names = malloc(bytes);
+  if (!names) {
+    memory_error(p);
+    return;
+  }
+  for (RillNode *n = p->out.allocated; n && !p->out.diagnostic.kind;
+       n = n->allocated_next) {
+    if (n->kind != RILL_BIND && n->kind != RILL_FUNCTION && n->kind != RILL_ARM)
+      continue;
+    size_t count = 0;
+    pattern_names(n->pattern, names, &count);
+    qsort(names, count, sizeof(*names), pattern_name_order);
+    for (size_t i = 1; i < count; ++i)
+      if (!strcmp(names[i - 1]->text.data, names[i]->text.data)) {
+        p->at = names[i]->offset;
+        fail(p, "duplicate name in pattern");
+        break;
+      }
+  }
+  free(names);
+}
 RillSyntax rill_syntax_parse(const RillSource *source) {
   Parser p = {.s = source->bytes.data, .size = source->bytes.size};
   p.out.first = statements(&p, true, false);
   validate_depth(&p);
+  if (!p.out.diagnostic.kind)
+    validate_patterns(&p);
   if (source->name &&
       !append(&p, &p.out.name, source->name, strlen(source->name)))
     memory_error(&p);

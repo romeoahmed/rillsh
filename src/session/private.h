@@ -4,8 +4,8 @@
  */
 #pragma once
 #include "exec/exec.h"
-#include "library/library.h"
 #include "module.h"
+#include "native/native.h"
 #include "platform/posix.h"
 #include "runtime/runtime.h"
 #include "session.h"

@@ -1,3 +1,7 @@
-fn fill(n, items) => if n == 0 then items else fill(n - 1, concat(items, items))
-let items = fill(17, [1])
-if sum(map(add(1), items)) == 262144 then () else raise(error("Benchmark", "map result"))
+fn fill n items =
+  if n == 0 then items else fill (n - 1) (concat items items)
+
+let items = fill 17 [1]
+
+if sum (map (add 1) items) == 262144 then ()
+else raise (error "Benchmark" "map result")

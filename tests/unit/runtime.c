@@ -7,10 +7,10 @@
  * separately; assertions cover ownership rather than fixed allocation counts.
  */
 #include "runtime/runtime.h"
+#include "../support/check.h"
 #include "diagnostic.h"
 #include "source.h"
 #include "syntax/syntax.h"
-#include "test.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -520,9 +520,9 @@ static void aborted_diagnostic() {
   CHECK(eval);
   RillHeap *heap = rill_runtime_heap(eval);
   heap->stress = true;
-  CHECK(entry(eval, "let stable=7").state == RILL_EVAL_DONE);
+  CHECK(entry(eval, "let stable = 7").state == RILL_EVAL_DONE);
   [[gnu::cleanup(rill_source_clear)]] RillSource source = {};
-  const char text[] = "let pending=9; effect(0)";
+  const char text[] = "let pending = 9; effect 0";
   CHECK(rill_source_init(&source, "abort", text, sizeof(text) - 1) == RILL_OK);
   [[gnu::cleanup(rill_syntax_clear)]] RillSyntax syntax =
       rill_syntax_parse(&source);
@@ -563,7 +563,7 @@ static void entries() {
   CHECK(result.value.kind == RILL_V_STRING);
   CHECK(!strcmp(result.value.as.object->bytes.data, "original"));
   const char *invalid[] = {"[1][-1]", "[1][1]",  "[1]['0']",
-                           "1(2)",    "1.field", "let x = 1; let x = 2"};
+                           "1 2",     "1.field", "let x = 1; let x = 2"};
   for (size_t i = 0; i < sizeof(invalid) / sizeof(*invalid); ++i) {
     result = entry(eval, invalid[i]);
     CHECK(result.state == RILL_EVAL_ERROR &&
@@ -595,9 +595,9 @@ static void snapshot_merges() {
           eval, name,
           (RillValue){.kind = RILL_V_INT, .as.integer = (int64_t)(i + round)}));
     }
-    CHECK(entry(eval, "let middle=5; let z=9; let a=1").state ==
+    CHECK(entry(eval, "let middle = 5; let z = 9; let a = 1").state ==
           RILL_EVAL_DONE);
-    CHECK(entry(eval, "let key17=99; missing").state == RILL_EVAL_ERROR);
+    CHECK(entry(eval, "let key17 = 99; missing").state == RILL_EVAL_ERROR);
     for (size_t i = 0; i < 32; ++i) {
       char name[32];
       int size = snprintf(name, sizeof(name), "key%zu", 31 - i);
@@ -607,17 +607,52 @@ static void snapshot_merges() {
       CHECK(value.kind == RILL_V_INT &&
             value.as.integer == (int64_t)(i + round));
     }
-    CHECK(entry(eval, "let middle=6; middle+z+a").value.as.integer == 16);
+    CHECK(entry(eval, "let middle = 6; middle + z + a").value.as.integer == 16);
   }
   rill_runtime_free(eval);
 }
+static void resumed_publication() {
+  const RillNative native = {"pause", 42};
+  RillEval *eval = rill_runtime_new(&native, 1);
+  CHECK(eval);
+  rill_runtime_heap(eval)->stress = true;
+  CHECK(entry(eval, "let shared = 1; let old = 2").state == RILL_EVAL_DONE);
+  [[gnu::cleanup(rill_source_clear)]] RillSource source = {};
+  const char text[] = "let shared = 3; let retained = { () => old }; pause ()";
+  CHECK(rill_source_init(&source, "suspended", text, sizeof(text) - 1) ==
+        RILL_OK);
+  [[gnu::cleanup(rill_syntax_clear)]] RillSyntax syntax =
+      rill_syntax_parse(&source);
+  CHECK(syntax.state == RILL_COMPLETE);
+  rill_runtime_begin(eval, &syntax);
+  CHECK(next_event(eval).state == RILL_EVAL_NATIVE);
+  RillEvaluation *saved = rill_runtime_suspend(eval);
+  CHECK(saved);
+  CHECK(entry(eval, "let shared = 4; let old = 5; let fresh = 6").state ==
+        RILL_EVAL_DONE);
+  // Native definitions may extend the current snapshot while work is stopped.
+  CHECK(rill_runtime_define(eval, "native",
+                            (RillValue){.kind = RILL_V_INT, .as.integer = 7}));
+  rill_runtime_abort(eval);
+  rill_runtime_restore(eval, saved);
+  rill_runtime_collect(rill_runtime_heap(eval));
+  rill_runtime_resume(eval, (RillValue){}, (RillDiagnostic){});
+  CHECK(next_event(eval).state == RILL_EVAL_DONE);
+  RillEvalEvent event =
+      entry(eval, "if shared == 3 and old == 5 and fresh == 6 and native == 7 "
+                  "and retained () == 2 then 1 else 0");
+  CHECK(event.state == RILL_EVAL_DONE && event.value.kind == RILL_V_INT &&
+        event.value.as.integer == 1);
+  rill_runtime_free(eval);
+}
+
 static void unary_protocol() {
   const RillNative native = {"f", 42};
   RillEval *eval = rill_runtime_new(&native, 1);
   CHECK(eval);
   rill_runtime_heap(eval)->stress = true;
   RillSource source = {};
-  const char *text = "let g = [f][0]; g(1, 2)";
+  const char *text = "let g = [f][0]; g 1 2";
   CHECK(rill_source_init(&source, "unary", text, strlen(text)) == RILL_OK);
   RillSyntax syntax = rill_syntax_parse(&source);
   CHECK(syntax.state == RILL_COMPLETE);
@@ -637,7 +672,7 @@ static void unary_protocol() {
   CHECK(result.state == RILL_EVAL_DONE && result.value.as.integer == 2);
   rill_syntax_clear(&syntax);
   rill_source_clear(&source);
-  text = "f(f('payload'))";
+  text = "f (f 'payload')";
   CHECK(rill_source_init(&source, "rooted", text, strlen(text)) == RILL_OK);
   syntax = rill_syntax_parse(&source);
   CHECK(syntax.state == RILL_COMPLETE);
@@ -654,7 +689,7 @@ static void unary_protocol() {
   rill_syntax_clear(&syntax);
   rill_source_clear(&source);
   // Aborting a suspended effect must discard pending bindings and frames.
-  text = "let g = 9; f(1)";
+  text = "let g = 9; f 1";
   CHECK(rill_source_init(&source, "abort", text, strlen(text)) == RILL_OK);
   syntax = rill_syntax_parse(&source);
   CHECK(syntax.state == RILL_COMPLETE);
@@ -696,6 +731,7 @@ int main(int argc, char **argv) {
     aborted_diagnostic();
     entries();
     snapshot_merges();
+    resumed_publication();
     unary_protocol();
   }
 }

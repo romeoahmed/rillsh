@@ -5,7 +5,7 @@
  * The generator verifies input hashes; this runner compares each declared
  * boundary with the production segmenter. It makes no terminal-width claim.
  */
-#include "test.h"
+#include "../support/check.h"
 #include "text/text.h"
 #include <errno.h>
 #include <stddef.h>

@@ -1,8 +1,14 @@
-fn tree(n, leaf) => if n == 0 then leaf else do {
-  let child = tree(n - 1, leaf)
-  [child, child]
-}
-let left = tree(20, 7)
-let right = tree(20, 7)
-fn loop(n) => if n == 0 then true else if left == right then loop(n - 1) else false
-if loop(8) then () else raise(error("Benchmark", "shared graph result"))
+fn tree n leaf =
+  if n == 0 then leaf else do {
+    let child = tree (n - 1) leaf
+    [child, child]
+  }
+
+let left = tree 20 7
+let right = tree 20 7
+fn loop n =
+  if n == 0 then true
+  else if left == right then loop (n - 1)
+  else false
+
+if loop 8 then () else raise (error "Benchmark" "shared graph result")

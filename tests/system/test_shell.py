@@ -5,7 +5,6 @@ import os
 import signal
 import subprocess
 import time
-import unittest
 
 from support import ShellCase
 
@@ -49,17 +48,18 @@ class ShellTests(ShellCase):
                 result = self.execute((self.shell, option))
                 self.assertIn(marker, result.stdout)
                 self.assertEqual(result.stderr, b"")
-        for arguments in (
-            ("-c",),
-            ("-c", "()", "extra"),
-            ("-i", "-c", "()"),
-            ("--color=invalid",),
-            ("--unknown",),
+        for arguments, reason in (
+            (("-c",), b"-c requires exactly one source argument"),
+            (("-c", "()", "extra"), b"-c requires exactly one source argument"),
+            (("-i", "-c", "()"), b"-i cannot be combined"),
+            (("--color=invalid",), b"--color must be auto, always, or never"),
+            (("--unknown",), b"unknown option"),
         ):
             with self.subTest(arguments=arguments):
                 result = self.execute((self.shell, *arguments), status=2)
                 self.assertEqual(result.stdout, b"")
-                self.assertIn(b"invalid options", result.stderr)
+                self.assertIn(reason, result.stderr)
+                self.assertIn(b"rillsh --help", result.stderr)
         result = self.invoke("")
         self.assertEqual((result.stdout, result.stderr), (b"", b""))
 
@@ -67,11 +67,11 @@ class ShellTests(ShellCase):
         words = ("", "a b", "a\nb", "*", "~", "--flag", "\u754c")
         result = self.invoke("^./child args " + " ".join(map(quote, words)))
         self.assertEqual(result.stdout, encoded_arguments(words))
-        result = self.invoke("^./child args $(bytes([255, 254]))")
+        result = self.invoke("^./child args $(bytes [255, 254])")
         self.assertEqual(result.stdout, b"2:\xff\xfe\n")
         failure = self.invoke('^./child args "\\u{0}"', status=1)
         self.assertIn(b"stage 0, argument 2", failure.stderr)
-        self.assertIn(b"TypeError", self.invoke("path(bytes([0]))", status=1).stderr)
+        self.assertIn(b"TypeError", self.invoke("path (bytes [0])", status=1).stderr)
 
     def test_launch_and_process_failures_are_distinct(self) -> None:
         self.invoke("^./child exit 127", status=127)
@@ -116,11 +116,11 @@ class ShellTests(ShellCase):
         self.assertFalse((self.work / "forbidden").exists())
 
     def test_plan_reuse_and_background_acknowledgement(self) -> None:
-        result = self.invoke("let p = job { ^./child args once }; run(p); run(p)")
+        result = self.invoke("let p = job { ^./child args once }; run p; run p")
         self.assertEqual(result.stdout, b"4:once\n" * 2)
-        self.invoke("let j = start(job { ^./child exit 0 }); wait(j)")
-        self.invoke("start(job { ^./child exit 0 })", status=1)
-        self.invoke("let j = start(job { ^./child exit 7 }); check(wait(j))", status=7)
+        self.invoke("let j = start job { ^./child exit 0 }; wait j")
+        self.invoke("start job { ^./child exit 0 }", status=1)
+        self.invoke("let j = start job { ^./child exit 7 }; check (wait j)", status=7)
 
     def test_path_lookup(self) -> None:
         for path in ("", "missing:."):
@@ -144,7 +144,7 @@ class ShellTests(ShellCase):
     def test_directory_and_locale(self) -> None:
         destination = self.work / "directory"
         destination.mkdir()
-        result = self.invoke('cd("directory"); ^../child cwd')
+        result = self.invoke('cd "directory"; ^../child cwd')
         self.assertEqual(result.stdout, os.fsencode(destination.resolve()))
         environment = self.environment | {"LC_ALL": "C", "LANG": "preserved"}
         self.assertEqual(
@@ -192,7 +192,7 @@ class ShellTests(ShellCase):
             (self.shell, "-c", "^./child env RILL_BYTES"), environment=environment
         )
         self.assertEqual(result.stdout, b"\xff\xfe")
-        result = self.invoke("^./child args $(path(bytes([255, 254])))")
+        result = self.invoke("^./child args $(path (bytes [255, 254]))")
         self.assertEqual(result.stdout, b"2:\xff\xfe\n")
 
     def test_closed_standard_descriptors(self) -> None:
@@ -219,7 +219,7 @@ class ShellTests(ShellCase):
                 self.assertFalse((self.work / "forbidden").exists())
 
     def test_background_stdin_is_disconnected(self) -> None:
-        self.invoke("let j = start(job { ^./child echo }); check(wait(j))")
+        self.invoke("let j = start job { ^./child echo }; check (wait j)")
 
     def test_pipeline_checks_each_stage(self) -> None:
         self.invoke("^./child exit 7 | ^./child exit 0", status=7)
@@ -260,7 +260,3 @@ class ShellTests(ShellCase):
             if process.poll() is None:
                 process.kill()
             process.wait(timeout=3)
-
-
-if __name__ == "__main__":
-    unittest.main(verbosity=2)

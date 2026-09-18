@@ -1,0 +1,13 @@
+let a = 0; let b = 1; let c = 2; let d = 3
+let e = 4; let f = 5; let g = 6; let h = 7
+let i = 8; let j = 9; let k = 10; let l = 11
+let m = 12; let n = 13; let o = 14; let p = 15
+
+fn read () = p + a + o + b + n + c + m + d + l + e + k + f + j + g + i + h
+
+fn loop remaining total =
+  if remaining == 0 then total
+  else loop (remaining - 1) (total + read ())
+
+if loop 100000 0 == 12000000 then ()
+else raise (error "Benchmark" "capture lookup result")

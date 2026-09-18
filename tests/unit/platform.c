@@ -5,10 +5,10 @@
  * Verify byte preservation, transactional state, inherited signal masks, and
  * descriptor readiness against actual POSIX services.
  */
-#include "../helpers/fds.h"
+#include "../support/check.h"
+#include "../support/fds.h"
 #include "diagnostic.h"
 #include "platform/posix.h"
-#include "test.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -24,7 +24,7 @@ static void readiness() {
   CHECK(getrlimit(RLIMIT_NOFILE, &limit) == 0);
   const int minimums[] = {3, FD_SETSIZE - 1, FD_SETSIZE, FD_SETSIZE + 17,
                           2 * FD_SETSIZE + 1};
-  CHECK(!rill_platform_input_ready(-1));
+  CHECK(rill_platform_ready(-1, false) == -1 && errno == EBADF);
   for (size_t i = 0; i < sizeof(minimums) / sizeof(*minimums); ++i) {
     if ((rlim_t)minimums[i] >= limit.rlim_cur)
       continue;
@@ -32,19 +32,24 @@ static void readiness() {
     CHECK(rill_platform_pipe(pipe, true));
     int input = fcntl(pipe[0], F_DUPFD_CLOEXEC, minimums[i]);
     CHECK(input >= minimums[i]);
+    int output = fcntl(pipe[1], F_DUPFD_CLOEXEC, minimums[i]);
+    CHECK(output >= minimums[i]);
+    CHECK(rill_platform_ready(output, true) == 1);
+    CHECK(close(output) == 0);
+    CHECK(rill_platform_ready(output, true) == -1 && errno == EBADF);
     int flags = fcntl(input, F_GETFL);
-    CHECK(flags >= 0 && !rill_platform_input_ready(input));
+    CHECK(flags >= 0 && rill_platform_ready(input, false) == 0);
     CHECK(write(pipe[1], "x", 1) == 1);
-    CHECK(rill_platform_input_ready(input));
+    CHECK(rill_platform_ready(input, false) == 1);
     char byte = {};
     CHECK(read(input, &byte, 1) == 1 && byte == 'x');
-    CHECK(!rill_platform_input_ready(input));
+    CHECK(rill_platform_ready(input, false) == 0);
     rill_platform_close(&pipe[1]);
-    CHECK(rill_platform_input_ready(input));
+    CHECK(rill_platform_ready(input, false) == 1);
     CHECK(read(input, &byte, 1) == 0);
     CHECK(fcntl(input, F_GETFL) == flags);
     CHECK(close(input) == 0);
-    CHECK(!rill_platform_input_ready(input));
+    CHECK(rill_platform_ready(input, false) == -1 && errno == EBADF);
     rill_platform_close(&pipe[0]);
   }
 }
@@ -141,11 +146,11 @@ int main() {
     else
       CHECK(current.sa_handler == saved[i].sa_handler);
   }
-  CHECK(!rill_platform_input_ready(platform.signals[0]));
+  CHECK(rill_platform_ready(platform.signals[0], false) == 0);
   CHECK(raise(SIGCHLD) == 0);
-  CHECK(rill_platform_input_ready(platform.signals[0]));
+  CHECK(rill_platform_ready(platform.signals[0], false) == 1);
   CHECK(rill_platform_signals(&platform) == 0);
-  CHECK(!rill_platform_input_ready(platform.signals[0]));
+  CHECK(rill_platform_ready(platform.signals[0], false) == 0);
   // A full pipe must preserve control flags and the interrupted errno.
   const char bytes[1024] = {};
   while (write(platform.signals[1], bytes, sizeof(bytes)) > 0) {
@@ -159,7 +164,7 @@ int main() {
   CHECK(events ==
         (RILL_SIG_INT | RILL_SIG_TERM | RILL_SIG_HUP | RILL_SIG_STOP));
   CHECK(rill_platform_signals(&platform) == 0);
-  CHECK(!rill_platform_input_ready(platform.signals[0]));
+  CHECK(rill_platform_ready(platform.signals[0], false) == 0);
   rill_platform_clear(&platform);
   CHECK(sigprocmask(SIG_SETMASK, nullptr, &current_mask) == 0);
   CHECK(sigismember(&current_mask, SIGINT) == 1);

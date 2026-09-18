@@ -1,1 +1,10 @@
-let make=fn(x)=>fn(y)=>[x,y,'same','same']; make(1)(2)
+fn apply f x = f x
+let identity = { x => x }
+let record = {
+  identity,
+  run: { () =>
+    let x = 1
+    x
+  }
+}
+[apply identity 42, record.run ()]

@@ -6,11 +6,11 @@
  * route stream work through its cooperative adapter. Pending operations resume
  * through the session; display never evaluates a function or launches a plan.
  */
-#include "library.h"
 #include "diagnostic.h"
 #include "exec/exec.h"
 #include "fs.h"
 #include "json.h"
+#include "native.h"
 #include "platform/posix.h"
 #include "pure.h"
 #include "runtime/runtime.h"
@@ -29,6 +29,7 @@
 #include <unistd.h>
 enum {
   N_RUN,
+  N_EXECUTE,
   N_START,
   N_WAIT,
   N_FG,
@@ -56,6 +57,7 @@ static const RillNative natives[] = {{"__data", N_DATA},
                                      {"raise", N_RAISE},
                                      {"__process", N_PROCESS},
                                      {"run", N_RUN},
+                                     {"execute", N_EXECUTE},
                                      {"start", N_START},
                                      {"wait", N_WAIT},
                                      {"fg", N_FG},
@@ -171,10 +173,10 @@ static bool process_value(RillLibrary *l, RillValue request) {
     if (!os_scalar(a, &executable) || !executable.size)
       return finish(
           l, (RillValue){},
-          (RillDiagnostic){
-              .kind = RILL_TYPE,
-              .has_argument = true,
-              .message = "executable requires nonempty NUL-free scalar bytes"});
+          (RillDiagnostic){.kind = RILL_TYPE,
+                           .has_argument = true,
+                           .message = "command name must be a nonempty String, "
+                                      "Bytes, or Path without NUL bytes"});
     if (!sequence(b))
       return fail(l, RILL_TYPE, "command arguments require List");
     if (rill_runtime_count(b) >= RILL_EXEC_MAX_ARGUMENTS)
@@ -190,13 +192,13 @@ static bool process_value(RillLibrary *l, RillValue request) {
       items[i] = rill_runtime_at(b, i - 1);
       RillBytes bytes = {};
       if (!os_scalar(items[i], &bytes)) {
-        return finish(
-            l, (RillValue){},
-            (RillDiagnostic){
-                .kind = RILL_TYPE,
-                .has_argument = true,
-                .argument = i,
-                .message = "command arguments require NUL-free scalar bytes"});
+        return finish(l, (RillValue){},
+                      (RillDiagnostic){.kind = RILL_TYPE,
+                                       .has_argument = true,
+                                       .argument = i,
+                                       .message =
+                                           "command arguments must be String, "
+                                           "Bytes, or Path without NUL bytes"});
       }
     }
     RillRoot root = {};
@@ -205,7 +207,7 @@ static bool process_value(RillLibrary *l, RillValue request) {
     rill_runtime_unroot(h, &root);
   } else if (!strcmp(op, "pipe")) {
     if (a.kind != RILL_V_PLAN || b.kind != RILL_V_PLAN)
-      return fail(l, RILL_TYPE, "pipe requires plans");
+      return fail(l, RILL_TYPE, "pipe requires two JobPlans");
     size_t n = {};
     if (ckd_add(&n, a.as.object->count, b.as.object->count) ||
         n > RILL_EXEC_MAX_STAGES)
@@ -229,21 +231,25 @@ static bool process_value(RillLibrary *l, RillValue request) {
       RillBytes path = {};
       if (!os_scalar(a, &path)) {
         rill_runtime_unroot(h, &root);
-        return fail(l, RILL_TYPE, "cwd requires NUL-free path");
+        return fail(l, RILL_TYPE,
+                    "working directory must be a Path, String, or Bytes "
+                    "without NUL bytes");
       }
       char *absolute = realpath(path.data, nullptr);
       if (!absolute) {
         rill_runtime_unroot(h, &root);
         return finish(l, (RillValue){},
-                      (RillDiagnostic){.kind = RILL_IO,
-                                       .code = errno,
-                                       .message = "cannot resolve plan cwd"});
+                      (RillDiagnostic){
+                          .kind = RILL_IO,
+                          .code = errno,
+                          .message = "cannot resolve job working directory"});
       }
       struct stat st = {};
       if (stat(absolute, &st) < 0 || !S_ISDIR(st.st_mode)) {
         free(absolute);
         rill_runtime_unroot(h, &root);
-        return fail(l, RILL_IO, "plan cwd must be an existing directory");
+        return fail(l, RILL_IO,
+                    "job working directory must exist and be a directory");
       }
       override = rill_runtime_object(h, RILL_V_PATH, nullptr, 0, absolute,
                                      strlen(absolute), 0);
@@ -273,7 +279,7 @@ static bool process_value(RillLibrary *l, RillValue request) {
         if (code.kind != RILL_V_INT || code.as.integer < 0 ||
             code.as.integer > 255) {
           rill_runtime_unroot(h, &root);
-          return fail(l, RILL_TYPE, "exit code outside 0 through 255");
+          return fail(l, RILL_TYPE, "exit code must be an Int from 0 to 255");
         }
       }
     }
@@ -450,6 +456,18 @@ RillJob *rill_library_launch(RillLibrary *l, RillValue plan, RillExecSpec mode,
     used += stage->count;
   }
   RillJob *job = nullptr;
+  if (valid && l->input_claimed && !mode.background && !mode.capture &&
+      !mode.streaming) {
+    bool redirected = false;
+    for (size_t i = 0; i < stages[0].redirect_count; ++i)
+      redirected |= stages[0].redirects[i].target == STDIN_FILENO;
+    if (!redirected) {
+      valid = false;
+      *error = (RillDiagnostic){.kind = RILL_STREAM_CONSUMED,
+                                .message = "stdin is owned by a Stream; close "
+                                           "it or redirect the command input"};
+    }
+  }
   if (valid) {
     RillExecSpec spec = mode;
     spec.stages = stages;
@@ -625,11 +643,12 @@ static bool check_report(RillLibrary *l, RillValue value) {
             : status.as.integer ? (int)status.as.integer
                                 : 1;
   }
-  return finish(
-      l, (RillValue){},
-      (RillDiagnostic){.kind = RILL_PROCESS,
-                       .code = code,
-                       .message = "unacceptable external stage termination"});
+  return finish(l, (RillValue){},
+                (RillDiagnostic){.kind = RILL_PROCESS,
+                                 .code = code,
+                                 .message =
+                                     "pipeline stage exited or was signaled "
+                                     "outside its accepted policy"});
 }
 bool rill_library_progress(RillLibrary *l, RillNativePending *p) {
   RillJob *j = p->job;
@@ -649,7 +668,8 @@ bool rill_library_progress(RillLibrary *l, RillNativePending *p) {
   p->job = nullptr;
   if (state == RILL_JOB_STOPPED)
     return fail(l, RILL_PROCESS,
-                "job stopped; use jobs() and fg(handle) or bg(handle)");
+                "job stopped; use 'jobs ()' to find its handle, then 'fg "
+                "handle' or 'bg handle' to resume");
   rill_exec_acknowledge(j);
   if (d.kind)
     return finish(l, (RillValue){}, d);
@@ -673,7 +693,7 @@ bool rill_library_progress(RillLibrary *l, RillNativePending *p) {
                ? fail(l, RILL_MEMORY, "capture allocation failed")
                : finish(l, result, d);
   }
-  if (p->operation == N_WAIT) {
+  if (p->operation == N_WAIT || p->operation == N_EXECUTE) {
     RillValue v = report(l, j);
     if (v.kind == RILL_V_UNIT)
       return fail(l, RILL_MEMORY, "report allocation failed");
@@ -777,6 +797,7 @@ bool rill_library_call(RillLibrary *l, RillNativePending *p,
   case N_PROCESS:
     return process_value(l, v);
   case N_RUN:
+  case N_EXECUTE:
   case N_START:
     if (v.kind != RILL_V_PLAN)
       return fail(l, RILL_TYPE, "expected JobPlan");
@@ -818,7 +839,7 @@ bool rill_library_call(RillLibrary *l, RillNativePending *p,
   }
   case N_JOBS: {
     if (v.kind != RILL_V_UNIT)
-      return fail(l, RILL_TYPE, "jobs expects Unit");
+      return fail(l, RILL_TYPE, "jobs takes no arguments; call 'jobs ()'");
     RillValue contexts =
         l->context_jobs ? l->context_jobs(l->context) : (RillValue){};
     if (l->context_jobs && contexts.kind == RILL_V_UNIT)
@@ -882,7 +903,7 @@ bool rill_library_call(RillLibrary *l, RillNativePending *p,
   }
   case N_PWD: {
     if (v.kind != RILL_V_UNIT)
-      return fail(l, RILL_TYPE, "pwd expects Unit");
+      return fail(l, RILL_TYPE, "pwd takes no arguments; call 'pwd ()'");
     char *path = getcwd(nullptr, 0);
     if (!path)
       return finish(
@@ -900,13 +921,14 @@ bool rill_library_call(RillLibrary *l, RillNativePending *p,
   case N_EXIT:
   case N_EXIT_FORCE:
     if (v.kind != RILL_V_INT || v.as.integer < 0 || v.as.integer > 255)
-      return fail(l, RILL_TYPE, "exit expects an integer from 0 through 255");
+      return fail(l, RILL_TYPE, "exit requires an Int from 0 to 255");
     if (event.native == N_EXIT && l->control &&
         l->control(l->context, RILL_CONTROL_EXIT, v))
       return true;
     if (event.native == N_EXIT && rill_exec_outstanding(l->exec, false))
-      return fail(l, RILL_PROCESS,
-                  "live jobs remain; wait, cancel, or exit_force");
+      return fail(
+          l, RILL_PROCESS,
+          "jobs are still active; use 'wait', 'cancel', or 'exit_force'");
     l->exit_requested = true;
     l->exit_code = (int)v.as.integer;
     return finish(l, (RillValue){}, d);
@@ -923,12 +945,12 @@ bool rill_library_call(RillLibrary *l, RillNativePending *p,
   case N_BYTES: {
     if (!sequence(v))
       return fail(l, RILL_TYPE,
-                  "bytes expects a List of integers from 0 through 255");
+                  "bytes requires a List of Int values from 0 to 255");
     [[gnu::cleanup(rill_text_clear)]] RillBuffer b = {};
     for (size_t i = 0; i < rill_runtime_count(v); ++i) {
       RillValue x = rill_runtime_at(v, i);
       if (x.kind != RILL_V_INT || x.as.integer < 0 || x.as.integer > 255) {
-        return fail(l, RILL_TYPE, "byte outside 0 through 255");
+        return fail(l, RILL_TYPE, "byte value must be an Int from 0 to 255");
       }
       unsigned char c = (unsigned char)x.as.integer;
       if (!rill_text_append(&b, &c, 1)) {
@@ -962,7 +984,11 @@ bool rill_library_display(RillValue v, RillBuffer *out) {
     return rill_text_append(out, v.as.object->values[0].as.object->bytes.data,
                             v.as.object->values[0].as.object->bytes.size);
   case RILL_V_SLICE:
-    return rill_text_format(out, "<List %zu>", rill_runtime_count(v));
+  case RILL_V_LIST: {
+    size_t count = rill_runtime_count(v);
+    return rill_text_format(out, "<List: %zu item%s>", count,
+                            count == 1 ? "" : "s");
+  }
   case RILL_V_CODE:
   case RILL_V_ENV:
   case RILL_V_BINDINGS:
@@ -983,12 +1009,14 @@ bool rill_library_display(RillValue v, RillBuffer *out) {
   case RILL_V_BYTES:
   case RILL_V_PATH:
     return rill_text_escape(out, v.as.object->bytes);
-  case RILL_V_RECORD:
-    return rill_text_format(out, "<Record %zu>", v.as.object->count / 2);
-  case RILL_V_LIST:
-    return rill_text_format(out, "<List %zu>", v.as.object->count);
+  case RILL_V_RECORD: {
+    size_t count = v.as.object->count / 2;
+    return rill_text_format(out, "<Record: %zu field%s>", count,
+                            count == 1 ? "" : "s");
+  }
   case RILL_V_PLAN:
-    return rill_text_format(out, "<JobPlan %zu stages>", v.as.object->count);
+    return rill_text_format(out, "<JobPlan: %zu stage%s>", v.as.object->count,
+                            v.as.object->count == 1 ? "" : "s");
   case RILL_V_STAGE:
   case RILL_V_REDIRECT:
     return rill_text_append(out, "<internal>", 10);

@@ -1,5 +1,10 @@
-fn pairs(n, items) => if n == 0 then items else pairs(n - 1, concat(items, [[text(n), n]]))
-let original = extend(record(pairs(1024, [])), {target: 0})
-fn loop(n, value) => if n == 0 then value else loop(n - 1, value with {target: n})
-let result = loop(8192, original)
-if result.target == 1 and original.target == 0 and result["1024"] == 1024 then () else raise(error("Benchmark", "record update result"))
+let pairs = range 1 1025 |> map { x => [text x, x] } |> collect
+let original = extend (record pairs) {target: 0}
+
+fn loop n value =
+  if n == 0 then value else loop (n - 1) (value with {target: n})
+
+let result = loop 8192 original
+
+if result.target == 1 and original.target == 0 and result["1024"] == 1024 then ()
+else raise (error "Benchmark" "record update result")

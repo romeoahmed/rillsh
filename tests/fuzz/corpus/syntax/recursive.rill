@@ -1,0 +1,5 @@
+let root = rec { loop n acc =>
+  if n == 0 then acc else loop (n - 1) (acc + 1)
+}
+let saved = root 10
+export {saved, recurse: root}

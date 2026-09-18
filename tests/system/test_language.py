@@ -2,7 +2,6 @@
 
 import os
 import subprocess
-import unittest
 
 from support import ShellCase
 
@@ -21,52 +20,111 @@ class LanguageTests(ShellCase):
         self.assertIn(kind, result.stderr)
         return result
 
-    def check(self, expression: str) -> None:
-        self.run_source(f"exit(if {expression} then 0 else 1)")
-
     def test_application_and_pipe_effect_order(self) -> None:
         result = self.run_source("""
-fn mark(value) => do { ^./child write $value; value }
-fn f(first) => do { mark("apply"); fn(second) => second }
-f(mark("a"),mark("b"))
-mark("left") |> do { mark("right"); fn(x) => x }
+fn mark value = do { ^./child write $value; value }
+fn f first = do { mark "apply"; { second => second } }
+f (mark "a") (mark "b")
+mark "left" |> do { mark "right"; { x => x } }
 """)
         self.assertEqual(result, b"aapplybleftright")
 
+    def test_curried_stages_and_parameter_failure(self) -> None:
+        result = self.run_source("""
+let staged = { first =>
+  ^./child write first
+  { second => ^./child write second }
+}
+let delayed = { first second => ^./child write body }
+let ready = staged 1
+let waiting = delayed 1
+^./child write between
+ready 2
+waiting 2
+""")
+        self.assertEqual(result, b"firstbetweensecondbody")
+        result = self.reject(
+            "{ [x] second => second } [] (do { ^./child write unexpected; 0 })",
+            b"MatchError",
+        )
+        self.assertEqual(result.stdout, b"")
+
+    def test_static_pattern_errors_precede_all_effects(self) -> None:
+        cases = (
+            "let [x, x] = do { ^./child write subject; [1, 2] }",
+            "if false then { [x, x] => x } else 7",
+            "match [1, 2] of { [x, x] => x }",
+            "let {key: x, other: x} = {key: 1, other: 2}",
+            "let [..tail, head] = []",
+            "let {key, key} = {key: 1}",
+        )
+        for source in cases:
+            with self.subTest(source=source):
+                result = self.reject(
+                    "^./child write before; " + source, b"SyntaxError", status=2
+                )
+                self.assertEqual(result.stdout, b"")
+
+    def test_closure_blocks_and_command_substitutions(self) -> None:
+        result = self.run_source("""
+let handlers = [
+  { x =>
+    let suffix = "!"
+    ^./child write $(x + suffix)
+    {x, suffix}
+  }
+]
+let value = handlers[0] "item"
+^./child write $(
+  text
+    (length {x: value.x, suffix: value.suffix})
+)
+""")
+        self.assertEqual(result, b"item!2")
+
     def test_raise_preserves_error_payload(self) -> None:
-        self.check(
-            'match attempt(fn()=>raise(error("Example","message"))) { Result.Err {error: Error {kind,message,..}} => kind=="Example" and message=="message", _=>false }'
+        self.assert_rill(
+            """
+match attempt { () => raise (error "Example" "message") } of {
+  Result.Err {error: Error {kind, message, ..}} =>
+    kind == "Example" and message == "message",
+  _ => false
+}
+"""
         )
 
     def test_match_subject_guards_and_scope(self) -> None:
         result = self.run_source("""
-fn subject() => do { ^./child write s; [1,2] }
-fn guard(value) => do { ^./child write g; false }
-let outer=9
-let answer=match subject() {
-  [outer,other] if guard(outer) => 0,
-  [first,..rest] => first+rest[0]
+fn subject () = do { ^./child write s; [1, 2] }
+fn guard value = do { ^./child write g; false }
+let outer = 9
+let answer = match subject () of {
+  [outer, other] if guard outer => 0,
+  [first, ..rest] => first + rest[0]
 }
-exit(if answer==3 and outer==9 then 0 else 1)
+exit (if answer == 3 and outer == 9 then 0 else 1)
 """)
         self.assertEqual(result, b"sg")
-        self.reject("match 1 { leaked if false=>0, _=>leaked }", b"TypeError")
-        self.reject("match 1 { x if 1+true=>0, _=>0 }", b"TypeError")
+        self.reject("match 1 of { leaked if false => 0, _ => leaked }", b"TypeError")
+        self.reject("match 1 of { x if 1 + true => 0, _ => 0 }", b"TypeError")
 
     def test_sort_callback_runs_once_in_source_order(self) -> None:
         result = self.run_source("""
-fn key(value) => do { ^./child write $(text(value)); value }
-exit(if sort_by(key,[3,1,2])==[1,2,3] then 0 else 1)
+fn key value = do { ^./child write $(text value); value }
+exit (if sort_by key [3, 1, 2] == [1, 2, 3] then 0 else 1)
 """)
         self.assertEqual(result, b"312")
         result = self.reject(
-            "sort_by_with({max_items:0},fn(x)=>do { ^./child write unexpected; x },[1])",
+            "sort_by_with {max_items: 0} { x => ^./child write unexpected; x } [1]",
             b"LimitExceeded",
         )
         self.assertEqual(result.stdout, b"")
         large_key = "k" * 2048
         result = self.reject(
-            f'fn key(x)=>do {{ ^./child write $(text(x)); "{large_key}" }}; sort_by_with({{max_bytes:1024}},key,[1,2])',
+            f"""
+fn key x = do {{ ^./child write $(text x); "{large_key}" }}
+sort_by_with {{max_bytes: 1024}} key [1, 2]
+""",
             b"LimitExceeded",
         )
         self.assertEqual(result.stdout, b"1")
@@ -76,8 +134,9 @@ exit(if sort_by(key,[3,1,2])==[1,2,3] then 0 else 1)
         module.write_text(
             """
 ^./child write "init"
-export struct Point {x,y}
-export fn make(x)=>Point({x:x,y:2})
+struct Point {x, y}
+fn make x = Point {x: x, y: 2}
+export {Point, make}
 let private = 7
 """,
             encoding="utf-8",
@@ -88,31 +147,52 @@ let private = 7
 import "./types.rill" as a
 import "./alias.rill" as b
 import "./hardlink.rill" as c
-let value = a.make(3)
-exit(match value { c.Point {x,y} => if x==3 and y==2 and b.make(3)==value then 0 else 1, _=>1 })
+let value = a.make 3
+exit (match value of {
+  c.Point {x, y} => if x == 3 and y == 2 and b.make 3 == value then 0 else 1,
+  _ => 1
+})
 """)
         self.assertEqual(result, b"init")
         self.reject('import "./types.rill" as a; a.private', b"MissingField")
         (self.work / "other.rill").write_text(
-            "export struct Point {x,y}\n", encoding="utf-8"
+            """struct Point {x, y}
+export {Point}
+""",
+            encoding="utf-8",
         )
         self.run_source(
-            'import "./types.rill" as a; import "./other.rill" as b; exit(if a.make(1)==b.Point({x:1,y:2}) then 1 else 0)'
+            """
+import "./types.rill" as a
+import "./other.rill" as b
+exit (if a.make 1 == b.Point {x: 1, y: 2} then 1 else 0)
+"""
         )
         (self.work / "cycle.rill").write_text(
             'import "./cycle.rill" as self\n', encoding="utf-8"
         )
         self.reject('import "./cycle.rill" as cycle', b"TypeError")
         self.run_source(
-            'import "std:seq" as seq; exit(if seq.map(add(1),[2])==[3] then 0 else 1)'
+            """
+import "std:seq" as seq
+exit (if seq.map (add 1) [2] == [3] then 0 else 1)
+"""
         )
 
     def test_import_base_survives_cd(self) -> None:
         directory = self.work / "module"
         directory.mkdir()
-        (directory / "leaf.rill").write_text("export let value=7\n", encoding="utf-8")
+        (directory / "leaf.rill").write_text(
+            """let value = 7
+export {value}
+""",
+            encoding="utf-8",
+        )
         (directory / "main.rill").write_text(
-            'cd(path("/")); import "./leaf.rill" as leaf; exit(leaf.value-7)\n',
+            """cd (path "/")
+import "./leaf.rill" as leaf
+exit (leaf.value - 7)
+""",
             encoding="utf-8",
         )
         self.execute((self.shell, directory / "main.rill"))
@@ -120,7 +200,7 @@ exit(match value { c.Point {x,y} => if x==3 and y==2 and b.make(3)==value then 0
     def test_module_failures(self) -> None:
         (self.work / "invalid.rill").write_bytes(b"\xff")
         (self.work / "broken.rill").write_text(
-            "^./child mark forbidden; let x=", encoding="utf-8"
+            "^./child mark forbidden; let x =", encoding="utf-8"
         )
         os.mkfifo(self.work / "fifo.rill")
         (self.work / "directory.rill").mkdir()
@@ -142,77 +222,103 @@ exit(match value { c.Point {x,y} => if x==3 and y==2 and b.make(3)==value then 0
 
     def test_plans_validate_before_launch_and_reuse(self) -> None:
         result = self.run_source(
-            'let p=job { ^./child write ...$(["a b"]) }; run(p); run(p)'
+            'let p = job { ^./child write ...$(["a b"]) }; run p; run p'
         )
         self.assertEqual(result, b"a ba b")
         result = self.run_source(
-            'fn argument()=>do { ^./child write evaluated; "captured" }; let p=job { ^./child write $(argument()) }; run(p); run(p)'
+            """
+fn argument () = do { ^./child write evaluated; "captured" }
+let p = job { ^./child write $(argument ()) }
+run p
+run p
+"""
         )
         self.assertEqual(result, b"evaluatedcapturedcaptured")
-        self.run_source("let plan=job { ^./child write value > unopened }")
+        self.run_source("let plan = job { ^./child write value > unopened }")
         self.assertFalse((self.work / "unopened").exists())
         self.run_source(
-            "let p=job { ^./child exit 0 }; let a=start(p); let b=start(p); let first=wait(a); let second=wait(b); exit(if first.id!=second.id then 0 else 1)"
+            """
+let p = job { ^./child exit 0 }
+let a = start p
+let b = start p
+let first = wait a
+let second = wait b
+exit (if first.id != second.id then 0 else 1)
+"""
         )
-        result = self.run_source('let words=["", "a b"]; ^./child args ...$words')
+        result = self.run_source('let words = ["", "a b"]; ^./child args ...$words')
         self.assertEqual(result, b"0:\n3:a b\n")
         self.reject("job { ^./child write $(1) > untouched }", b"TypeError")
         self.assertFalse((self.work / "untouched").exists())
-        invalid = self.reject('command("./child",["ok",bytes([0])])', b"TypeError")
+        invalid = self.reject('command "./child" ["ok", bytes [0]]', b"TypeError")
         self.assertIn(b"argument 2", invalid.stderr)
         result = self.run_source(
-            'run(pipe(command("./child",["args", "hello"]),command("./child",["echo"])))'
+            'run (pipe (command "./child" ["args", "hello"]) (command "./child" ["echo"]))'
         )
         self.assertEqual(result, b"5:hello\n")
 
     def test_environment_overrides_and_launch_snapshots(self) -> None:
         result = self.run_source("""
-let plan=job { ^./child env RILL_VALUE }
-set_env("RILL_VALUE","first")
-let first=start(plan)
-set_env("RILL_VALUE","second")
-check(wait(first))
-run(plan)
-run(with_env({RILL_VALUE:"override"},plan))
-unset_env("RILL_VALUE")
-exit(match get_env("RILL_VALUE") { Option.None=>0, _=>1 })
+let plan = job { ^./child env RILL_VALUE }
+set_env "RILL_VALUE" "first"
+let first = start plan
+set_env "RILL_VALUE" "second"
+check (wait first)
+run plan
+run (with_env {RILL_VALUE: "override"} plan)
+unset_env "RILL_VALUE"
+exit (match get_env "RILL_VALUE" of { Option.None => 0, _ => 1 })
 """)
         self.assertEqual(result, b"firstsecondoverride")
         result = self.run_source("""
-let base=with_env({KEEP:'old',KEY:'first'},
-  pipe(job { ^./child env KEEP > kept },job { ^./child env KEY }))
-let changed=with_env({KEY:'value',NEW:'added'},base)
-run(changed)
-run(base)
+let base = (with_env {KEEP: 'old', KEY: 'first'}
+  (pipe job { ^./child env KEEP > kept } job { ^./child env KEY }))
+let changed = with_env {KEY: 'value', NEW: 'added'} base
+run changed
+run base
 """)
         self.assertEqual(result, b"valuefirst")
         self.assertEqual((self.work / "kept").read_bytes(), b"old")
         directory = self.work / "dir"
         directory.mkdir()
         self.run_source(
-            'let p=with_cwd(path("dir"),job { ^../child args cwd > written }); run(p)'
+            'let p = with_cwd (path "dir") job { ^../child args cwd > written }; run p'
         )
         self.assertEqual((directory / "written").read_bytes(), b"3:cwd\n")
 
     def test_reports_and_stage_policies(self) -> None:
         self.run_source(
-            "let p=accept_exit([7],job { ^./child exit 7 }); let r=wait(start(p)); check(r); exit(match r.stages[0].termination { Termination.Exited {code}=>code-7, _=>1 })"
+            """
+let p = accept_exit [7] job { ^./child exit 7 }
+let r = wait (start p)
+check r
+exit (match r.stages[0].termination of {
+  Termination.Exited {code} => code - 7,
+  _ => 1
+})
+"""
         )
-        self.reject("run(accept_exit([1],job { ^./child exit 0 }))", b"ProcessError")
+        self.reject("run (accept_exit [1] job { ^./child exit 0 })", b"ProcessError")
         self.run_source(
-            "let p=pipe(accept_exit([7],job { ^./child exit 7 }), job { ^./child echo }); run(p)"
+            """
+let p = pipe (accept_exit [7] job { ^./child exit 7 }) job { ^./child echo }
+run p
+"""
         )
         self.run_source(
-            "let r=wait(start(job { ^./child exit 9 })); check(r)", status=9
+            "let r = wait (start job { ^./child exit 9 }); check r", status=9
         )
 
     def test_error_identity_and_presentation(self) -> None:
         self.reject(
-            'struct Forged {kind,message,span,notes}; raise(Forged({kind:"x",message:"x",span:null,notes:[]}))',
+            """
+struct Forged {kind, message, span, notes}
+raise (Forged {kind: "x", message: "x", span: null, notes: []})
+""",
             b"TypeError",
         )
         result = self.reject(
-            'raise(error("Example","line\\n\\u{1b}[31m\\u{0}tail"))', b"Example"
+            'raise (error "Example" "line\\n\\u{1b}[31m\\u{0}tail")', b"Example"
         )
         self.assertNotIn(b"\x1b", result.stderr)
         self.assertIn(b"line\\x0a\\x1b[31m\\x00tail", result.stderr)
@@ -221,11 +327,83 @@ run(base)
     def test_script_arguments(self) -> None:
         script = self.work / "args.rill"
         script.write_text(
-            "exit(if args()==[bytes([]),bytes([97]),bytes([98,32,99]),bytes([255])] then 0 else 1)\n",
+            """exit (if args () == [bytes [], bytes [97], bytes [98, 32, 99], bytes [255]]
+  then 0 else 1)
+""",
             encoding="utf-8",
         )
         self.execute((self.shell, script, "", "a", "b c", os.fsdecode(b"\xff")))
 
+    def test_command_dispatch_ignores_lexical_run(self) -> None:
+        result = self.run_source("""
+let run = { _ => print "explicit" }
+^./child write external
+run job { ^./child write forbidden }
+let invoke = do {
+  let run = chunks (bytes [])
+  let invoke = { () => ^./child write nested }
+  close run
+  invoke
+}
+invoke ()
+""")
+        self.assertEqual(result, b"externalexplicit\nnested")
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_export_table_and_standard_module_identity(self) -> None:
+        (self.work / "surface.rill").write_text(
+            """
+import "std:core" as core
+let hidden = 8
+fn make x = core.some (x + hidden)
+export {make, Option: core.Option, alias: make}
+""",
+            encoding="utf-8",
+        )
+        self.run_source("""
+import "./surface.rill" as surface
+import "std:option" as option
+import "std:result" as result
+exit (if surface.make 2 == some 10 and surface.alias 1 == some 9 and
+  option.map (add 1) (some 2) == some 3 and
+  result.map (add 1) (ok 2) == ok 3 then 0 else 1)
+""")
+        self.reject(
+            'import "./surface.rill" as surface; surface.hidden', b"MissingField"
+        )
+        for table in ("", "export {}"):
+            with self.subTest(table=table):
+                (self.work / "empty.rill").write_text(
+                    f"let hidden = 7\n{table}\n", encoding="utf-8"
+                )
+                self.run_source('import "./empty.rill" as empty; exit (length empty)')
+        for name in ("__pure", "core", "seq", "process"):
+            with self.subTest(name=name):
+                self.reject(name, b"TypeError")
+        for source in (
+            "export let x = 1",
+            "export {a}; export {b}",
+            "export {x: 1 + 2}",
+            "export {x, x}",
+        ):
+            with self.subTest(source=source):
+                result = self.reject(
+                    'print "forbidden"; ' + source, b"SyntaxError", status=2
+                )
+                self.assertEqual(result.stdout, b"")
+
+    def test_execute_preserves_status_and_inherited_io(self) -> None:
+        result = self.run_source("""
+let report = execute job { ^./child write "direct" | ^cat }
+check report
+let failed = execute job { ^./child exit 7 }
+exit (match failed of {
+  JobReport {
+    completion: Completion.Finished,
+    stages: [{termination: Termination.Exited {code: 7}, ..}],
+    ..
+  } => 0,
+  _ => 1
+})
+""")
+        self.assertEqual(result, b"direct")
+        self.reject("execute job { ^./missing-program }", b"LaunchError")

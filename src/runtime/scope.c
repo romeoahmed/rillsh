@@ -17,6 +17,10 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+
+// Capture preparation and lookup must agree on when names are sorted.
+static constexpr size_t SORTED_SCOPE_MIN = 8;
+
 static bool same(RillBytes a, RillBytes b) {
   return a.size == b.size && (!a.size || !memcmp(a.data, b.data, a.size));
 }
@@ -41,7 +45,7 @@ bool rill_eval_lookup_env(RillValue env, const char *name, RillValue *out) {
   size_t first = env.kind == RILL_V_CLOSURE ? 1 : 0;
   const char *const *names = first ? o->captures->names : o->names;
   size_t count = o->count - first;
-  if (count < 8) {
+  if (count < SORTED_SCOPE_MIN) {
     for (size_t i = 0; i < count; ++i)
       if (!strcmp(names[i], name)) {
         *out = o->values[first + i];
@@ -81,6 +85,21 @@ bool rill_eval_lookup(RillEval *e, RillValue env, const char *name,
     }
   return false;
 }
+bool rill_eval_reference(RillEval *e, RillValue env, const RillNode *node,
+                         RillValue *out) {
+  if (!node->captured)
+    return rill_eval_lookup(e, env, node->text.data, out);
+  // Exact captures terminate the local chain. Preparation proved that no
+  // intervening binding shadows this reference; no name comparison is needed.
+  while (env.kind == RILL_V_ENV)
+    env = env.as.object->values[0];
+  assert(env.kind == RILL_V_CLOSURE);
+  assert(node->capture < env.as.object->count);
+  *out = env.as.object->values[node->capture];
+  if (out->kind == RILL_V_CELL)
+    *out = out->as.object->values[0];
+  return true;
+}
 RillValue rill_eval_scope(RillEval *e, RillValue parent) {
   return rill_eval_object(e, RILL_V_ENV, &parent, 1, nullptr, 0);
 }
@@ -108,36 +127,41 @@ static int binding_order(const void *left, const void *right) {
   int order = strcmp(a->name, b->name);
   return order ? order : (a->order > b->order) - (a->order < b->order);
 }
-RillValue rill_eval_compact(RillEval *e, RillValue env) {
-  // An entry without bindings shares the existing immutable snapshot.
-  if (env.kind != RILL_V_ENV)
-    return env;
-  if (env.as.object->count == 1)
-    return env.as.object->values[0];
+RillValue rill_eval_compact(RillEval *e, RillValue env, RillValue base) {
+  // Pending entry bindings end at a scope boundary. Merge into the current
+  // global state, which may have changed while this entry was suspended.
+  RillValue chains[] = {env, base};
   size_t count = 0, bytes = {};
-  RillValue base = env;
-  for (; base.kind == RILL_V_ENV; base = base.as.object->values[0])
-    if (base.as.object->count == 2 && ckd_add(&count, count, 1))
-      goto overflow;
+  for (size_t i = 0; i < 2; ++i) {
+    RillValue cursor = chains[i];
+    for (; cursor.kind == RILL_V_ENV && cursor.as.object->count == 2;
+         cursor = cursor.as.object->values[0])
+      if (ckd_add(&count, count, 1))
+        goto overflow;
+    if (i == 1)
+      base = cursor;
+  }
+  if (!count)
+    return base;
   if ((base.kind == RILL_V_BINDINGS &&
        ckd_add(&count, count, base.as.object->count)) ||
       ckd_mul(&bytes, count, sizeof(Binding)))
     goto overflow;
-  assert(count && bytes); // The first environment node contains a binding.
   Binding *bindings = malloc(bytes);
   if (!bindings) {
     rill_eval_error(e, RILL_MEMORY, "allocation failed");
     return (RillValue){};
   }
   size_t used = 0;
-  for (RillValue p = env; p.kind == RILL_V_ENV; p = p.as.object->values[0]) {
-    RillObject *o = p.as.object;
-    if (o->count == 2) {
+  for (size_t i = 0; i < 2; ++i)
+    for (RillValue p = chains[i];
+         p.kind == RILL_V_ENV && p.as.object->count == 2;
+         p = p.as.object->values[0]) {
+      RillObject *o = p.as.object;
       assert(used < count);
       bindings[used] = (Binding){o->bytes.data, o->values[1], used};
       ++used;
     }
-  }
   // Only pending bindings need sorting; the committed snapshot is sorted.
   // Recency breaks equal-name ties without requiring stable qsort.
   qsort(bindings, used, sizeof(*bindings), binding_order);
@@ -175,8 +199,8 @@ RillValue rill_eval_compact(RillEval *e, RillValue env) {
     ok = rill_text_append(&names, ordered[i].name, strlen(ordered[i].name) + 1);
   RillValue out = {};
   if (ok) {
-    // Rooted env owns the borrowed names and values. After this allocation,
-    // finishing the snapshot cannot collect.
+    // The caller roots both chains and their borrowed names and values.
+    // After allocation, finishing the snapshot cannot collect.
     out = rill_eval_object(e, RILL_V_BINDINGS, nullptr, used, names.data,
                            names.size);
     if (!e->error.kind) {
@@ -199,8 +223,8 @@ overflow:
   return (RillValue){};
 }
 // Analysis retains only names; values are resolved for each closure instance.
-static bool free_names(RillEval *e, const RillNode *n, Bound *locals,
-                       RillCode *code, Captures *captures);
+static bool free_names(RillEval *e, RillNode *n, Bound *locals, RillCode *code,
+                       Captures *captures);
 bool rill_eval_pattern_names(RillEval *e, const RillNode *p, Bound **names) {
   if (!p)
     return true;
@@ -230,12 +254,15 @@ void rill_eval_names_free(Bound *b) {
   }
 }
 static bool capture_name(RillEval *e, const char *name, Bound *locals,
-                         Captures *captures) {
+                         Captures *captures, size_t *slot) {
   if (bound(locals, name))
     return true;
   for (size_t i = 0; i < captures->count; ++i)
-    if (!strcmp(captures->names[i], name))
+    if (!strcmp(captures->names[i], name)) {
+      if (slot)
+        *slot = i + 1;
       return true;
+    }
   if (captures->count == captures->capacity) {
     size_t capacity = {}, bytes = {};
     if (ckd_mul(&capacity, captures->capacity ? captures->capacity : 4, 2) ||
@@ -252,17 +279,18 @@ static bool capture_name(RillEval *e, const char *name, Bound *locals,
     captures->capacity = capacity;
   }
   captures->names[captures->count++] = name;
+  if (slot)
+    *slot = captures->count;
   return true;
 }
-static bool pattern_references(RillEval *e, const RillNode *pattern,
-                               Bound *locals, RillCode *code,
-                               Captures *captures) {
+static bool pattern_references(RillEval *e, RillNode *pattern, Bound *locals,
+                               RillCode *code, Captures *captures) {
   if (!pattern)
     return true;
   if (pattern->kind == RILL_NOMINAL &&
       !free_names(e, pattern->pattern, locals, code, captures))
     return false;
-  for (const RillNode *child = pattern->children; child; child = child->next)
+  for (RillNode *child = pattern->children; child; child = child->next)
     if (!pattern_references(e, child, locals, code, captures))
       return false;
   return true;
@@ -283,8 +311,8 @@ static bool declared_names(RillEval *e, const RillNode *node, Bound **names) {
   *names = name;
   return true;
 }
-static bool free_names(RillEval *e, const RillNode *n, Bound *locals,
-                       RillCode *code, Captures *captures) {
+static bool free_names(RillEval *e, RillNode *n, Bound *locals, RillCode *code,
+                       Captures *captures) {
   if (!n)
     return true;
   if (n->kind == RILL_FUNCTION && n != captures->node) {
@@ -297,14 +325,17 @@ static bool free_names(RillEval *e, const RillNode *n, Bound *locals,
     // A nested function contributes its free names, not its entire subtree.
     // Filtering against this scope preserves shadowing and exact captures.
     for (size_t i = 0; i < nested->count; ++i)
-      if (!capture_name(e, nested->names[i], locals, captures))
+      if (!capture_name(e, nested->names[i], locals, captures, nullptr))
         return false;
     return true;
   }
   if (n->pattern && !pattern_references(e, n->pattern, locals, code, captures))
     return false;
-  if (n->kind == RILL_NAME)
-    return capture_name(e, n->text.data, locals, captures);
+  if (n->kind == RILL_NAME) {
+    n->captured = !bound(locals, n->text.data);
+    return !n->captured ||
+           capture_name(e, n->text.data, nullptr, captures, &n->capture);
+  }
   if (n->kind == RILL_FUNCTION || n->kind == RILL_ARM) {
     Bound *names = nullptr;
     if (!rill_eval_pattern_names(e, n->pattern, &names)) {
@@ -318,7 +349,7 @@ static bool free_names(RillEval *e, const RillNode *n, Bound *locals,
       last->parent = locals;
     }
     bool ok = true;
-    for (const RillNode *c = n->children; c && ok; c = c->next)
+    for (RillNode *c = n->children; c && ok; c = c->next)
       ok = free_names(e, c, names ? names : locals, code, captures);
     if (last)
       last->parent = nullptr;
@@ -328,7 +359,7 @@ static bool free_names(RillEval *e, const RillNode *n, Bound *locals,
   if (n->kind == RILL_BLOCK) {
     Bound *names = nullptr;
     bool ok = true;
-    for (const RillNode *c = n->children; c && ok; c = c->next) {
+    for (RillNode *c = n->children; c && ok; c = c->next) {
       Bound *last = names;
       if (last) {
         while (last->parent)
@@ -358,7 +389,7 @@ static bool free_names(RillEval *e, const RillNode *n, Bound *locals,
     if (last)
       last->parent = locals;
     bool ok = true;
-    for (const RillNode *c = n->children; c && ok; c = c->next)
+    for (RillNode *c = n->children; c && ok; c = c->next)
       ok = free_names(e, c, names ? names : locals, code, captures);
     if (last)
       last->parent = nullptr;
@@ -369,7 +400,7 @@ static bool free_names(RillEval *e, const RillNode *n, Bound *locals,
     Bound self = {locals, n->text.data};
     return free_names(e, n->children, &self, code, captures);
   }
-  for (const RillNode *c = n->children; c; c = c->next)
+  for (RillNode *c = n->children; c; c = c->next)
     if (!free_names(e, c, locals, code, captures))
       return false;
   return true;
@@ -378,6 +409,20 @@ static int name_order(const void *left, const void *right) {
   const char *const *a = left, *const *b = right;
   return strcmp(*a, *b);
 }
+static void capture_slots(RillNode *node, const Captures *captures) {
+  if (!node || (node->kind == RILL_FUNCTION && node != captures->node))
+    return;
+  if (node->kind == RILL_NAME && node->captured) {
+    const char *name = node->text.data;
+    const char **slot = bsearch(&name, captures->names, captures->count,
+                                sizeof(*captures->names), name_order);
+    assert(slot);
+    node->capture = 1 + (size_t)(slot - captures->names);
+  }
+  capture_slots(node->pattern, captures);
+  for (RillNode *child = node->children; child; child = child->next)
+    capture_slots(child, captures);
+}
 void rill_eval_analyze(RillEval *e, RillCode *code, Captures *captures) {
   if (captures->prepared)
     return;
@@ -385,11 +430,13 @@ void rill_eval_analyze(RillEval *e, RillCode *code, Captures *captures) {
   RillValue origin = e->roots[ERROR_CODE];
   (void)free_names(e, captures->node, nullptr, code, captures);
   e->roots[ERROR_CODE] = origin;
-  // Small captures use a short linear search; wider layouts share sorted names
-  // across all instances. Resolution has no observable per-name effects.
-  if (captures->count >= 8)
+  // Small layouts keep the slots assigned during discovery. Wider layouts
+  // sort names for closure construction; repair only their lexical addresses.
+  if (!e->error.kind && captures->count >= SORTED_SCOPE_MIN) {
     qsort(captures->names, captures->count, sizeof(*captures->names),
           name_order);
+    capture_slots(captures->node, captures);
+  }
   captures->error = e->error.kind;
   captures->message = e->error.message;
   if (e->error.kind != RILL_MEMORY)
@@ -416,7 +463,7 @@ RillValue rill_eval_closure(RillEval *e, const RillNode *n, RillValue env,
     // Preserve recursive cells rather than capturing their current contents.
     if (!rill_eval_lookup_env(env, name, slot) &&
         !rill_eval_lookup(e, env, name, slot)) {
-      rill_eval_error(e, RILL_TYPE, "unresolved free binding");
+      rill_eval_error(e, RILL_TYPE, "closure refers to an undefined binding");
       break;
     }
   }
@@ -440,7 +487,7 @@ RillValue rill_eval_literal(const RillNode *n, RillValue code) {
 static bool descriptor(RillEval *e, const RillNode *p, RillValue env,
                        RillValue *out) {
   if (p->kind == RILL_NAME) {
-    if (!rill_eval_lookup(e, env, p->text.data, out)) {
+    if (!rill_eval_reference(e, env, p, out)) {
       rill_eval_error(e, RILL_TYPE, "unknown constructor");
       return false;
     }
@@ -455,8 +502,8 @@ static bool descriptor(RillEval *e, const RillNode *p, RillValue env,
   }
   return true;
 }
-static bool match(RillEval *e, const RillNode *p, RillValue v,
-                  RillValue lexical, RillValue code, RillValue *env) {
+bool rill_eval_bind_pattern(RillEval *e, const RillNode *p, RillValue v,
+                            RillValue lexical, RillValue code, RillValue *env) {
   if (!p)
     return false;
   if (p->kind == RILL_NAME) {
@@ -486,14 +533,16 @@ static bool match(RillEval *e, const RillNode *p, RillValue v,
                  (RillBytes){field->text.data, field->text.size}))
           known = true;
       if (!known) {
-        rill_eval_error(e, RILL_TYPE, "unknown nominal pattern field");
+        rill_eval_error(e, RILL_TYPE,
+                        "unknown field in struct or enum pattern");
         return false;
       }
     }
     if (v.kind != RILL_V_ADT ||
         v.as.object->values[0].as.object != desc.as.object)
       return false;
-    return match(e, p->children, v.as.object->values[1], lexical, code, env);
+    return rill_eval_bind_pattern(e, p->children, v.as.object->values[1],
+                                  lexical, code, env);
   }
   if (p->kind == RILL_LIST) {
     if (v.kind != RILL_V_LIST && v.kind != RILL_V_SLICE)
@@ -511,11 +560,13 @@ static bool match(RillEval *e, const RillNode *p, RillValue v,
         }
         RillRoot root = {};
         rill_runtime_root(&e->heap, &root, &tail, 1);
-        bool ok = match(e, c->children, tail, lexical, code, env);
+        bool ok =
+            rill_eval_bind_pattern(e, c->children, tail, lexical, code, env);
         rill_runtime_unroot(&e->heap, &root);
         return ok;
       }
-      if (i == n || !match(e, c, rill_runtime_at(v, i), lexical, code, env))
+      if (i == n || !rill_eval_bind_pattern(e, c, rill_runtime_at(v, i),
+                                            lexical, code, env))
         return false;
       ++i;
     }
@@ -552,14 +603,15 @@ static bool match(RillEval *e, const RillNode *p, RillValue v,
         rest.as.object->count = used;
         bool valid = rill_runtime_record_finish(rest);
         (void)valid; // A subset of a valid record still has unique String keys.
-        bool ok = match(e, c->children, rest, lexical, code, env);
+        bool ok =
+            rill_eval_bind_pattern(e, c->children, rest, lexical, code, env);
         rill_runtime_unroot(&e->heap, &root);
         return ok;
       }
       RillValue field = {};
       if (!rill_runtime_field(v, (RillBytes){c->text.data, c->text.size},
                               &field) ||
-          !match(e, c->children, field, lexical, code, env))
+          !rill_eval_bind_pattern(e, c->children, field, lexical, code, env))
         return false;
       ++fields;
     }
@@ -573,12 +625,4 @@ static bool match(RillEval *e, const RillNode *p, RillValue v,
   if (status)
     rill_eval_error(e, status, "pattern literal is not comparable");
   return equal;
-}
-bool rill_eval_bind_pattern(RillEval *e, const RillNode *p, RillValue value,
-                            RillValue lexical, RillValue code, RillValue *out) {
-  if (p && p->repeated) {
-    rill_eval_error(e, RILL_TYPE, "duplicate name in pattern");
-    return false;
-  }
-  return match(e, p, value, lexical, code, out);
 }

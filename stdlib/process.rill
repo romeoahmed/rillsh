@@ -1,31 +1,87 @@
-export let Termination = Termination
-export let Completion = Completion
-export let JobReport = JobReport
-export let command = command
-export let pipe = pipe
-export let with_cwd = with_cwd
-export let with_env = with_env
-export let accept_exit = accept_exit
-export let run = run
-export let start = start
-export let wait = wait
-export let check = check
-export let fg = fg
-export let bg = bg
-export let cancel = cancel
-export let jobs = jobs
-export let cd = cd
-export let pwd = pwd
-export let set_env = set_env
-export let get_env = get_env
-export let unset_env = unset_env
-export let args = args
-export let exit = exit
-export let exit_force = exit_force
-export let bytes = bytes
-export let path = path
-export let capture = capture
-export let capture_with = capture_with
-export let stream = stream
-export let through = through
-export let write_stdout = write_stdout
+import "std:core" as core
+let {Option, some, ..} = core
+
+enum Termination {Exited {code}, Signaled {signal}}
+
+enum Completion {Finished, Cutoff {reason}, Cancelled {reason}}
+
+struct JobReport {id, stages, completion, failure}
+
+fn command executable arguments = __process ["command", executable, arguments]
+
+fn pipe left right = __process ["pipe", left, right]
+
+fn with_cwd directory plan = __process ["with_cwd", directory, plan]
+
+fn with_env environment plan = __process ["with_env", environment, plan]
+
+fn accept_exit codes plan = __process ["accept_exit", codes, plan]
+
+fn set_env name value = __process ["set_env", name, value]
+
+fn get_env name = match __process ["get_env", name] of {
+  [value] => some value,
+  [] => Option.None
+}
+
+fn unset_env name = __process ["unset_env", name]
+
+fn args () = __process ["args"]
+
+fn capture_with options plan = __data ["capture", options, plan]
+
+fn stream plan = __stream ["stream", plan]
+
+fn through plan input = __stream ["through", plan, input]
+
+fn stdin () = __stream ["stdin"]
+
+fn write_stdout input = __stream ["write", input]
+
+fn write_bytes value = write_stdout (__stream ["chunks", value])
+
+fn write_text value = write_bytes (__pure ["encode_utf8", value])
+
+fn print value = do {
+  write_text value
+  write_text "\n"
+}
+
+let capture = capture_with {}
+
+export {
+  Termination,
+  Completion,
+  JobReport,
+  command,
+  pipe,
+  with_cwd,
+  with_env,
+  accept_exit,
+  run,
+  execute,
+  stdin,
+  print,
+  write_text,
+  write_bytes,
+  start,
+  wait,
+  check,
+  fg,
+  bg,
+  cancel,
+  jobs,
+  cd,
+  pwd,
+  set_env,
+  get_env,
+  unset_env,
+  args,
+  exit,
+  exit_force,
+  capture,
+  capture_with,
+  stream,
+  through,
+  write_stdout
+}

@@ -66,8 +66,9 @@ typedef struct {
 /**
  * @brief Heap-owned allocation containing traced Values and immutable bytes.
  *
- * The collector owns the links and mark state. Neither payload view may be
- * freed separately.
+ * The collector owns links, mark state, and allocation lifetime. The kind
+ * selects union members and any separately owned storage; callers must not
+ * free payload views.
  */
 struct RillObject {
   RillObject *next; ///< Private collector ownership chain.
@@ -243,7 +244,12 @@ void rill_runtime_free(RillEval *eval);
 
 /** @brief Number of elements in a List or shared List slice. */
 size_t rill_runtime_count(RillValue list);
-/** @brief Borrow an element; index must be below rill_runtime_count(). */
+/**
+ * @brief Return an element from a List or shared slice without allocating.
+ *
+ * The index must be below rill_runtime_count(). The copy is not a GC root;
+ * retain its owner or register it before a later allocation.
+ */
 RillValue rill_runtime_at(RillValue list, size_t index);
 /**
  * @brief Share a List range, reusing full ranges and detaching empty ones.
@@ -258,6 +264,8 @@ RillValue rill_runtime_slice(RillHeap *heap, RillValue list, size_t start,
  * @brief Borrow a field from a Record or nominal payload without allocating.
  *
  * False leaves out unchanged when the key is absent or the value has no fields.
+ * Objects referenced by the result remain heap-owned; copying a Value does
+ * not register a root.
  */
 bool rill_runtime_field(RillValue value, RillBytes key, RillValue *out);
 /**
@@ -312,7 +320,8 @@ bool rill_runtime_define(RillEval *eval, const char *name, RillValue value);
 /** @brief Borrow a committed binding, including registered native functions. */
 bool rill_runtime_lookup(RillEval *eval, const char *name, RillValue *value);
 /**
- * @brief Materialize the current entry's exports in the evaluator result root.
+ * @brief Return the current entry's rooted export namespace, empty when
+ * omitted.
  *
  * May collect. Returns Unit and records an evaluator error on failure.
  * Retain a separate root before advancing evaluation if the namespace is
@@ -322,9 +331,13 @@ RillValue rill_runtime_exports(RillEval *eval);
 /** @brief Current continuation count, for bounded-space verification. */
 size_t rill_runtime_depth(const RillEval *eval);
 
-/** @brief Freeze the current committed bindings as the environment of new
- * modules. */
-void rill_runtime_prelude(RillEval *eval);
+/**
+ * @brief Freeze exported bindings (or all bindings without an export table).
+ *
+ * May collect while constructing the immutable environment. False records an
+ * allocation error; the caller must not execute user code after failure.
+ */
+[[nodiscard]] bool rill_runtime_prelude(RillEval *eval);
 /**
  * @brief Consume and reset module syntax for the outstanding import.
  *

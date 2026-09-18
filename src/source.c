@@ -2,8 +2,8 @@
  * @file
  * @brief Validate and own source text before parsing.
  *
- * Source names and UTF-8 bytes are copied together; invalid input leaves a
- * clearable empty owner. Diagnostics use byte offsets into this storage.
+ * Copy the diagnostic name and validated UTF-8 bytes into one source owner.
+ * Failure leaves it empty and clearable. Diagnostics refer to byte offsets.
  */
 #include "source.h"
 #include "diagnostic.h"

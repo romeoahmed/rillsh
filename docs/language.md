@@ -1,9 +1,8 @@
 # Language
 
-This document specifies the first-release target language. [Execution](execution.md)
-defines process and stream effects. The language and scoped Stream lifetimes are
-implemented; [current status](status.md) records evidence and remaining presentation
-work.
+This document defines Rill syntax, values, and evaluation. [Execution](execution.md)
+owns process and stream effects; [status](status.md) records implementation evidence
+and remaining work.
 
 ## Semantic core
 
@@ -18,23 +17,23 @@ implicit laziness, text coercion, truthiness, or string-to-code conversion.
 
 ## Values
 
-| Kind | Contract |
-| --- | --- |
-| Unit | `()`; successful operations with no data result |
-| Null | `null`; explicit absence in data, including JSON |
-| Bool | `true` or `false`; the only accepted conditional values |
-| Int | Signed 64-bit integer; checked arithmetic |
-| Float | IEEE binary64; finite results only |
-| String | Valid UTF-8, explicit byte length, possibly containing NUL |
-| Bytes | Arbitrary bytes with explicit length |
-| Path | POSIX path bytes without NUL; no automatic Unicode normalization |
-| List | Immutable, ordered sequence of values |
-| Record | Immutable mapping from unique String keys to values |
-| ADT value | Nominal type identity, constructor identity, immutable payload |
-| Function | First-class unary callable, including native and constructor functions |
-| JobPlan | Immutable external execution description |
-| Job handle | Opaque, session-owned reference to a live or completed job |
-| Stream handle | Opaque, scoped, single-consumer resource reference |
+| Kind          | Contract                                                               |
+| ------------- | ---------------------------------------------------------------------- |
+| Unit          | `()`; successful operations with no data result                        |
+| Null          | `null`; explicit absence in data, including JSON                       |
+| Bool          | `true` or `false`; the only accepted conditional values                |
+| Int           | Signed 64-bit integer; checked arithmetic                              |
+| Float         | IEEE binary64; finite results only                                     |
+| String        | Valid UTF-8, explicit byte length, possibly containing NUL             |
+| Bytes         | Arbitrary bytes with explicit length                                   |
+| Path          | POSIX path bytes without NUL; no automatic Unicode normalization       |
+| List          | Immutable, ordered sequence of values                                  |
+| Record        | Immutable mapping from unique String keys to values                    |
+| ADT value     | Nominal type identity, constructor identity, immutable payload         |
+| Function      | First-class unary callable, including native and constructor functions |
+| JobPlan       | Immutable external execution description                               |
+| Job handle    | Opaque, session-owned reference to a live or completed job             |
+| Stream handle | Opaque, scoped, single-consumer resource reference                     |
 
 Resource handles do not expose OS handles. A Job handle may be retained in persistent
 session data; a Stream handle cannot outlive its execution scope. Stream escape rules
@@ -74,84 +73,135 @@ depend on traversal order. There is no public pointer-identity operator.
   to include a single quote, use a double-quoted string. Neither form interpolates.
 - Both string forms may span lines and preserve their contents without indentation
   stripping. There is no implicit concatenation of adjacent literals.
-- Bytes are constructed by `bytes([0, 255])`; Paths by `path(string_or_bytes)`.
-- A newline or `;` separates statements when the preceding expression is complete.
-  Newlines inside lists, records, argument lists, or unfinished operators do not
-  terminate them. A following line beginning with `|>` continues an expression;
-  the script parser uses this lookahead. In the REPL use a trailing `|>` or explicit
-  multiline editing when the previous complete line has already been submitted.
-- A completed expression cannot gain an ordinary argument merely because the next
-  line begins with `(`. No automatic semicolon insertion beyond these rules occurs.
+- Bytes are constructed by `bytes [0, 255]`; Paths by `path string_or_bytes`.
+- Application uses whitespace between a function and each argument. It associates
+  left-to-right: `f x y` means `(f x) y`. Parentheses group expressions; `f(x)` is
+  invalid. There are no comma-separated call arguments or tuples.
+- A newline or `;` separates complete statements. Parentheses, List elements,
+  Record field values, match arms, indexes, and command substitutions permit multiline
+  expressions. Closure bodies and `do` reset this context to statement separation,
+  even inside an enclosing List or parentheses. Indentation has no semantic role.
+- An unfinished operator continues on the next line. A following line beginning with
+  `|>` also continues an expression while the source is buffered. In the REPL, leave
+  `|>` at the end of a line to request continuation before submission.
+- A bare function or partial application is Complete. Neither callable metadata nor
+  a following line supplies implicit arguments. `f` followed by a newline and `x`
+  is two statements; enclose a multiline application in parentheses.
 
 Keywords are `let`, `fn`, `rec`, `if`, `then`, `else`, `do`, `match`, `struct`, `enum`,
-`with`, `job`, `import`, `as`, `export`, `true`, `false`, `null`, `and`, `or`, and
-`not`. Builtins such as `run` and `map` are ordinary lexical bindings.
+`with`, `job`, `import`, `as`, `export`, `true`, `false`, `null`, `and`, `or`,
+`not`, and `of`. Builtins such as `run` and `map` are ordinary lexical bindings.
 
 ## Functions and application
 
 ```rill
-fn multiply(factor, value) => factor * value
-let double = multiply(2)
-let operations = {transform: double, accept: fn(x) => x > 10}
+fn multiply factor value = factor * value
+let double = multiply 2
+let operations = {transform: double, accept: { x => x > 10 }}
 
-[3, 6, 9] |> map(operations.transform) |> filter(operations.accept)
+[3, 6, 9] |> map operations.transform |> filter operations.accept
 ```
 
-A Function is a first-class unary callable. It can be passed, returned, stored in data,
-or created as a lexical closure, independently of the names bound to it. User functions,
-native functions, and constructors with fields share one application protocol. Planned
-help metadata describes callables without affecting dispatch.
+A Function is a first-class unary callable. User closures, native functions, and
+constructors with fields share one application protocol. Functions can be passed,
+returned, stored in data, and partially applied. Names and help metadata do not affect
+dispatch. Field access supplies no implicit receiver.
 
-Application follows these lowerings:
+Ordinary anonymous functions use `{ patterns => statements }`. Parameters are
+whitespace-separated atomic patterns: literals, bindings, `_`, Unit, Lists, Records,
+qualified fieldless constructors, or parenthesized patterns. Enclose a constructor
+and its payload together: `{ (Point {x, y}) => x + y }`. A bare name followed by a
+Record pattern denotes two parameters, not a constructor pattern.
+
+```rill
+let multiply = { factor value => factor * value }
+let load = { () => read_text (path "settings.json") }
+let ignore = { _ => () }
+let summarize = { entry =>
+  let name = display_path entry.name
+  {name, size: entry.size}
+}
+```
+
+A closure body is a lexical block with the same sequencing and result rules as `do`.
+`{}` is an empty Record, not an empty closure. An empty closure body returns Unit;
+`{ () => }` accepts only Unit, whereas `{ _ => }` accepts and ignores any value. A closure
+must have at least one parameter; `{ => ... }` is invalid. No expression is implicitly
+converted to a thunk.
+
+Multiple parameters lower to nested unary functions:
 
 ```text
-fn(p1, p2) => e     = fn(p1) => fn(p2) => e
-f(a, b)            = (f(a))(b)
-f()                = f(())
-fn() => e          = fn(()) => e
-record.operation(x) = (record.operation)(x)
+{ p1 p2 => body }     = { p1 => { p2 => body } }
+f x y                = (f x) y
+record.operation x   = (record.operation) x
 ```
 
-There is no implicit receiver, variadic application, parameter default, named-call
-argument mechanism, or automatic invocation of a returned function. A returned function
-can receive further arguments; applying a non-function raises TypeError. In `f(a(),
-b())`, evaluate `f`, evaluate `a()`, apply the first argument, evaluate `b()`, then
-apply the second argument. Intermediate applications may have effects. Optimizations
-cannot evaluate the second argument before the first application.
+In `f (a ()) (b ())`, evaluate `f`, then `a ()`, apply the first argument, then
+`b ()`, and apply the second argument. Each parameter pattern is checked when its
+argument arrives. The body executes after all header parameters have arrived.
+Explicitly nested closures may perform effects between applications; optimizations
+must preserve these stages. Applying a non-function raises TypeError at that application.
+There is no implicit receiver, variadic application, default parameter, named-call
+argument mechanism, or automatic invocation of a returned function. `f ()` explicitly
+passes Unit; bare `f` remains a value.
 
-Each parameter pattern is checked when that parameter is applied. A pattern failure is
-immediate even if later curried parameters have not arrived.
+`fn name patterns = expression` declares a self-recursive function. `rec { fn ...;
+fn ... }` declares a simultaneous group. `let name = { ... }` is an ordinary
+nonrecursive binding; the initializer does not gain access to its new name. Arbitrary
+recursive value initializers are not supported.
 
-Lexical closures capture their resolved free bindings, not an entire surrounding scope
-or names to resolve later. This is observable: an unrelated local Stream must not make a
-returned closure illegal. Recursive groups retain the bindings needed by their mutually
-reachable functions. Immutable values may be shared. Named `fn` declarations bind
-themselves recursively. `rec { fn ...; fn ... }` introduces a simultaneous group of
-function declarations; arbitrary recursive value initializers are not supported.
-Repeated names in one block/module are errors. Each REPL entry introduces a new scope,
-so later entries may shadow old bindings without changing existing closures.
+A recursive function expression names its own root function:
 
-Configuration parameters precede the primary data. For example `map(f, items)`,
-`filter(predicate, items)`, `take(count, items)`, and `starts_with(prefix, text)`. `x |>
-f` evaluates `x` first, then `f`, then applies `f` to the saved value. Its lowering uses
-hygienic temporaries; rewriting it literally to `f(x)` would change effect order. Pipes
-associate left-to-right.
+```rill
+let factorial = rec { loop n =>
+  if n == 0 then 1 else n * loop (n - 1)
+}
+let count = rec { loop total n =>
+  if n == 0 then total else loop (total + 1) (n - 1)
+}
+let from_ten = count 10
+```
 
-Proper tail calls cover direct, mutual, and indirect calls, including calls routed
-through native higher-order functions. The chosen branch of a tail-position `if` or
-`match`, and the final expression of a tail-position `do`, inherit tail position. A call
-is not tail-positioned when work remains afterward. No C optimizer is required for this
-guarantee. The evaluator limits live continuations to 65,536; syntax nesting is limited
-to 256 levels. Exceeding either limit produces a diagnostic.
+The first identifier after `rec {` is a local recursive binder, not a parameter.
+It is visible only inside the function and denotes the complete curried function,
+including from a partial application or a nested returned closure. It does not change
+when an outer binding is shadowed. `self` is an ordinary identifier. Parameters, pattern
+checks, captures, and tail calls use the same rules as every other function. A `rec`
+expression and a mutual `rec { fn ... }` group are distinguished syntactically.
+
+Closures capture resolved free bindings rather than an entire surrounding scope or
+names to resolve later. An unrelated local Stream must not make a returned closure
+illegal. Recursive groups retain bindings needed by mutually reachable functions.
+Repeated names in one block/module are errors; nested scopes and later REPL entries may
+shadow bindings without changing existing closures.
+
+Library operations generally put configuration before primary data: `map f items`,
+`filter predicate items`, `take count items`, and `starts_with prefix text`. Arithmetic
+functions preserve operand order: `subtract a b` means `a - b`; use `{ x => x - 1 }`
+to subtract one. Pure configuration binding can replace forwarding wrappers, as in
+`let collect = collect_with {}`; this is not a general transformation for effectful
+partial applications.
+
+`x |> f` evaluates x first, then f, then applies f to the saved value. Pipes associate
+left-to-right and have lower precedence than application, so `items |> map transform`
+applies `map transform` to items. There are no implicit placeholders or callback
+arguments. Literal substitution with `f x` would change effect order.
+
+Proper tail calls cover direct, mutual, and indirect calls, including native higher-order
+functions. The selected branch of a tail-position `if` or `match`, and the final
+expression of a tail-position closure body or `do`, inherit tail position. No C
+optimizer is required. Live continuations are limited to 65,536; syntax-tree nesting is
+limited to 256 levels. Exceeding either limit produces a diagnostic.
 
 ## Expressions, bindings, and effects
 
 ```rill
-fn classify(size) => if size > 1_000_000 then "large" else "small"
+fn classify size = if size > 1_000_000 then "large" else "small"
 
-fn summarize(entries) => do {
-  let sizes = entries |> map(fn(entry) => entry.size)
-  {count: length(entries), bytes: sum(sizes)}
+fn summarize entries = do {
+  let sizes = entries |> map { entry => entry.size }
+  {count: length entries, bytes: sum sizes}
 }
 ```
 
@@ -162,16 +212,23 @@ then binds. Binding failure raises MatchError and installs none of that binding'
 
 `if` requires both branches and evaluates only the selected branch. `and` and `or`
 short-circuit and require Bool operands; `not` accepts Bool. Sequential effects and
-`each(fn(x) => effect(x), items)` support imperative tasks. There are no mutable
+`each { x => effect x } items` support imperative tasks. There are no mutable
 variables, user-defined setters, `return`, `break`, or assignment operators in the first
 release.
 
-From tightest to loosest: field/index/call suffixes; unary `-` and `not`; `*` and `/`;
+From tightest to loosest: field/index suffixes; application; unary `-` and `not`; `*` and `/`;
 `+` and `-`; comparisons; `and`; `or`; `with`; `|>`. Comparisons do not chain. Binary
-arithmetic and pipes associate left-to-right. `fn`, `if`, `match`, and `do` are
-expression forms; parentheses delimit a larger operand when needed. Operator precedence
-is fixed and cannot be redefined. Infix numeric operations have named function
-equivalents; short-circuit control remains syntax.
+arithmetic and pipes associate left-to-right. Parenthesize `if` and `match` when
+passing them as arguments. Closures, Records, `do`, and `job` have explicit closing
+boundaries and may be passed directly. Operator precedence is fixed and cannot be
+redefined. Infix numeric operations have named function equivalents; short-circuit
+control remains syntax.
+
+Field and index suffixes must touch their base: `items[0]` is indexing, whereas
+`f [0]` passes a List. `f items[0]` applies f to the selected element; `(f items)[0]`
+indexes the result. `f -1` is subtraction regardless of spacing; `f (-1)` passes a
+negative argument. Application binds more tightly than prefix negation: `not p x`
+means `not (p x)`, and `f (not x)` passes a negated Bool.
 
 ## Records and immutable updates
 
@@ -184,14 +241,17 @@ header["content-type"]
 ```
 
 Record fields evaluate in source order. Duplicate keys are rejected; expression syntax
-does not permit computed field names, but `record(pairs)` constructs dynamic keys with
-the same uniqueness rule. Identifier keys are String literals. Missing field access
-raises MissingField. `lookup(key, record)` returns Option when absence is expected.
+does not permit computed field names, but `record pairs` constructs dynamic keys with
+the same uniqueness rule. Identifier keys are String literals. A bare identifier field
+`{name}` expands to `{name: name}` using ordinary lexical lookup; quoted keys require a
+value. Missing field access raises MissingField. `lookup key record` returns Option when absence is expected.
 Field order is preserved for deterministic presentation, independently of equality.
 
-`base with {field: expression}` evaluates the base, then replacement expressions
-left-to-right, checks that all keys already exist, and returns a new value. It never
-changes `base`. Extending an anonymous record uses `extend(additions, base)`, which
+`base with replacements` evaluates the base, then an ordinary expression producing
+an anonymous Record, checks that all keys already exist, and returns a new value.
+Literal replacement fields evaluate left-to-right; shorthand also applies, as in
+`base with {size}`. It never changes `base`. Extending an anonymous record uses
+`extend additions base`, which
 rejects collisions; replacement is never silently selected by an insertion API.
 
 Field access is data access: no getter, prototype lookup, or method binding runs.
@@ -209,8 +269,8 @@ enum Outcome {
   Failed {error}
 }
 
-let p = Point({x: 3, y: 4})
-let answer = Outcome.Completed({value: 42})
+let p = Point {x: 3, y: 4}
+let answer = Outcome.Completed {value: 42}
 let pending = Outcome.Pending
 ```
 
@@ -244,7 +304,7 @@ matched as `Empty {}`; a bare identifier always binds a pattern variable. Fieldl
 cases use a qualified path such as `Option.None`. An enum must declare at least one
 case; case names are unique within that enum.
 
-Nominal identity is never inferred from record keys or JSON. `to_record(value)`
+Nominal identity is never inferred from record keys or JSON. `to_record value`
 explicitly extracts the payload. Products and variants promise identity and shape, not
 sealed representations: field projection and `with` remain available even when a module
 exports a checked factory instead of its constructor.
@@ -254,19 +314,20 @@ The prelude supplies closed sums:
 ```rill
 enum Option {None, Some {value}}
 enum Result {Ok {value}, Err {error}}
+enum Control {Continue {value}, Stop {value}}
 ```
 
-`some(x)`, `ok(x)`, and `err(e)` are ordinary unary convenience functions. Null, Unit,
+`some x`, `ok x`, and `err e` are ordinary unary convenience functions. Null, Unit,
 `Option.None`, and an empty stream are distinct. Neither Result nor Option has implicit
 truthiness or implicit unwrapping.
 
 ## Pattern matching
 
 ```rill
-match answer {
+match answer of {
   Outcome.Completed {value} if value > 0 => value,
   Outcome.Completed {value: 0} => 0,
-  Outcome.Failed {error} => raise(error),
+  Outcome.Failed {error} => raise error,
   _ => -1
 }
 ```
@@ -276,17 +337,17 @@ constructor patterns, and nesting. There are no view patterns, regex patterns, i
 pinning of existing variables, user-defined matchers, or pattern alternatives. The same
 pattern language serves `match`, `let`, and function parameters.
 
-| Pattern | Meaning |
-| --- | --- |
-| `name` | Bind a fresh local name, regardless of an outer binding |
-| `[a, b]` | Exactly two elements |
-| `[head, ..tail]` | At least one element; bind the remaining list |
-| `{name, size}` | Anonymous record with exactly these keys |
-| `{name, ..}` | Anonymous record containing `name`; ignore other keys |
-| `{name, ..rest}` | Bind the remaining fields as an anonymous record |
-| `{name: n}` | Match the key `name`, bind `n` |
-| `Point {x, ..}` | Point value containing the declared field `x` |
-| `Outcome.Pending` | The fieldless constructor's singleton |
+| Pattern           | Meaning                                                 |
+| ----------------- | ------------------------------------------------------- |
+| `name`            | Bind a fresh local name, regardless of an outer binding |
+| `[a, b]`          | Exactly two elements                                    |
+| `[head, ..tail]`  | At least one element; bind the remaining list           |
+| `{name, size}`    | Anonymous record with exactly these keys                |
+| `{name, ..}`      | Anonymous record containing `name`; ignore other keys   |
+| `{name, ..rest}`  | Bind the remaining fields as an anonymous record        |
+| `{name: n}`       | Match the key `name`, bind `n`                          |
+| `Point {x, ..}`   | Point value containing the declared field `x`           |
+| `Outcome.Pending` | The fieldless constructor's singleton                   |
 
 Only one rest pattern is allowed, at the end. Shorthand `name` in a record pattern means
 `name: name`. Nominal patterns reject keys not in their descriptor. Anonymous record
@@ -297,7 +358,9 @@ before evaluating the guard. Guards must be Bool. False tries the next branch; a
 propagates. Guard effects are not rolled back. Bindings from an unsuccessful branch do
 not escape. If no branch matches, evaluation raises MatchError.
 
-Names cannot occur twice in a pattern. `[x, x]` is invalid; use `[x, y] if x == y`. List
+Names cannot occur twice in a pattern. Duplicate bindings/fields and misplaced rest
+patterns are rejected before any statement in the entry executes, including in
+unselected branches or unused functions. `[x, x]` is invalid; use `[x, y] if x == y`. List
 rest views must not copy the full suffix on every recursive call. Matching can allocate
 bindings but cannot read a stream, perform field getters, or execute constructor code.
 Dynamic matches have no exhaustiveness guarantee. A potentially incomplete match retains
@@ -310,15 +373,15 @@ Language errors travel through a dedicated evaluator outcome, separate from ordi
 values. They carry stable kind, message, source span, and notes. The prelude exposes an
 Error product with `kind: String`, `message: String`, `span: Record or Null`, and
 `notes: List[String]`. Evaluator-generated spans contain `source: String` and a
-zero-based byte `offset: Int`; `error(kind, message)` supplies the default absent span
+zero-based byte `offset: Int`; `error kind message` supplies the default absent span
 and empty notes. `raise` validates the Error shape before propagation. Type errors,
 failed matches, invalid arithmetic, I/O errors, and checked process failures use this
 channel.
 
-`attempt(thunk)` is a runtime primitive callable as an ordinary unary function:
+`attempt thunk` is a runtime primitive callable as an ordinary unary function:
 
 ```rill
-match attempt(fn() => read_text(path("settings.json"))) {
+match attempt { () => read_text (path "settings.json") } of {
   Result.Ok {value} => value,
   Result.Err {error} => "unavailable"
 }
@@ -343,7 +406,7 @@ cleanup, and returns to the interactive boundary.
 
 ```rill
 import "./geometry.rill" as geometry
-let p = geometry.Point({x: 3, y: 4})
+let p = geometry.Point {x: 3, y: 4}
 ```
 
 Imports are top-level declarations with literal paths. Relative paths resolve against
@@ -352,8 +415,21 @@ names resolve only to the bundled standard library. There is no package registry
 network import, automatic current-directory module search, or hot reload. File modules
 must be regular files; directories, FIFOs, and devices are rejected with `IOError`.
 
-A module exports declarations explicitly with `export let`, `export fn`, `export
-struct`, or `export enum`. The resulting namespace is an immutable record of exports.
+A module exposes one explicit export table of existing bindings or namespace fields:
+
+```rill
+import "std:core" as core
+fn normalize value = core.text value
+export {normalize, convert: normalize, Option: core.Option}
+```
+
+An omitted or empty table exports nothing. The table is top-level, occurs at most once
+per source, and is evaluated at its position; referenced bindings must already exist.
+Aliases select public names without creating extra local bindings. Duplicate keys
+and arbitrary expressions in table entries are syntax errors; exports use tables,
+not declaration modifiers. A table can precede later private declarations. Its namespace
+is an immutable Record; exports preserve function and nominal identities.
+
 The loader caches by resolved file identity for the interpreter's lifetime, rejects
 import cycles, and removes failed loads from the cache. Top-level initializers execute
 once in source order and may have ordinary effects; importing untrusted code is not a
@@ -361,8 +437,11 @@ sandbox. Standard-library initialization must be effect-free.
 
 The standard-library source is embedded in and versioned with the executable. The
 prelude is a fixed set of imports, not a second function dispatch path. The initial
-library modules are `std:core`, `std:seq`, `std:text`, `std:fs`, `std:process`, and
-`std:json`. The prelude exports the names used in these documents; other helpers are
+library modules are `std:core`, `std:seq`, `std:text`, `std:fs`, `std:process`,
+`std:json`, `std:option`, and `std:result`. Each module owns its definitions and explicit
+imports; the prelude only selects public bindings. `std:core` owns the shared
+Option/Result/Control/Error descriptors, so imports never manufacture replacement
+identities. The prelude exports the names used in these documents; other helpers are
 accessed through explicit module namespaces. It does not scan user directories for
 commands or replace missing language names with PATH lookup. Private native primitives
 are registered in a bootstrapping namespace, then wrapped or re-exported by library
@@ -374,21 +453,40 @@ machinery. There is no special command namespace for language functions.
 
 ### Pure library surface
 
-The prelude exposes the bundled modules' public operations directly. These pure
-operations supplement the [sequence and process
-contracts](execution.md#core-library-contracts).
+The prelude exposes the core, sequence, text, filesystem, process, and JSON operations.
+Option and Result combinators require explicit module imports to avoid name collisions.
+These pure operations supplement the [sequence and process contracts](execution.md#core-library-contracts).
 
-| Operations | Contract |
-| --- | --- |
-| `identity`, `compose(f, g, value)` | Ordinary unary functions; composition applies `g` before `f` |
-| `add`, `subtract`, `multiply`, `divide`, `equal`, `less` | Curried equivalents of the corresponding operators |
-| `int`, `float` | Numeric conversion; Float-to-Int truncates toward zero and checks range |
-| `text` | Explicit String conversion for String, Bool, Int, and Float |
-| `length` | List elements or anonymous Record fields; text requires explicit units |
-| `byte_length`, `scalars` | Encoded byte count; String to a List of one-scalar Strings |
-| `encode_utf8`, `decode_utf8` | String/Bytes conversion with strict UTF-8 validation |
-| `starts_with`, `ends_with` | String prefix/suffix predicates, configuration first |
-| `concat`, `reverse`, `drop` | Explicit List/Bytes concatenation; List reversal and shared suffix slicing |
+| Operations                                               | Contract                                                                                                 |
+| -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `identity`, `compose f g value`                          | Ordinary unary functions; composition applies `g` before `f`                                             |
+| `add`, `subtract`, `multiply`, `divide`, `equal`, `less` | Curried equivalents of the corresponding operators                                                       |
+| `int`, `float`                                           | Numeric conversion; Float-to-Int truncates toward zero and checks range                                  |
+| `text`                                                   | Explicit String conversion for String, Bool, Int, and Float                                              |
+| `length`                                                 | List elements or anonymous Record fields; text requires explicit units                                   |
+| `byte_length`, `scalars`                                 | Encoded byte count; String to a List of one-scalar Strings                                               |
+| `encode_utf8`, `decode_utf8`                             | String/Bytes conversion with strict UTF-8 validation                                                     |
+| `starts_with`, `ends_with`                               | String prefix/suffix predicates, configuration first                                                     |
+| `concat`, `reverse`                                      | Explicit List/Bytes concatenation; List reversal                                                         |
+| `split delimiter string`                                 | Literal nonempty String delimiter; preserve empty fields and embedded NUL                                |
+| `join separator strings`                                 | List of Strings to String; no implicit conversion                                                        |
+| `trim string`                                            | Remove leading/trailing ASCII space, HT, LF, CR, FF, and VT; no locale dependence                        |
+| `parse_int string`                                       | One signed 64-bit integer token using JSON decimal syntax; reject fractional/exponent forms and overflow |
+| `parse_float string`                                     | One finite JSON decimal number, converted to Float; precision may round                                  |
+| `entries record`                                         | List of `[key, value]` pairs in field order; reconstruct with `record`                                   |
+
+Numeric parsers consume the whole String without trimming. They reject leading `+`,
+leading zeroes, surrounding whitespace, trailing junk, NUL, NaN, and infinity. Use
+`trim` explicitly for line-oriented input. Invalid syntax raises DecodeError; an
+integer token outside Int range or a number overflowing Float raises ArithmeticError.
+Neither parser performs locale-specific conversion.
+
+Both `std:option` and `std:result` expose `map`, `bind`, `unwrap_or`, and
+`unwrap_or_else`, with the callback/default before the wrapped value. `map` transforms
+Some/Ok and preserves None/Err; `bind` returns the callback's result directly. The eager
+`unwrap_or` accepts an ordinary fallback value. `unwrap_or_else` calls its fallback
+only on None/Err, passing Unit for None and the error payload for Err. These are ordinary
+Rill functions; they introduce no special call, exception, or short-circuit syntax.
 
 Sequence callbacks and currying are authored in Rill. C primitives handle checked
 numeric conversion, representation access, stable sorting, and OS effects. The private
@@ -402,25 +500,32 @@ whether a name happens to exist at runtime. Closure construction resolves free b
 to fixed captures, including constructor paths used in patterns. Parsing does not need
 those values to classify source completeness.
 
-Function bodies and patterns retain source spans after lowering. A script or module is
-parsed completely before its statements execute; the REPL parses one submitted entry
+Function bodies and patterns retain source locations after lowering. Application
+diagnostics identify the failing application and the received value kind. Parameter
+counts never determine syntactic completeness. Structural pattern validation runs
+before execution; nominal identity and value mismatches remain runtime checks. A script
+or module is parsed completely before its statements execute; the REPL parses one submitted entry
 completely. EOF converts Incomplete to a syntax error. Parsing and lowering never
 execute user code; runtime name/type errors remain distinct from syntax errors.
 
 ## Syntax boundaries
 
 The forms above, fixed precedence, and command grammar define the surface language.
-Whitespace never implies application. `(a, b)` is not a tuple; `()` is Unit and an empty
-call supplies Unit. Parentheses may group expressions or patterns, and negative numeric
-literals are allowed in patterns.
+Parentheses group expressions or patterns; `()` is Unit. Calls require whitespace,
+including before a grouped argument. Parentheses do not introduce a separate call
+form, and braces describe either a Record or an explicit closure header.
 
-Comma-separated lists, arguments, parameters, fields, enum cases, and match arms allow
-one trailing comma. Newlines within those forms are whitespace, not commas. A record
-expression always uses `key: value`; field shorthand belongs to patterns. `with` takes a
-record of replacements. An enum case with empty payload braces or no payload is
-fieldless; the enum itself must contain at least one case.
+Lists, Record fields, type fields, enum cases, and match arms use commas and allow one
+trailing comma. Newlines within these forms do not replace commas. Function parameters
+use whitespace without commas. An enum case with empty payload braces or no payload is
+fieldless; an enum must contain at least one case.
 
-Local `do` blocks admit expressions, command statements, `let`, named `fn`, and `rec`.
-Imports, exports, and nominal declarations are top-level forms. A `rec` group contains
-one or more named function declarations. A `job` form contains exactly one external
-pipeline, with surrounding whitespace; it is not a general statement block.
+Record/closure classification depends only on header syntax, never on runtime names:
+`{name}` is a Record, `{name: value}` is a Record, and `{ name => body }` is a closure.
+Comments and strings do not contribute header punctuation. An unfinished header remains
+Incomplete until its syntax determines otherwise.
+
+Local closure bodies and `do` blocks admit expressions, command statements, `let`,
+named `fn`, and `rec`. Imports, exports, and nominal declarations remain top-level forms.
+A `rec` group contains one or more named function declarations. A `job` form contains
+exactly one external pipeline; it is not a general statement block.

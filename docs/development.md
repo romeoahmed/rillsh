@@ -74,12 +74,12 @@ examples, and accidental local information in the diff; these remain review duti
 For Python changes:
 
 ```sh
-uvx ruff check tools tests/system
-uvx ruff format --check tools tests/system
-uvx ty check tools tests/system
+uvx ruff check tools tests
+uvx ruff format --check tools tests
+uvx ty check tools tests
 ```
 
-Format locally with `uvx ruff format tools tests/system` and `ninja -C build/asan
+Format locally with `uvx ruff format tools tests` and `ninja -C build/asan
 clang-format`. Use `meson format --inplace --recursive meson.build meson.options` for
 project build files; format the tracked yyjson overlay separately. Keep Meson's
 formatter defaults without a project style file. Checks must not rewrite sources. Use
@@ -91,17 +91,17 @@ repetition, fixtures, and final gates.
 Prefer ISO/IEC 9899:2024 facilities and selected GNU extensions that express intent
 clearly. Require the facilities actually used, without older-C fallbacks or C2y syntax.
 
-| Need | Convention |
-| --- | --- |
-| Boolean/null values and assertions | `bool`, `true`, `false`, `nullptr`, `static_assert` |
-| Interface annotations | `[[nodiscard]]`, `[[maybe_unused]]`, `[[fallthrough]]` |
-| Checked integer arithmetic | `<stdckdint.h>`: `ckd_add`, `ckd_sub`, `ckd_mul` |
-| Constants and local inference | `constexpr`, `auto`, `typeof` when clearer |
-| Bit operations | `<stdbit.h>` when needed |
-| Initialization and representation | `{}`, designated initializers, compound literals, tagged unions |
-| Headers and no-argument functions | `#pragma once`; `f()` declarations and definitions |
-| Variadic formatting | C23 `va_start(args)` and `[[gnu::format(printf, ...)]]` |
-| Simple scope-owned storage | `[[gnu::cleanup(function)]]` with an exactly typed, infallible callback |
+| Need                               | Convention                                                              |
+| ---------------------------------- | ----------------------------------------------------------------------- |
+| Boolean/null values and assertions | `bool`, `true`, `false`, `nullptr`, `static_assert`                     |
+| Interface annotations              | `[[nodiscard]]`, `[[maybe_unused]]`, `[[fallthrough]]`                  |
+| Checked integer arithmetic         | `<stdckdint.h>`: `ckd_add`, `ckd_sub`, `ckd_mul`                        |
+| Constants and local inference      | `constexpr`, `auto`, `typeof` when clearer                              |
+| Bit operations                     | `<stdbit.h>` when needed                                                |
+| Initialization and representation  | `{}`, designated initializers, compound literals, tagged unions         |
+| Headers and no-argument functions  | `#pragma once`; `f()` declarations and definitions                      |
+| Variadic formatting                | C23 `va_start(args)` and `[[gnu::format(printf, ...)]]`                 |
+| Simple scope-owned storage         | `[[gnu::cleanup(function)]]` with an exactly typed, infallible callback |
 
 Use libc for allocation, copying, formatting, and sorting when its contract fits. A
 helper should add ownership, bounds, or meaningful errors rather than rename libc.
@@ -139,6 +139,11 @@ Append inputs must not alias growable destination storage. Format strings are tr
 Fallible results must be handled; an intentional discard needs a local rationale when it
 is not evident from the cleanup policy.
 
+Read `errno` only after a documented failure and preserve it across cleanup. Semantic
+diagnostics leave the native code zero: an earlier operation's `errno` must not change
+their category or recoverability. The [POSIX error contract](https://pubs.opengroup.org/onlinepubs/9799919799/functions/errno.html)
+does not make successful calls reset it.
+
 Headers compile independently and include the public standard or component declarations
 they use. Use forward declarations for incomplete types, not transitive includes.
 Include-cleaner findings need review: SDK-internal files do not replace public headers.
@@ -161,8 +166,11 @@ pinned official inputs, manifest, license, and independent conformance corpus; t
 latter allows ordinary compilation without regeneration. Neither is a cache. Update
 inputs explicitly, run `python3 tools/unicode.py`, and verify with `--check`. Ordinary
 builds fetch no Unicode data. Keep upstream notices and data comments intact.
+The generator separates verified file reads from pure parsing and rendering. Range
+normalization rejects conflicting overlaps before emitting tables for binary search;
+the Unicode test suite covers both those transformations and official segmentation.
 
-Bundled `stdlib/*.rill` sources use native C23 `#embed` in `library/bundle.c`. Compiler
+Bundled `stdlib/*.rill` sources use native C23 `#embed` in `native/bundle.c`. Compiler
 dependency files track changes; there is no generated C or embedding script. Generate
 shared metadata only when it eliminates real duplication. Python tools and tests use the
 standard library; no Python package is needed by the installed shell.
@@ -171,8 +179,10 @@ standard library; no Python package is needed by the installed shell.
 
 Start from upstream defaults or a named preset, retaining only project-specific choices.
 Meson owns language mode, build type, sanitizers, optimization, LTO, dependency wiring,
-and the compile database. Keep default undefined-symbol checking. Add custom options
-only for real optional products, such as `-Dfuzz=true` for fuzz targets and seed replay.
+and the compile database. Use shared `files()` lists when the same sources need
+different compile flags; fault injection recompiles those lists in a separate archive
+and never changes production targets. Keep default undefined-symbol checking. Add custom
+options only for real optional products, such as `-Dfuzz=true` for fuzz targets and seed replay.
 Use `find_program` with a version constraint for build-time Python; no Python extension
 module is built. Static-library link dependencies propagate through Meson: only targets
 compiling the JSON adapter need yyjson headers. Keep the boundary-header list as Meson
@@ -222,7 +232,8 @@ entry point needs only a short description. Use an ASCII diagram inside `@verbat
 `@endverbatim` when it clarifies a state machine or ownership graph. Keep algorithms and
 exceptional paths beside the code they explain. Use `///<` for short member contracts.
 Keep one authoritative comment per declaration; do not repeat signatures with `@fn` or
-duplicate contracts in source files. Use `@pre`, `@return`, or complete `@param` lists
+duplicate contracts in source files. Link related operations with their function names
+and `()` so Doxygen can resolve them. Use `@pre`, `@return`, or complete `@param` lists
 only when they add clarity. Do not put multi-paragraph contracts into `@brief` or add
 tags that repeat parameter names. State whether failure leaves outputs unchanged,
 partially written, or invalid; never promise rollback unless the implementation provides
@@ -250,10 +261,10 @@ With Doxygen available at Meson setup, generate the HTML reference explicitly:
 meson compile -C build/asan api-docs
 ```
 
-Output is under the build directory's `api/html/`. Meson owns one boundary-header list
-and configures `docs/Doxyfile.in`; private representations, tests, generated tables, and
-dependencies are excluded. Ordinary compilation does not require Doxygen, but the
-quality gate does. `EXTRACT_STATIC=YES` includes boundary-header `static constexpr`
+Output is under the build directory's `api/html/`. `src/meson.build` owns one
+boundary-header list; `docs/meson.build` configures `docs/Doxyfile.in`. Component-private
+headers, tests, generated tables, and dependencies are excluded. Ordinary compilation
+does not require Doxygen, but the quality gate does. `EXTRACT_STATIC=YES` includes boundary-header `static constexpr`
 limits. Source-file introductions orient readers of the code; this target deliberately
 extracts only boundary headers. Keep default HTML styling and warning checks.
 `EXTRACT_ALL` would hide missing documentation and stays off; warnings fail the target.

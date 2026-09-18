@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Strict, bounded conversion between JSON documents and language data.
+ * @brief Strict JSON document and decimal-number conversion.
  */
 #pragma once
 #include "diagnostic.h"
@@ -16,3 +16,12 @@
  */
 RillValue rill_library_json(RillHeap *heap, bool encode, RillValue options,
                             RillValue input, RillDiagnostic *error);
+/**
+ * @brief Parse a whole String as a JSON decimal token into Float or Int.
+ *
+ * real selects Float; otherwise require an integer token within Int range.
+ * No trimming or extended number syntax. Does not allocate language values or
+ * collect. Initialize error to success; failure sets it and returns Unit.
+ */
+RillValue rill_library_json_number(bool real, RillValue input,
+                                   RillDiagnostic *error);

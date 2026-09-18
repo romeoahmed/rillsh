@@ -123,8 +123,10 @@ const char *rill_platform_env_get(const RillEnvironment *env, const char *name);
                                     RillDiagnostic *error);
 
 /**
- * @brief Test input readiness without blocking or changing descriptor flags.
+ * @brief Test read or write readiness without blocking or changing flags.
  *
- * Supports any valid descriptor number. EOF is readable; errors return false.
+ * Supports any valid descriptor number. Set writing for output. Returns 1
+ * when I/O can proceed (including EOF or a pending I/O error), 0 when waiting,
+ * or -1 with errno on failure. An interrupted check reports EINTR.
  */
-bool rill_platform_input_ready(int fd);
+int rill_platform_ready(int fd, bool writing);

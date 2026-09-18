@@ -33,6 +33,10 @@ class ShellCase(unittest.TestCase):
                 f"XDG_{name}_HOME" if name != "RUNTIME" else "XDG_RUNTIME_DIR"
             ] = str(directory)
 
+    def assert_rill(self, source: str) -> None:
+        """Require a true result after scoped evaluation through the public shell."""
+        self.execute((self.shell, "-c", f"exit (if do {{ {source} }} then 0 else 1)"))
+
     def execute(
         self,
         arguments: tuple[str | Path, ...],

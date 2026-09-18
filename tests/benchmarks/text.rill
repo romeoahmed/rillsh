@@ -1,7 +1,13 @@
-fn repeat(n, text) => if n == 0 then text else repeat(n - 1, text + text)
-let prefix = repeat(10, "x")
+fn repeat n text = if n == 0 then text else repeat (n - 1) (text + text)
+
+let prefix = repeat 10 "x"
 let left = prefix + "a"
 let same = prefix + "a"
 let later = prefix + "b"
-fn loop(n) => if n == 0 then true else if left == same and left < later then loop(n - 1) else false
-if loop(1000000) then () else raise(error("Benchmark", "text result"))
+
+fn loop n =
+  if n == 0 then true
+  else if left == same and left < later then loop (n - 1)
+  else false
+
+if loop 1000000 then () else raise (error "Benchmark" "text result")

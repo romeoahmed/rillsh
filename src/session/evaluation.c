@@ -4,15 +4,15 @@
  *
  * Exactly one language context runs at a time. A stopped context retains its
  * continuations, stream scope, pending operation, and import stack. Foreground
- * resumption restores that state; cancellation releases owned resources before
- * discarding roots or displaying borrowed diagnostics.
+ * resumption restores that state. Cleanup releases OS resources before error
+ * recovery; diagnostic owners stay rooted until their text has been consumed.
  */
 #include "diagnostic.h"
 #include "exec/exec.h"
-#include "library/library.h"
-#include "library/stream.h"
-#include "library/value.h"
 #include "module.h"
+#include "native/native.h"
+#include "native/stream.h"
+#include "native/value.h"
 #include "platform/posix.h"
 #include "private.h"
 #include "runtime/runtime.h"
@@ -130,12 +130,13 @@ static bool control(void *data, RillControl action, RillValue value) {
   if (action == RILL_CONTROL_EXIT) {
     if (!s->contexts && !s->callers)
       return false;
-    message = "suspended evaluations remain; cancel them or exit_force";
+    message = "evaluations are suspended; use 'cancel' or 'exit_force'";
   } else if (value.as.integer >= 0) {
     RillJob *job = rill_exec_find(s->exec, (size_t)value.as.integer);
     if (!job || !owned_job(s, job))
       return false;
-    message = "job belongs to an evaluation; control its evaluation handle";
+    message =
+        "job belongs to a suspended evaluation; use its handle from 'jobs ()'";
   } else {
     Context **at = &s->contexts;
     while (*at && (*at)->id != value.as.integer)
@@ -143,7 +144,7 @@ static bool control(void *data, RillControl action, RillValue value) {
     if (!*at)
       message = "evaluation is active or no longer available";
     else if (action == RILL_CONTROL_BG || action == RILL_CONTROL_WAIT)
-      message = "evaluation requires foreground resumption with fg";
+      message = "evaluation can resume only in the foreground; use 'fg handle'";
     else if (action == RILL_CONTROL_FG) {
       s->foreground_request = value.as.integer;
       return true;
@@ -279,7 +280,8 @@ static int evaluate_entry(Session *s, RillSource *source, RillSyntax *syntax) {
       s->callers = nullptr;
       saved->next = s->contexts;
       s->contexts = saved;
-      const char *message = "evaluation stopped; use jobs() and fg(handle)\n";
+      const char *message = "evaluation suspended; use 'jobs ()' to find its "
+                            "handle, then 'fg handle' to resume\n";
       (void)rill_session_write(s->platform.tty, message, strlen(message));
       return 0;
     }
@@ -311,10 +313,10 @@ static int evaluate_entry(Session *s, RillSource *source, RillSyntax *syntax) {
       else
         rill_runtime_resume(
             s->eval, (RillValue){},
-            (RillDiagnostic){
-                .kind = RILL_UNCONSUMED_STREAM,
-                .message =
-                    "script result Stream requires an explicit consumer"});
+            (RillDiagnostic){.kind = RILL_UNCONSUMED_STREAM,
+                             .message =
+                                 "script returned a Stream; consume it with "
+                                 "'collect', 'each', or 'write_stdout'"});
       break;
     case RILL_EVAL_CALLBACK:
       rill_stream_callback(&s->library, result.value);

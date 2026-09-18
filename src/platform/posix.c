@@ -261,28 +261,40 @@ int64_t rill_platform_now() {
   return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-bool rill_platform_input_ready(int fd) {
-  if (fd < 0)
-    return false;
+int rill_platform_ready(int fd, bool writing) {
+  if (fd < 0) {
+    errno = EBADF;
+    return -1;
+  }
 #ifdef __APPLE__
-  if (fd == INT_MAX)
-    return false;
+  if (fd == INT_MAX) {
+    errno = EINVAL;
+    return -1;
+  }
   // Darwin's /dev/tty supports select, not poll. _DARWIN_C_SOURCE enables
   // extended select bitmaps; keep each FD_SET within one actual fd_set.
   fd_set local = {};
   size_t count = (size_t)fd / FD_SETSIZE + 1;
   fd_set *sets = count == 1 ? &local : calloc(count, sizeof(*sets));
   if (!sets)
-    return false;
+    return -1;
   FD_SET(fd % FD_SETSIZE, &sets[count - 1]);
   struct timeval timeout = {};
-  bool ready = select(fd + 1, sets, nullptr, nullptr, &timeout) > 0;
-  if (sets != &local)
+  int ready = select(fd + 1, writing ? nullptr : sets, writing ? sets : nullptr,
+                     nullptr, &timeout);
+  if (sets != &local) {
+    int code = errno;
     free(sets);
+    errno = code;
+  }
   return ready;
 #else
-  struct pollfd input = {.fd = fd, .events = POLLIN};
-  return poll(&input, 1, 0) > 0 &&
-         (input.revents & (POLLIN | POLLHUP | POLLERR));
+  struct pollfd io = {.fd = fd, .events = writing ? POLLOUT : POLLIN};
+  int ready = poll(&io, 1, 0);
+  if (ready > 0 && (io.revents & POLLNVAL)) {
+    errno = EBADF;
+    return -1;
+  }
+  return ready;
 #endif
 }

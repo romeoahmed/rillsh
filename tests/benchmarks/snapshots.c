@@ -5,7 +5,7 @@
  * Update one binding per entry and verify the resulting snapshot. Retained
  * bytes are observations; elapsed time comes from Meson.
  */
-#include "../unit/test.h"
+#include "../support/check.h"
 #include "diagnostic.h"
 #include "runtime/runtime.h"
 #include "source.h"
@@ -25,7 +25,7 @@ int main() {
         eval, name, (RillValue){.kind = RILL_V_INT, .as.integer = (int64_t)i}));
   }
   [[gnu::cleanup(rill_source_clear)]] RillSource source = {};
-  const char code[] = "let key0=0; key9999";
+  const char code[] = "let key0 = key0 + 1; key9999";
   CHECK(rill_source_init(&source, "snapshots-benchmark", code,
                          sizeof(code) - 1) == RILL_OK);
   size_t retained = 0;
@@ -40,9 +40,11 @@ int main() {
     CHECK(event.state == RILL_EVAL_DONE && event.value.kind == RILL_V_INT &&
           event.value.as.integer == 9999);
     rill_runtime_collect(rill_runtime_heap(eval));
-    size_t bytes = rill_runtime_heap(eval)->bytes;
-    retained = bytes;
+    retained = rill_runtime_heap(eval)->bytes;
   }
+  RillValue updated = {};
+  CHECK(rill_runtime_lookup(eval, "key0", &updated));
+  CHECK(updated.kind == RILL_V_INT && updated.as.integer == 512);
   CHECK(printf("{\"retained_bytes\":%zu}\n", retained) > 0);
   rill_runtime_free(eval);
 }

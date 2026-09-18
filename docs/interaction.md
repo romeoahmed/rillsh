@@ -17,23 +17,25 @@ error; there is no script-then-prompt mode. The editor reads and writes the cont
 terminal independently of stdout/stderr redirection. Noninteractive operation uses no
 editor, prompt, automatic value display, startup config, or history writes.
 
-`args()` returns FILE arguments as a List of Bytes, excluding the filename; it is empty
+`args ()` returns FILE arguments as a List of Bytes, excluding the filename; it is empty
 in other modes. `-c` accepts one source argument and no positional arguments. `--help`,
 `--version`, `--no-config`, and `--color=auto|always|never` have fixed meanings. The
 interactive startup file is `rillsh/init.rill` under the resolved XDG config base.
 Startup-file failure reports a diagnostic and leaves a usable prompt. Do not discover
 startup code in ancestor directories or execute code during completion.
 
-Interactive expressions display their results. Unit and declarations display nothing;
-Function display shows available signature metadata without invocation. A JobPlan is
-described without launching it. The REPL parses the complete submitted entry before
+Interactive expressions display their results. Unit and declarations display nothing.
+Today Functions display as `<Function>` and containers show counts; signature help and
+tables are stage-4 work. A JobPlan is described without launching it. The REPL parses the complete submitted entry before
 executing any prefix. Runtime effects completed before a later failure remain real.
 
 ## Expression submission
 
 The parser classifies the entire buffer as Complete, Incomplete, or Invalid with source
 spans. The editor consumes this service; it does not duplicate the grammar with brace
-counts. Enter at the end submits Complete/Invalid input and inserts a newline for
+counts. Bare functions and partial applications are Complete; their signatures never
+trigger continuation or invocation. Closure headers and bodies remain Incomplete until
+closed. Enter at the end submits Complete/Invalid input and inserts a newline for
 Incomplete input. Enter inside the buffer inserts a newline. Invalid input is submitted
 for a diagnostic instead of collecting lines indefinitely.
 
@@ -56,24 +58,24 @@ few aliases. Copy and paste remain available through the terminal emulator. Bind
 require neither Command-key nor Ctrl-Shift-key delivery. Editing modes and configurable
 keymaps are outside the first release.
 
-| Action | Default input |
-| --- | --- |
-| Move one grapheme; delete before/after cursor | Left/Right; Backspace/Delete |
-| Move within multiline input | Up/Down; at the first/last row, navigate history |
-| Move to logical line boundaries | Home/End; Ctrl-A/Ctrl-E aliases |
-| Insert newline without submission | Ctrl-J or Shift-Tab |
-| Submit according to parser state | Enter at buffer end |
-| Submit the whole buffer explicitly | Alt-Enter |
-| Complete; navigate candidates | Tab; Tab/Shift-Tab in the menu |
-| Search previous input incrementally | Ctrl-R |
-| Undo; redo | Ctrl-_; Alt-r |
-| Delete preceding word | Ctrl-W |
-| Delete to logical line end | Ctrl-K |
-| Close completion or history search | Escape |
-| Cancel current entry | Ctrl-C |
-| Request EOF on empty buffer; delete otherwise | Ctrl-D |
-| Suspend the shell while editing | Ctrl-Z |
-| Redraw; show help | Ctrl-L; F1 |
+| Action                                        | Default input                                    |
+| --------------------------------------------- | ------------------------------------------------ |
+| Move one grapheme; delete before/after cursor | Left/Right; Backspace/Delete                     |
+| Move within multiline input                   | Up/Down; at the first/last row, navigate history |
+| Move to logical line boundaries               | Home/End; Ctrl-A/Ctrl-E aliases                  |
+| Insert newline without submission             | Ctrl-J or Shift-Tab                              |
+| Submit according to parser state              | Enter at buffer end                              |
+| Submit the whole buffer explicitly            | Alt-Enter                                        |
+| Complete; navigate candidates                 | Tab; Tab/Shift-Tab in the menu                   |
+| Search previous input incrementally           | Ctrl-R                                           |
+| Undo; redo                                    | Ctrl-_; Alt-r                                    |
+| Delete preceding word                         | Ctrl-W                                           |
+| Delete to logical line end                    | Ctrl-K                                           |
+| Close completion or history search            | Escape                                           |
+| Cancel current entry                          | Ctrl-C                                           |
+| Request EOF on empty buffer; delete otherwise | Ctrl-D                                           |
+| Suspend the shell while editing               | Ctrl-Z                                           |
+| Redraw; show help                             | Ctrl-L; F1                                       |
 
 Word deletion uses runs of whitespace, identifier characters, or punctuation; it is an
 editing convenience rather than a second language tokenizer. A completion menu consumes
@@ -81,7 +83,7 @@ Enter to accept a candidate, never to execute it. Escape closes an overlay witho
 clearing the main buffer. Search acceptance returns to editing; it does not execute the
 selected history entry.
 
-Ctrl-C discards the unsubmitted entry. Ctrl-D requests `exit(0)` only when the buffer is
+Ctrl-C discards the unsubmitted entry. Ctrl-D requests `exit 0` only when the buffer is
 empty; outstanding jobs follow the execution shutdown contract. Ctrl-Z restores terminal
 state and suspends the shell, retaining the buffer for resume. During evaluation,
 interrupt/stop behavior follows [execution](execution.md). Ctrl-Z retains its Unix
@@ -103,13 +105,13 @@ remains in discard-until-marker state before accepting new keys. EOF or terminal
 cancels the pending paste. There is no time-based inference that rapidly typed
 characters must be pasted text.
 
-| Resource | First-release limit |
-| --- | --- |
-| Editable entry, including an uncommitted paste | 1 MiB of UTF-8 bytes |
-| Undo/redo log | 1,000 transactions and 8 MiB of retained edits |
-| Persistent history | 10,000 entries and 16 MiB |
-| Completion list | 200 candidates and 1 MiB of retained text |
-| Key-sequence recognition | 64 bytes; 100 ms ESC/key ambiguity deadline |
+| Resource                                       | First-release limit                            |
+| ---------------------------------------------- | ---------------------------------------------- |
+| Editable entry, including an uncommitted paste | 1 MiB of UTF-8 bytes                           |
+| Undo/redo log                                  | 1,000 transactions and 8 MiB of retained edits |
+| Persistent history                             | 10,000 entries and 16 MiB                      |
+| Completion list                                | 200 candidates and 1 MiB of retained text      |
+| Key-sequence recognition                       | 64 bytes; 100 ms ESC/key ambiguity deadline    |
 
 Over-limit edits leave the previous buffer unchanged and produce a concise message. Old
 undo/history entries may be evicted according to their stated bounds. Consecutive text
@@ -161,7 +163,12 @@ evaluator or codec prints directly into a pipeline. Builtin metadata supplies pa
 names, accepted value categories, effect class, materialization behavior, and help; it
 does not create a separate function/type system.
 
-The renderer can display records and materialized lists as tables. A returned stream is
+Use concise English: state what failed, then give an actionable correction when known.
+Quote syntax and callable examples so they stand out from prose. Use public type and
+function names instead of storage or scheduling terminology. Collection summaries name
+their units (items, fields, stages); help separates usage, options, and examples.
+
+The planned renderer will display records and materialized lists as tables. A returned stream is
 drained before publication and displayed as items arrive. If shown as a table, the first
 row and terminal width determine columns; later cells may be truncated. Formatting never
 pulls extra items merely to sample widths. Heterogeneous rows use ordinary value

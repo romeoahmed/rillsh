@@ -126,6 +126,9 @@ RillJobState rill_exec_state(const RillJob *job);
 bool rill_exec_launched(const RillJob *job);
 /**
  * @brief Return a diagnostic snapshot, independent of process exit status.
+ *
+ * Message storage is borrowed from the job or static text. Consume it before
+ * destroying the job; later supervision may replace the diagnostic.
  */
 RillDiagnostic rill_exec_error(const RillJob *job);
 /**
@@ -190,15 +193,23 @@ void rill_exec_prune(RillExec *exec);
 /** @brief Capacity of each in-process byte edge, independent of kernel pipes.
  */
 static constexpr size_t RILL_EXEC_QUEUE_BYTES = (size_t)64 * 1024;
-/** @brief Consume a prefix of the streaming stdout queue; zero is a no-op.
+/**
+ * @brief Consume a prefix of the streaming stdout queue; zero is a no-op.
  *
- * No allocation occurs. count must not exceed the queued byte count. */
+ * No allocation occurs. The job must use streaming mode, and count must not
+ * exceed the queued byte count.
+ */
 void rill_exec_consume(RillJob *job, size_t count);
 /** @brief Whether a dynamic feed accepts another chunk of at most queue
  * capacity. */
 bool rill_exec_feed_ready(const RillJob *job);
-/** @brief Copy a nonempty chunk into an empty feed queue; false on allocation
- * failure. */
+/**
+ * @brief Copy bytes into an available feed queue; false on allocation failure.
+ *
+ * @pre rill_exec_feed_ready() is true; bytes.size is at most queue capacity.
+ * Bytes must not alias the feed buffer. An empty chunk does not close input;
+ * use rill_exec_feed_end() for EOF.
+ */
 bool rill_exec_feed(RillJob *job, RillBytes bytes);
 /** @brief Close dynamic stdin after its queued bytes have drained. */
 void rill_exec_feed_end(RillJob *job);

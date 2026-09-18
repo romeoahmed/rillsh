@@ -6,9 +6,9 @@
  * checks; grapheme and width cases exercise the implemented text policy.
  */
 #include "text/text.h"
+#include "../support/check.h"
 #include "diagnostic.h"
 #include "source.h"
-#include "test.h"
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>

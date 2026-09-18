@@ -1,0 +1,7 @@
+let total = range 0 10000
+  |> map (add 1)
+  |> filter { x => rem x 2 == 0 }
+  |> fold add 0
+
+if total == 25005000 then ()
+else raise (error "Benchmark" "stream callback result")

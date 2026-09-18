@@ -7,18 +7,19 @@
  * real cleanup services. Scenarios verify errors, retained state, and child
  * reaping.
  */
-#include "../helpers/fds.h"
-#include "../helpers/supervisor.h"
+#include "../support/check.h"
+#include "../support/fds.h"
+#include "../support/supervisor.h"
 #include "diagnostic.h"
 #include "exec/exec.h"
-#include "library/bundle.h"
-#include "library/library.h"
-#include "library/stream.h"
+#include "native/bundle.h"
+#include "native/native.h"
+#include "native/stream.h"
 #include "platform/posix.h"
 #include "runtime/runtime.h"
+#include "session/module.h"
 #include "source.h"
 #include "syntax/syntax.h"
-#include "test.h"
 #include "text/text.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -44,6 +45,7 @@ void *rill_test_malloc(size_t size);
 void *rill_test_calloc(size_t count, size_t size);
 void *rill_test_realloc(void *pointer, size_t size);
 char *rill_test_strdup(const char *text);
+char *rill_test_strndup(const char *text, size_t size);
 
 static int allocation_budget = -1;
 static bool fail_once, allocation_failed;
@@ -72,6 +74,9 @@ void *rill_test_realloc(void *pointer, size_t size) {
 }
 char *rill_test_strdup(const char *text) {
   return allocation_fails() ? nullptr : strdup(text);
+}
+char *rill_test_strndup(const char *text, size_t size) {
+  return allocation_fails() ? nullptr : strndup(text, size);
 }
 char *rill_test_getcwd(char *buffer, size_t size) {
   if (++cwd_calls == fail_cwd) {
@@ -109,8 +114,7 @@ int rill_test_setpgid(pid_t pid, pid_t group) {
   if (result == 0 && kill_before_exec) {
     CHECK(kill(pid, SIGKILL) == 0);
     siginfo_t info = {};
-    // Observe termination without reaping: ownership remains with the
-    // supervisor.
+    // Observe termination without reaping; the supervisor retains ownership.
     CHECK(waitid(P_PID, (id_t)pid, &info, WEXITED | WNOWAIT) == 0);
     CHECK(info.si_code == CLD_KILLED && info.si_status == SIGKILL);
   }
@@ -329,7 +333,15 @@ static void check_text_and_syntax() {
   RillBuffer many = {};
   for (size_t i = 0; i < 1024; ++i)
     CHECK(rill_text_append(&many, "();", 3));
-  const char *cases[] = {many.data, "\"\\u{1f642}\"", "1_234.5e-2",
+  [[gnu::cleanup(rill_text_clear)]] RillBuffer record = {};
+  CHECK(rill_text_append(&record, "{", 1));
+  for (size_t i = 0; i < 96; ++i)
+    CHECK(rill_text_format(&record, "%skey%zu: %zu", i ? ", " : "", i, i));
+  CHECK(rill_text_append(&record, "}", 1));
+  const char *cases[] = {many.data,
+                         record.data,
+                         "\"\\u{1f642}\"",
+                         "1_234.5e-2",
                          "let x = [1, 'two']; x[0]",
                          "job { ^cat 'argument' | ^cat > result 2>&1 }"};
   for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); ++i) {
@@ -394,10 +406,15 @@ static void check_equality_allocations() {
   rill_runtime_heap_clear(&heap);
 }
 static void check_runtime() {
+  const char initial_text[] = "let stable = 12";
   const char *program =
-      "enum Box {Empty,Full {value}}; fn make(x)=>Box.Full({value:x}); let "
-      "saved=make([1,2]); match saved {Box.Full {value:[x,..tail]}=>if "
-      "tail==[2] then x else 0,_=>0}";
+      "enum Box {Empty, Full {value}}\n"
+      "fn make x = Box.Full {value: x}\n"
+      "let saved = make [1, 2]\n"
+      "match saved of {\n"
+      "  Box.Full {value: [x, ..tail]} => if tail == [2] then x else 0,\n"
+      "  _ => 0\n"
+      "}";
   RillSource source = {};
   CHECK(rill_source_init(&source, "fault-runtime", program, strlen(program)) ==
         RILL_OK);
@@ -408,8 +425,8 @@ static void check_runtime() {
     CHECK(rill_runtime_define(
         eval, "saved", (RillValue){.kind = RILL_V_INT, .as.integer = 7}));
     RillSource initial = {};
-    CHECK(rill_source_init(&initial, "initial", "let stable=12", 13) ==
-          RILL_OK);
+    CHECK(rill_source_init(&initial, "initial", initial_text,
+                           sizeof(initial_text) - 1) == RILL_OK);
     RillSyntax base = rill_syntax_parse(&initial);
     CHECK(base.state == RILL_COMPLETE);
     rill_runtime_heap(eval)->stress = true;
@@ -498,18 +515,18 @@ static void check_modules() {
     CHECK(eval);
     CHECK(rill_runtime_define(
         eval, "stable", (RillValue){.kind = RILL_V_INT, .as.integer = 7}));
-    rill_runtime_prelude(eval);
+    CHECK(rill_runtime_prelude(eval));
     rill_runtime_heap(eval)->stress = true;
     [[gnu::cleanup(rill_syntax_clear)]] RillSyntax entry =
-        parse("import 'module' as m; m.identity(m.saved)");
+        parse("import 'module' as m; m.identity m.saved");
     rill_runtime_begin(eval, &entry);
     RillEvalEvent request = {};
     do {
       request = rill_runtime_step(eval);
     } while (request.state == RILL_EVAL_YIELD);
     CHECK(request.state == RILL_EVAL_IMPORT);
-    [[gnu::cleanup(rill_syntax_clear)]] RillSyntax module =
-        parse("export let saved='kept'; export fn identity(x)=>x");
+    [[gnu::cleanup(rill_syntax_clear)]] RillSyntax module = parse(
+        "let saved = 'kept'; fn identity x = x; export {saved, identity}");
     fail_once = true;
     allocation_failed = false;
     allocation_budget = budget;
@@ -547,6 +564,7 @@ static void check_modules() {
   }
 }
 static RillEvalEvent evaluate_library(RillLibrary *library,
+                                      RillModules *modules,
                                       RillSyntax *syntax) {
   rill_runtime_begin(library->eval, syntax);
   RillNativePending pending = {};
@@ -559,6 +577,10 @@ static RillEvalEvent evaluate_library(RillLibrary *library,
     if (!rill_stream_progress(library))
       continue;
     RillEvalEvent event = rill_runtime_step(library->eval);
+    if (event.state == RILL_EVAL_IMPORT || event.state == RILL_EVAL_MODULE) {
+      rill_module_event(modules, library->eval, event);
+      continue;
+    }
     if (event.state == RILL_EVAL_CLEANUP) {
       rill_stream_unwind(library, event.native, event.value);
       continue;
@@ -602,76 +624,133 @@ static void check_library(const char *child) {
   CHECK(rill_text_append(&nested, "0", 1));
   for (size_t i = 0; i < 40; ++i)
     CHECK(rill_text_append(&nested, "}", 1));
-  CHECK(rill_text_format(&deep_json,
-                         "from_json(to_json(from_json('%s')))==from_json('%s')",
-                         nested.data, nested.data));
+  CHECK(rill_text_format(
+      &deep_json, "from_json (to_json (from_json '%s')) == from_json '%s'",
+      nested.data, nested.data));
   const struct {
     const char *name, *source;
     bool exports;
   } cases[] = {
-      {"arguments", "args()==[bytes([97]),bytes([]),bytes([255])]", false},
-      {"environment overrides",
-       "let base=with_env({KEEP:'old',KEY:'first'},"
-       "pipe(command('printf',['text']),job {^cat}));"
-       "let plan=with_env({KEY:'value',NEW:'added'},base); true",
+      {"recursive closure",
+       "let f = rec { loop n acc =>\n"
+       "  if n == 0 then acc else loop (n - 1) (acc + 1)\n"
+       "}\n"
+       "let p = f 10\n"
+       "p 0 == 10",
        false},
-      {"byte conversion",
-       "concat(encode_utf8(text(42)),bytes([33]))==bytes([52,50,33])", false},
-      {"exports", "export let first='one'; export let second='two'; true",
-       true},
-      {"cancelled report",
-       "match wait(handle) {JobReport {completion: Completion.Cancelled "
-       "{reason},..}=>reason=='cancelled',_=>false}",
+      {"text helpers",
+       "join \":\" (split \":\" \"a::b\") == \"a::b\" and trim \"  x  \" == "
+       "\"x\"",
        false},
-      {"error conversion",
-       "match attempt(fn()=>1+true) {Result.Err {error:Error {kind,..}}"
-       "=>kind=='TypeError',_=>false}",
+      {"record entries", "record (entries {a: [1], b: 2}) == {a: [1], b: 2}",
        false},
-      {"record rest", "match {a:1,b:[2,3],c:4} {{a,..rest}=>rest.b==[2,3]}",
+      {"path composition", "join_path \"a\" \"b\" == path \"a/b\"", false},
+      {"unfold and cutoff",
+       "do { range 0 10 |> drop 2 |> find (equal 4) |> equal (some 4) }",
        false},
-      {"nested captures and constants",
-       "let factory=fn(x)=>fn(y)=>fn(z)=>[x,y,z,'same','same'];"
-       "let saved=factory(1)(2); saved(3)==[1,2,3,'same','same']",
-       false},
-      {"record update",
-       "let base={a:1,b:2,c:3,d:4,e:5,f:6,g:7,h:8,i:9,j:10,k:11,l:12,"
-       "m:13,n:14,o:15,p:16,q:17}; let copy=base with {a:[42],q:0};"
-       "copy.a==[42] and copy.q==0 and base.a==1 and base.q==17",
-       false},
-      {"sort",
-       "sort_by(fn(x)=>x.k,[{k:2,v:'a'},{k:1,v:'b'},{k:2,v:'c'}])[2].v=='c'",
-       false},
-      {"stream callbacks",
-       "do {let value=chunks(encode_utf8(\"a\\nb\\n\")) |> lines |> "
-       "map(fn(x)=>x+'!') |> collect; value==['a!','b!']}",
-       false},
-      {"filled stream collection",
-       "do {let value=chunks(encode_utf8(\"a\\nb\\nc\\n\")) |> lines |> "
-       "map(fn(x)=>{item:x}) |> collect_with({max_items:3});"
-       "value==[{item:'a'},{item:'b'},{item:'c'}]}",
-       false},
-      {"nested stream callbacks",
-       "do {let value=chunks(encode_utf8('x')) |> map(fn(x)=>chunks(x) |> "
-       "collect_bytes) |> collect; value==[encode_utf8('x')]}",
-       false},
-      {"resource checkpoint",
-       "do {let kept=chunks(encode_utf8('x')); "
-       "let result=attempt(fn()=>do {let lost=chunks(encode_utf8('y')); "
-       "raise(error('Example','failed'))}); "
-       "match result {Result.Err {error}=>error.kind=='Example' and "
-       "collect_bytes(kept)==encode_utf8('x'),_=>false}}",
-       false},
-      {"JSON conversion",
-       "from_json(to_json({a:[1,1.0,null,true,'x']}))=={a:[1,1.0,null,true,'x']"
+      {"fold control",
+       "do {\n"
+       "  fold_until { a x =>\n"
+       "    Control.Stop {value: a + x}\n"
+       "  } 0 (items [1, 2]) == 1\n"
        "}",
        false},
+      {"stdin cleanup", "do { let input = stdin (); close input; true }",
+       false},
+      {"arguments", "args () == [bytes [97], bytes [], bytes [255]]", false},
+      {"environment overrides",
+       "let base = (with_env {KEEP: 'old', KEY: 'first'}\n"
+       "  (pipe (command 'printf' ['text']) job { ^cat }))\n"
+       "let plan = with_env {KEY: 'value', NEW: 'added'} base\n"
+       "true",
+       false},
+      {"byte conversion",
+       "concat (encode_utf8 (text 42)) (bytes [33]) == bytes [52, 50, 33]",
+       false},
+      {"exports",
+       "let first = 'one'; let second = 'two'; export {first, second}; true",
+       true},
+      {"cancelled report",
+       "match wait handle of {\n"
+       "  JobReport {completion: Completion.Cancelled {reason}, ..} => reason "
+       "== 'cancelled',\n"
+       "  _ => false\n"
+       "}",
+       false},
+      {"error conversion",
+       "match attempt { () => 1 + true } of {\n"
+       "  Result.Err {error: Error {kind, ..}} => kind == 'TypeError',\n"
+       "  _ => false\n"
+       "}",
+       false},
+      {"record rest",
+       "match {a: 1, b: [2, 3], c: 4} of { {a, ..rest} => rest.b == [2, 3] }",
+       false},
+      {"nested captures and constants",
+       "let factory = { x => { y => { z => [x, y, z, 'same', 'same'] } } }\n"
+       "let saved = factory 1 2\n"
+       "saved 3 == [1, 2, 3, 'same', 'same']",
+       false},
+      {"record update",
+       "let base = {\n"
+       "  a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7, h: 8, i: 9,\n"
+       "  j: 10, k: 11, l: 12, m: 13, n: 14, o: 15, p: 16, q: 17\n"
+       "}\n"
+       "let copy = base with {a: [42], q: 0}\n"
+       "copy.a == [42] and copy.q == 0 and base.a == 1 and base.q == 17",
+       false},
+      {"sort",
+       "(sort_by { x => x.k } [{k: 2, v: 'a'}, {k: 1, v: 'b'}, {k: 2, v: "
+       "'c'}])[2].v == 'c'",
+       false},
+      {"stream callbacks",
+       "do {\n"
+       "  let value = chunks (encode_utf8 \"a\\nb\\n\")\n"
+       "    |> lines |> map { x => x + '!' } |> collect\n"
+       "  value == ['a!', 'b!']\n"
+       "}",
+       false},
+      {"filled stream collection",
+       "do {\n"
+       "  let value = chunks (encode_utf8 \"a\\nb\\nc\\n\")\n"
+       "    |> lines |> map { x => {item: x} } |> collect_with {max_items: 3}\n"
+       "  value == [{item: 'a'}, {item: 'b'}, {item: 'c'}]\n"
+       "}",
+       false},
+      {"nested stream callbacks",
+       "do {\n"
+       "  let value = chunks (encode_utf8 'x')\n"
+       "    |> map { x => chunks x |> collect_bytes } |> collect\n"
+       "  value == [encode_utf8 'x']\n"
+       "}",
+       false},
+      {"resource checkpoint",
+       "do {\n"
+       "  let kept = chunks (encode_utf8 'x')\n"
+       "  let result = attempt { () =>\n"
+       "    let lost = chunks (encode_utf8 'y')\n"
+       "    raise (error 'Example' 'failed')\n"
+       "  }\n"
+       "  match result of {\n"
+       "    Result.Err {error} =>\n"
+       "      error.kind == 'Example' and collect_bytes kept == encode_utf8 "
+       "'x',\n"
+       "    _ => false\n"
+       "  }\n"
+       "}",
+       false},
+      {"JSON conversion",
+       "from_json (to_json {a: [1, 1.0, null, true, 'x']}) == {a: [1, 1.0, "
+       "null, true, 'x']}",
+       false},
       {"deep JSON conversion", deep_json.data, false},
-      {"Unicode scalars", "scalars('\u754ca')==['\u754c','a']", false}};
+      {"Unicode scalars", "scalars '\u754ca' == ['\u754c', 'a']", false}};
   for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); ++i) {
     bool complete = false;
     for (int budget = 0; !complete; ++budget) {
       RillEval *eval = rill_runtime_new(natives, native_count);
       CHECK(eval);
+      [[gnu::cleanup(rill_module_clear)]] RillModules modules = {};
       char *args[] = {(char[]){"a"}, (char[]){""}, (char[]){"\xff"}};
       RillLibrary library = {.eval = eval,
                              .exec = exec,
@@ -680,8 +759,9 @@ static void check_library(const char *child) {
                              .argument_count = 3};
       [[gnu::cleanup(rill_syntax_clear)]] RillSyntax prelude =
           parse(rill_library_source("std:prelude"));
-      CHECK(evaluate_library(&library, &prelude).state == RILL_EVAL_DONE);
-      rill_runtime_prelude(eval);
+      CHECK(evaluate_library(&library, &modules, &prelude).state ==
+            RILL_EVAL_DONE);
+      CHECK(rill_runtime_prelude(eval));
       CHECK(rill_runtime_define(
           eval, "handle",
           (RillValue){.kind = RILL_V_JOB,
@@ -694,7 +774,7 @@ static void check_library(const char *child) {
       fail_once = true;
       allocation_failed = false;
       allocation_budget = budget;
-      RillEvalEvent event = evaluate_library(&library, &syntax);
+      RillEvalEvent event = evaluate_library(&library, &modules, &syntax);
       if (event.state == RILL_EVAL_DONE) {
         RillValue exports = rill_runtime_exports(eval);
         if (exports.kind == RILL_V_UNIT)
@@ -731,6 +811,7 @@ static void check_library(const char *child) {
       rill_stream_cancel(&library);
       CHECK(!rill_stream_live(&library));
       rill_stream_clear(&library);
+      CHECK(!library.input_claimed);
       rill_runtime_free(eval);
     }
   }

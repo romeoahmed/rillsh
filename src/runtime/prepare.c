@@ -4,8 +4,8 @@
  *
  * Prepare exact free-name layouts and a code-local pool of immutable Strings.
  * Closures retain this owner; escaped literals do not retain code. Preparation
- * runs no user code and defers pattern errors until their expression is
- * reached.
+ * runs no user code; syntax has already validated pattern structure. It
+ * consumes the parse owner even on failure, leaving the caller's result empty.
  */
 #include "diagnostic.h"
 #include "private.h"
@@ -35,7 +35,15 @@ RillValue rill_eval_code(RillEval *e, RillSyntax *syntax) {
   if (syntax->allocation < sizeof(RillSyntax))
     goto failure;
   size_t count = 0, constants = 0, bytes = {}, allocation = {}, total = {};
-  for (const RillNode *n = syntax->allocated; n; n = n->allocated_next) {
+  for (RillNode *n = syntax->allocated; n; n = n->allocated_next) {
+    if (n->kind == RILL_LIST || n->kind == RILL_RECORD ||
+        n->kind == RILL_ENUM || n->kind == RILL_PLAN || n->kind == RILL_STAGE) {
+      n->slots = OPERANDS;
+      size_t width = n->kind == RILL_RECORD || n->kind == RILL_ENUM ? 2 : 1;
+      for (const RillNode *child = n->children; child; child = child->next)
+        if (ckd_add(&n->slots, n->slots, width))
+          goto failure;
+    }
     if (n->kind == RILL_FUNCTION)
       ++count;
     if (syntax->state == RILL_COMPLETE && constant(n))
@@ -82,26 +90,6 @@ RillValue rill_eval_code(RillEval *e, RillSyntax *syntax) {
     n->function = function;
     code->functions[function++] = (Captures){.node = n};
   }
-  if (code->syntax.state == RILL_COMPLETE)
-    for (RillNode *n = code->syntax.allocated; n; n = n->allocated_next) {
-      if (n->kind != RILL_BIND && n->kind != RILL_FUNCTION &&
-          n->kind != RILL_ARM)
-        continue;
-      Bound *names = nullptr;
-      RillValue origin = e->roots[ERROR_CODE];
-      bool valid = rill_eval_pattern_names(e, n->pattern, &names);
-      rill_eval_names_free(names);
-      if (!valid && e->error.kind == RILL_MEMORY) {
-        rill_eval_code_free(code);
-        goto failure;
-      }
-      if (n->pattern)
-        n->pattern->repeated = !valid;
-      // Defer diagnosis until matching, after subject/argument effects.
-      // Preparation must not raise pattern errors in unexecuted branches.
-      e->error = (RillDiagnostic){};
-      e->roots[ERROR_CODE] = origin;
-    }
   size_t extra = {};
   if (ckd_add(&extra, bytes, code->syntax.allocation - sizeof(RillSyntax))) {
     rill_eval_code_free(code);

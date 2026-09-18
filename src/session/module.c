@@ -9,7 +9,7 @@
  */
 #include "module.h"
 #include "diagnostic.h"
-#include "library/bundle.h"
+#include "native/bundle.h"
 #include "platform/posix.h"
 #include "runtime/runtime.h"
 #include "source.h"
@@ -32,27 +32,28 @@ struct RillModule {
   bool bundled, complete;
   RillValue value;
 };
-static void resume_error(RillEval *eval, RillError kind, const char *message) {
+static void resume_error(RillEval *eval, RillError kind, int code,
+                         const char *message) {
   rill_runtime_resume(
       eval, (RillValue){},
-      (RillDiagnostic){.kind = kind, .code = errno, .message = message});
+      (RillDiagnostic){.kind = kind, .code = code, .message = message});
 }
 void rill_module_event(RillModules *m, RillEval *eval, RillEvalEvent event) {
   if (event.state == RILL_EVAL_MODULE) {
     RillModule *entry = m->active;
     if (!entry) {
-      resume_error(eval, RILL_TYPE, "module completion without import");
+      resume_error(eval, RILL_TYPE, 0, "module completion without import");
       return;
     }
     RillError escape =
         rill_runtime_persistent(rill_runtime_heap(eval), event.value);
     if (escape) {
-      resume_error(eval, escape, "module cannot export a scoped Stream");
+      resume_error(eval, escape, 0, "module cannot export a scoped Stream");
       return;
     }
     entry->value = event.value;
     if (!rill_runtime_retain_module(eval, event.value)) {
-      resume_error(eval, RILL_MEMORY, "cannot retain module");
+      resume_error(eval, RILL_MEMORY, 0, "cannot retain module");
       return;
     }
     entry->complete = true;
@@ -62,13 +63,13 @@ void rill_module_event(RillModules *m, RillEval *eval, RillEvalEvent event) {
   }
   RillBytes path = event.value.as.object->bytes;
   if (memchr(path.data, 0, path.size)) {
-    resume_error(eval, RILL_TYPE, "module path contains NUL");
+    resume_error(eval, RILL_TYPE, 0, "module path contains NUL");
     return;
   }
   bool bundled = path.size >= 4 && !memcmp(path.data, "std:", 4);
   const char *embedded = bundled ? rill_library_source(path.data) : nullptr;
   if (bundled && (!embedded || !strcmp(path.data, "std:prelude"))) {
-    resume_error(eval, RILL_IO, "unknown standard module");
+    resume_error(eval, RILL_IO, 0, "unknown standard module");
     return;
   }
   [[gnu::cleanup(rill_text_clear)]] RillBuffer resolved = {}, contents = {};
@@ -77,28 +78,28 @@ void rill_module_event(RillModules *m, RillEval *eval, RillEvalEvent event) {
     const char *slash = strrchr(source, '/');
     if (source[0] == '/' && slash) {
       if (!rill_text_append(&resolved, source, (size_t)(slash - source) + 1)) {
-        resume_error(eval, RILL_MEMORY, "allocation failed");
+        resume_error(eval, RILL_MEMORY, 0, "allocation failed");
         return;
       }
     } else if (m->base) {
       if (!rill_text_format(&resolved, "%s/", m->base)) {
-        resume_error(eval, RILL_MEMORY, "allocation failed");
+        resume_error(eval, RILL_MEMORY, 0, "allocation failed");
         return;
       }
     } else {
-      resume_error(eval, RILL_IO, "entry directory unavailable");
+      resume_error(eval, RILL_IO, 0, "entry directory unavailable");
       return;
     }
   }
   if (!rill_text_append(&resolved, path.data, path.size)) {
-    resume_error(eval, RILL_MEMORY, "allocation failed");
+    resume_error(eval, RILL_MEMORY, 0, "allocation failed");
     return;
   }
   struct stat identity = {};
   char *canonical =
       bundled ? strdup(path.data) : realpath(resolved.data, nullptr);
   if (!canonical) {
-    resume_error(eval, errno == ENOMEM ? RILL_MEMORY : RILL_IO,
+    resume_error(eval, errno == ENOMEM ? RILL_MEMORY : RILL_IO, errno,
                  "cannot resolve module");
     return;
   }
@@ -110,13 +111,13 @@ void rill_module_event(RillModules *m, RillEval *eval, RillEvalEvent event) {
     // Opening a FIFO must not wait for a writer before type validation.
     if (fd < 0 || fstat(fd, &identity) < 0) {
       free(canonical);
-      resume_error(eval, RILL_IO, "cannot open module source");
+      resume_error(eval, RILL_IO, errno, "cannot open module source");
       return;
     }
     if (!S_ISREG(identity.st_mode)) {
       free(canonical);
-      errno = EINVAL;
-      resume_error(eval, RILL_IO, "module source must be a regular file");
+      resume_error(eval, RILL_IO, EINVAL,
+                   "module source must be a regular file");
       return;
     }
   }
@@ -128,7 +129,7 @@ void rill_module_event(RillModules *m, RillEval *eval, RillEvalEvent event) {
       continue;
     free(canonical);
     if (!entry->complete)
-      resume_error(eval, RILL_TYPE, "cyclic module import");
+      resume_error(eval, RILL_TYPE, 0, "cyclic module import");
     else
       rill_runtime_resume(eval, entry->value, (RillDiagnostic){});
     return;
@@ -159,7 +160,7 @@ void rill_module_event(RillModules *m, RillEval *eval, RillEvalEvent event) {
   rill_platform_close(&fd);
   if (!read_ok) {
     free(canonical);
-    resume_error(eval, errno == ENOMEM ? RILL_MEMORY : RILL_IO,
+    resume_error(eval, errno == ENOMEM ? RILL_MEMORY : RILL_IO, errno,
                  "cannot read module");
     return;
   }
@@ -168,7 +169,7 @@ void rill_module_event(RillModules *m, RillEval *eval, RillEvalEvent event) {
       rill_source_init(&source, canonical, contents.data, contents.size);
   if (failure) {
     free(canonical);
-    resume_error(eval, failure, "invalid module source");
+    resume_error(eval, failure, 0, "invalid module source");
     return;
   }
   [[gnu::cleanup(rill_syntax_clear)]] RillSyntax syntax =
@@ -177,7 +178,7 @@ void rill_module_event(RillModules *m, RillEval *eval, RillEvalEvent event) {
   RillModule *entry = malloc(sizeof(*entry));
   if (!entry) {
     free(canonical);
-    resume_error(eval, RILL_MEMORY, "allocation failed");
+    resume_error(eval, RILL_MEMORY, 0, "allocation failed");
     return;
   }
   *entry = (RillModule){.next = m->entries,

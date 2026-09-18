@@ -7,17 +7,12 @@ from support import ShellCase
 
 
 class CodecTests(ShellCase):
-    def check(self, expression: str) -> None:
-        self.execute(
-            (self.shell, "-c", f"exit(if (do {{{expression}}}) then 0 else 1)")
-        )
-
-    def decode_lines(self, source: str) -> object:
+    def decode_lines(self, stream: str) -> object:
         result = self.execute(
             (
                 self.shell,
                 "-c",
-                f"{source} |> chunks |> lines |> collect |> to_json |> chunks |> write_stdout",
+                f"{stream} |> lines |> collect |> to_json |> chunks |> write_stdout",
             )
         )
         self.assertEqual(result.stderr, b"")
@@ -36,7 +31,7 @@ class CodecTests(ShellCase):
         ):
             with self.subTest(text=text):
                 self.assertEqual(
-                    self.decode_lines(f"bytes({list(text.encode())})"), expected
+                    self.decode_lines(f"chunks (bytes {list(text.encode())})"), expected
                 )
         for data in (b"\xc0\x80", b"\xf0\x9f", b"a\n\xff", b"\xed\xa0\x80"):
             with self.subTest(data=data):
@@ -44,16 +39,16 @@ class CodecTests(ShellCase):
                     (
                         self.shell,
                         "-c",
-                        f"chunks(bytes({list(data)})) |> lines |> collect",
+                        f"chunks (bytes {list(data)}) |> lines |> collect",
                     ),
                     status=1,
                 )
                 self.assertIn(b"DecodeError", result.stderr)
-        self.check(
-            'collect(lines_with({max_line_bytes:0},chunks(encode_utf8("\\n"))))==[""]'
+        self.assert_rill(
+            'collect (lines_with {max_line_bytes: 0} (chunks (encode_utf8 "\\n"))) == [""]'
         )
-        self.check(
-            'collect(lines_with({max_line_bytes:1},chunks(encode_utf8("x\\n"))))==["x"]'
+        self.assert_rill(
+            'collect (lines_with {max_line_bytes: 1} (chunks (encode_utf8 "x\\n"))) == ["x"]'
         )
 
     def test_utf8_across_chunk_boundaries(self) -> None:
@@ -63,11 +58,40 @@ class CodecTests(ShellCase):
                 first = "a" * size + "\U0001f642"
                 (self.work / "text").write_text(first + "\r\nlast\r", encoding="utf-8")
                 self.assertEqual(
-                    self.decode_lines('read_text(path("text")) |> encode_utf8'),
+                    self.decode_lines('chunks (encode_utf8 (read_text (path "text")))'),
                     [first, "last\r"],
                 )
 
-    def test_json_strictness_and_roundtrips(self) -> None:
+    def test_lines_independent_of_chunk_partition(self) -> None:
+        cases = (
+            (b"\r\n", [""]),
+            ("\u00e9\U0001f642\r\nlast\r".encode(), ["\u00e9\U0001f642", "last\r"]),
+            (b"\x00\n\n", ["\x00", ""]),
+        )
+        for data, expected in cases:
+            for split in range(len(data) + 1):
+                with self.subTest(data=data, split=split):
+                    chunks = (data[:split], data[split:])
+                    stream = (
+                        "items ["
+                        + ", ".join(f"bytes {list(chunk)}" for chunk in chunks if chunk)
+                        + "]"
+                    )
+                    self.assertEqual(self.decode_lines(stream), expected)
+            with self.subTest(data=data, partition="one byte per chunk"):
+                stream = "items [" + ", ".join(f"bytes [{byte}]" for byte in data) + "]"
+                self.assertEqual(self.decode_lines(stream), expected)
+
+        for data in (b"\xc0\x80", b"\xf0\x9f", b"a\n\xff", b"\xed\xa0\x80"):
+            for split in range(1, len(data)):
+                with self.subTest(invalid=data, split=split):
+                    stream = f"items [bytes {list(data[:split])}, bytes {list(data[split:])}]"
+                    result = self.execute(
+                        (self.shell, "-c", f"{stream} |> lines |> collect"), status=1
+                    )
+                    self.assertIn(b"DecodeError", result.stderr)
+
+    def test_json_rejects_invalid_documents(self) -> None:
         invalid = (
             ' {"a":1,"a":2}',
             '{"a":1,"\\u0061":2}',
@@ -86,9 +110,11 @@ class CodecTests(ShellCase):
                 self.assertIn(
                     b"DecodeError",
                     self.execute(
-                        (self.shell, "-c", f"from_json({json.dumps(text)})"), status=1
+                        (self.shell, "-c", f"from_json {json.dumps(text)}"), status=1
                     ).stderr,
                 )
+
+    def test_json_roundtrips_against_python(self) -> None:
         random_source = random.Random(0)
         values = [
             None,
@@ -119,7 +145,7 @@ class CodecTests(ShellCase):
                     (
                         self.shell,
                         "-c",
-                        f"from_json({json.dumps(document)}) |> to_json |> chunks |> write_stdout",
+                        f"from_json {json.dumps(document)} |> to_json |> chunks |> write_stdout",
                     )
                 )
                 self.assertEqual(result.stderr, b"")
@@ -129,39 +155,75 @@ class CodecTests(ShellCase):
                     json.dumps(json.loads(result.stdout), sort_keys=True),
                     json.dumps(value, sort_keys=True),
                 )
-        for value in ("()", 'path("x")', "bytes([])", "fn(x)=>x", "Option.None"):
-            self.assertIn(
-                b"TypeError",
-                self.execute(
-                    (self.shell, "-c", f"to_json({{nested:[{value}]}})"), status=1
-                ).stderr,
-            )
+
+    def test_json_rejects_unsupported_nested_values(self) -> None:
+        for value in ("()", 'path "x"', "bytes []", "{ x => x }", "Option.None"):
+            with self.subTest(value=value):
+                result = self.execute(
+                    (self.shell, "-c", f"to_json {{nested: [{value}]}}"), status=1
+                )
+                self.assertIn(b"TypeError", result.stderr)
+                self.assertIn(b'$["nested"][0]', result.stderr)
 
     def test_json_depth_and_wide_siblings(self) -> None:
         for depth in (1, 32, 65, 256):
             with self.subTest(depth=depth):
                 document = "[" * (depth - 1) + "0" + "]" * (depth - 1)
                 (self.work / "nested.json").write_text(document, encoding="utf-8")
-                self.check(f"""
-                  let input=read_text(path("nested.json"));
-                  let value=from_json_with({{max_depth:{depth}}},input);
-                  decode_utf8(to_json_with({{max_depth:{depth}}},value))==input
-                """)
+                self.assert_rill(
+                    f"""
+let input = read_text (path "nested.json")
+let value = from_json_with {{max_depth: {depth}}} input
+decode_utf8 (to_json_with {{max_depth: {depth}}} value) == input
+"""
+                )
                 if depth > 1:
                     result = self.execute(
                         (
                             self.shell,
                             "-c",
-                            f'from_json_with({{max_depth:{depth - 1}}},read_text(path("nested.json")))',
+                            f'from_json_with {{max_depth: {depth - 1}}} (read_text (path "nested.json"))',
                         ),
                         status=1,
                     )
                     self.assertIn(b"LimitExceeded", result.stderr)
         document = [{"n": i, "items": [None, str(i)]} for i in range(4096)]
         (self.work / "wide.json").write_text(json.dumps(document), encoding="utf-8")
-        self.check("""
-          let value=from_json(read_text(path("wide.json")));
-          length(value)==4096 and value[0]=={n:0,items:[null,"0"]} and
-          value[4095]=={n:4095,items:[null,"4095"]} and
-          from_json(to_json(value))==value
-        """)
+        self.assert_rill("""
+let value = from_json (read_text (path "wide.json"))
+length value == 4096 and value[0] == {n: 0, items: [null, "0"]} and
+value[4095] == {n: 4095, items: [null, "4095"]} and
+from_json (to_json value) == value
+""")
+
+    def test_json_byte_limits(self) -> None:
+        # The budget counts encoded bytes, not Unicode scalars or decoded values.
+        document = '["\U0001f642"]'.encode()
+        (self.work / "bounded.json").write_bytes(document)
+        for limit, status in ((len(document), 0), (len(document) - 1, 1)):
+            with self.subTest(limit=limit):
+                result = self.execute(
+                    (
+                        self.shell,
+                        "-c",
+                        f'from_json_with {{max_bytes: {limit}}} (read_text "bounded.json")',
+                    ),
+                    status=status,
+                )
+                if status:
+                    self.assertIn(b"LimitExceeded", result.stderr)
+                else:
+                    self.assertEqual(result.stderr, b"")
+        for limit, status in ((5, 0), (4, 1)):
+            with self.subTest(output_limit=limit):
+                result = self.execute(
+                    (
+                        self.shell,
+                        "-c",
+                        f'to_json_with {{max_bytes: {limit}}} ["x"] |> chunks |> write_stdout',
+                    ),
+                    status=status,
+                )
+                self.assertEqual(result.stdout, b"" if status else b'["x"]')
+                if status:
+                    self.assertIn(b"LimitExceeded", result.stderr)

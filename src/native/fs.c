@@ -83,7 +83,7 @@ RillValue rill_library_read_text(RillHeap *heap, RillValue options,
   }
   if (!rill_text_valid(buffer.data, buffer.size)) {
     *error = (RillDiagnostic){.kind = RILL_DECODE,
-                              .message = "text file is not UTF-8"};
+                              .message = "text file contains invalid UTF-8"};
     return (RillValue){};
   }
   RillValue out = rill_runtime_object(heap, RILL_V_STRING, nullptr, 0,
@@ -112,7 +112,7 @@ RillValue rill_library_glob(RillHeap *heap, RillValue pattern,
   if (status && status != GLOB_NOMATCH) {
     *error =
         (RillDiagnostic){.kind = status == GLOB_NOSPACE ? RILL_MEMORY : RILL_IO,
-                         .message = "filesystem expansion failed"};
+                         .message = "cannot expand glob pattern"};
     return (RillValue){};
   }
   if (matches.gl_pathc > 1)

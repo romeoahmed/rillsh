@@ -108,8 +108,10 @@ static void io_failure(RillJob *j, const char *message) {
 // One bounded operation per channel keeps a busy job from starving others.
 static void pump(RillJob *j) {
   if (j->relay >= 0 && j->captured[1].size) {
-    struct pollfd fd = {.fd = j->relay, .events = POLLOUT};
-    if (poll(&fd, 1, 0) > 0) {
+    int ready = rill_platform_ready(j->relay, true);
+    if (ready < 0 && errno != EINTR)
+      io_failure(j, "cannot check child stderr relay");
+    if (ready > 0) {
       ssize_t n = write(j->relay, j->captured[1].data, j->captured[1].size);
       if (n > 0) {
         memmove(j->captured[1].data, j->captured[1].data + n,
@@ -305,10 +307,10 @@ bool rill_exec_poll(RillExec *e, int timeout, int extra_fd) {
   }
   if (timeout < 0 || timeout > 20)
     timeout = 20; // Also service cancellation deadlines without a timer FD.
-  if (rill_platform_input_ready(extra_fd))
+  if (extra_fd >= 0 && rill_platform_ready(extra_fd, false) > 0)
     timeout = 0;
   (void)poll(fds, (nfds_t)count, timeout);
-  return rill_platform_input_ready(extra_fd);
+  return extra_fd >= 0 && rill_platform_ready(extra_fd, false) > 0;
 }
 void rill_exec_signal(RillExec *e, unsigned events) {
   RillJob *j = e->attached;

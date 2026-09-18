@@ -13,6 +13,7 @@ Checks:
   - bugprone-float-loop-counter
   - bugprone-implicit-widening-of-multiplication-result
   - bugprone-inc-dec-in-conditions
+  - bugprone-incorrect-roundings
   - bugprone-infinite-loop
   - bugprone-integer-division
   - bugprone-invalid-enum-default-initialization
@@ -53,4 +54,5 @@ Checks:
   - misc-redundant-expression
   - misc-static-assert
   - modernize-redundant-void-arg
+  - readability-non-const-parameter
 WarningsAsErrors: '*'

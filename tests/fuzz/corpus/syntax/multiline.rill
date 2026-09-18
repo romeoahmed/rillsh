@@ -1,0 +1,8 @@
+let callbacks = [
+  { [head, ..tail] =>
+    let value = head
+    {value, tail}
+  }
+]
+(callbacks[0]
+  [1, 2]) |> { result => result with {value: 3} }

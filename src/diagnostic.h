@@ -39,7 +39,7 @@ typedef struct {
   const char *label;   ///< Optional evaluator-rooted language Error kind.
   RillError kind;      ///< Semantic category.
   size_t offset;       ///< Source byte offset.
-  int code;            ///< Native errno or selected shell exit status.
+  int code;            ///< errno/status; zero when inapplicable.
   const char *message; ///< Borrowed explanation.
   bool has_argument;   ///< Argument index is meaningful for this failure.
   size_t argument;     ///< Zero-based argv index when present.

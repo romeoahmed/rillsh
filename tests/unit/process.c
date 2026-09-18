@@ -6,12 +6,12 @@
  * cutoff, and cleanup. Each runs in a separate Meson process; harness cleanup
  * retains responsibility for every unreaped helper child.
  */
-#include "../helpers/fds.h"
-#include "../helpers/supervisor.h"
+#include "../support/check.h"
+#include "../support/fds.h"
+#include "../support/supervisor.h"
 #include "diagnostic.h"
 #include "exec/exec.h"
 #include "platform/posix.h"
-#include "test.h"
 #include "text/text.h"
 #include <errno.h>
 #include <fcntl.h>

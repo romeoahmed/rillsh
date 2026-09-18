@@ -4,7 +4,7 @@
 import argparse
 import hashlib
 import json
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from itertools import chain
 from pathlib import Path
 from typing import TypedDict
@@ -66,19 +66,24 @@ def combining(text: str) -> Iterator[Range]:
 
 
 def coalesced(ranges: Iterable[Range]) -> Iterator[Range]:
-    """Sort ranges and merge overlapping or adjacent ranges with equal properties."""
-    ordered = iter(sorted(ranges))
-    current = next(ordered, None)
-    if current is None:
-        return
-    for first, last, prop in ordered:
+    """Normalize code-point ranges for binary search; reject conflicting overlaps."""
+    current: Range | None = None
+    for first, last, prop in sorted(ranges):
+        if not 0 <= first <= last <= 0x10FFFF:
+            raise ValueError(f"Invalid Unicode range: {first:#x}..{last:#x}")
+        if current is None:
+            current = first, last, prop
+            continue
         start, end, previous = current
+        if first <= end and prop != previous:
+            raise ValueError(f"Conflicting Unicode properties at {first:#x}")
         if first <= end + 1 and prop == previous:
             current = start, max(end, last), prop
         else:
             yield current
             current = first, last, prop
-    yield current
+    if current is not None:
+        yield current
 
 
 def table(name: str, ranges: Iterable[Range]) -> Iterator[str]:
@@ -90,7 +95,7 @@ def table(name: str, ranges: Iterable[Range]) -> Iterator[str]:
     yield "};"
 
 
-def generate(version: str, inputs: dict[str, str]) -> str:
+def generate(version: str, inputs: Mapping[str, str]) -> str:
     """Render verified property data as C enums and compact range tables."""
     core = inputs["DerivedCoreProperties.txt"]
     emoji = inputs["emoji-data.txt"]
@@ -132,33 +137,43 @@ def generate(version: str, inputs: dict[str, str]) -> str:
         "enum { " + ", ".join(f"G_{name}" for name in GRAPHEME_NAMES) + " };",
         "enum { I_None, I_Consonant, I_Extend, I_Linker };",
     )
-    return "\n".join(chain(header, *(table(*item) for item in tables))) + "\n"
+    body = chain.from_iterable(table(name, ranges) for name, ranges in tables)
+    return "\n".join(chain(header, body)) + "\n"
 
 
 def verified_inputs(directory: Path, manifest: Manifest) -> dict[str, str]:
-    def read(item: Input) -> tuple[str, str]:
+    """Read and verify pinned bytes before any property transformation."""
+    inputs = {}
+    for item in manifest["inputs"]:
         data = (directory / item["file"]).read_bytes()
         if hashlib.sha256(data).hexdigest() != item["sha256"]:
             raise ValueError(f"Unicode input hash mismatch: {item['file']}")
-        return item["file"], data.decode("utf-8")
-
-    return dict(map(read, manifest["inputs"]))
+        inputs[item["file"]] = data.decode("utf-8")
+    return inputs
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--check", action="store_true", help="Verify without rewriting")
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Check generated tables without changing files",
+    )
     args = parser.parse_args()
     root = Path(__file__).parent.parent
     directory = root / "data/unicode"
     manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
-    result = generate(manifest["version"], verified_inputs(directory, manifest))
+    result = generate(manifest["version"], verified_inputs(directory, manifest)).encode(
+        "utf-8"
+    )
     target = root / "src/text/unicode_tables.inc"
     if args.check:
-        if target.read_text(encoding="utf-8") != result:
-            raise SystemExit("Unicode tables differ; run tools/unicode.py")
+        if target.read_bytes() != result:
+            raise SystemExit(
+                "Unicode tables are out of date; run 'python3 tools/unicode.py'"
+            )
     else:
-        target.write_text(result, encoding="utf-8")
+        target.write_bytes(result)
 
 
 if __name__ == "__main__":

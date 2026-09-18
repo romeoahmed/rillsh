@@ -1,1 +1,5 @@
-enum E {A, B {value}}; match subject { E.B {value:[first,..rest]} if true=>rest, _=>[] }
+enum E {A, B {value}}
+match subject of {
+  E.B {value: [first, ..rest]} if true => rest,
+  _ => []
+}

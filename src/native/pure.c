@@ -8,6 +8,7 @@
  */
 #include "pure.h"
 #include "diagnostic.h"
+#include "json.h"
 #include "runtime/runtime.h"
 #include "text/text.h"
 #include "value.h"
@@ -70,6 +71,25 @@ static bool sort_limits(RillValue options, size_t *items, size_t *bytes,
   *bytes = limits[1].value;
   return true;
 }
+// KMP keeps literal splitting linear even for repeated prefixes. Both strings
+// are valid UTF-8, so a complete delimiter cannot split a scalar.
+static size_t separator(RillBytes value, RillBytes delimiter,
+                        const size_t *prefix, size_t start) {
+  size_t matched = 0;
+  for (size_t i = start; i < value.size; ++i) {
+    while (matched && value.data[i] != delimiter.data[matched])
+      matched = prefix[matched - 1];
+    if (value.data[i] == delimiter.data[matched])
+      ++matched;
+    if (matched == delimiter.size)
+      return i + 1 - matched;
+  }
+  return value.size;
+}
+static bool trim_byte(char ch) {
+  return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\f' ||
+         ch == '\v';
+}
 RillValue rill_library_pure(RillHeap *h, RillValue input, RillDiagnostic *d) {
   if (!list(input) || !rill_runtime_count(input))
     return fail(d, RILL_TYPE, "invalid primitive request");
@@ -83,6 +103,11 @@ RillValue rill_library_pure(RillHeap *h, RillValue input, RillDiagnostic *d) {
   if (!strcmp(op, "is_stream"))
     return (RillValue){.kind = RILL_V_BOOL,
                        .as.integer = a.kind == RILL_V_STREAM};
+  if (!strcmp(op, "range_start")) {
+    if (a.kind != RILL_V_INT || b.kind != RILL_V_INT)
+      return fail(d, RILL_TYPE, "range requires Int endpoints");
+    return a;
+  }
   if (!strcmp(op, "number")) {
     if (a.kind != RILL_V_INT && a.kind != RILL_V_FLOAT)
       return fail(d, RILL_TYPE, "expected numeric value");
@@ -94,7 +119,8 @@ RillValue rill_library_pure(RillHeap *h, RillValue input, RillDiagnostic *d) {
     if (a.kind == RILL_V_RECORD)
       return integer(a.as.object->count / 2);
     return fail(d, RILL_TYPE,
-                "length requires List or Record; use explicit text units");
+                "length requires a List or Record; use 'byte_length' for "
+                "bytes or count the code points returned by 'scalars'");
   }
   if (!strcmp(op, "byte_length")) {
     if (!bytes(a))
@@ -103,7 +129,7 @@ RillValue rill_library_pure(RillHeap *h, RillValue input, RillDiagnostic *d) {
   }
   if (!strcmp(op, "to_record")) {
     if (a.kind != RILL_V_ADT)
-      return fail(d, RILL_TYPE, "to_record requires nominal data");
+      return fail(d, RILL_TYPE, "to_record requires a struct or enum value");
     return a.as.object->values[1];
   }
   if (!strcmp(op, "lookup")) {
@@ -127,7 +153,7 @@ RillValue rill_library_pure(RillHeap *h, RillValue input, RillDiagnostic *d) {
   }
   if (!strcmp(op, "div") || !strcmp(op, "rem")) {
     if (a.kind != RILL_V_INT || b.kind != RILL_V_INT)
-      return fail(d, RILL_TYPE, "div/rem require Int");
+      return fail(d, RILL_TYPE, "div and rem require Int operands");
     bool divide = !strcmp(op, "div");
     if (!b.as.integer ||
         (divide && a.as.integer == INT64_MIN && b.as.integer == -1))
@@ -168,14 +194,16 @@ RillValue rill_library_pure(RillHeap *h, RillValue input, RillDiagnostic *d) {
       ok = rill_text_append(&out, a.as.integer ? "true" : "false",
                             a.as.integer ? 4 : 5);
     else
-      return fail(d, RILL_TYPE, "text requires String, numeric or Bool data");
+      return fail(d, RILL_TYPE, "text requires a String, Int, Float, or Bool");
     return ok ? alloc(h, RILL_V_STRING, nullptr, 0, out.data, out.size, d)
               : fail(d, RILL_MEMORY, "allocation failed");
   }
   if (!strcmp(op, "encode_utf8") || !strcmp(op, "decode_utf8")) {
     bool encode = !strcmp(op, "encode_utf8");
     if (a.kind != (encode ? RILL_V_STRING : RILL_V_BYTES))
-      return fail(d, RILL_TYPE, "invalid UTF-8 conversion input");
+      return fail(d, RILL_TYPE,
+                  encode ? "encode_utf8 requires a String"
+                         : "decode_utf8 requires Bytes");
     if (!encode &&
         !rill_text_valid(a.as.object->bytes.data, a.as.object->bytes.size))
       return fail(d, RILL_TYPE, "invalid UTF-8");
@@ -194,6 +222,143 @@ RillValue rill_library_pure(RillHeap *h, RillValue input, RillDiagnostic *d) {
                      (!strcmp(op, "ends_with") ? value.size - prefix.size : 0),
                  prefix.size));
     return (RillValue){.kind = RILL_V_BOOL, .as.integer = result};
+  }
+  if (!strcmp(op, "parse_int") || !strcmp(op, "parse_float"))
+    return rill_library_json_number(!strcmp(op, "parse_float"), a, d);
+  if (!strcmp(op, "trim")) {
+    if (a.kind != RILL_V_STRING)
+      return fail(d, RILL_TYPE, "trim requires String");
+    RillBytes value = a.as.object->bytes;
+    size_t start = 0, end = value.size;
+    while (start < end && trim_byte(value.data[start]))
+      ++start;
+    while (end > start && trim_byte(value.data[end - 1]))
+      --end;
+    return alloc(h, RILL_V_STRING, nullptr, 0, value.data + start, end - start,
+                 d);
+  }
+  if (!strcmp(op, "split")) {
+    if (a.kind != RILL_V_STRING || b.kind != RILL_V_STRING ||
+        !a.as.object->bytes.size)
+      return fail(d, RILL_TYPE,
+                  "split requires a nonempty String delimiter and a String");
+    RillBytes delimiter = a.as.object->bytes, value = b.as.object->bytes;
+    size_t storage = 0;
+    if (ckd_mul(&storage, delimiter.size, sizeof(size_t)))
+      return fail(d, RILL_MEMORY, "delimiter size overflow");
+    size_t *prefix = malloc(storage);
+    if (!prefix)
+      return fail(d, RILL_MEMORY, "delimiter allocation failed");
+    prefix[0] = 0;
+    for (size_t i = 1, matched = 0; i < delimiter.size; ++i) {
+      while (matched && delimiter.data[i] != delimiter.data[matched])
+        matched = prefix[matched - 1];
+      if (delimiter.data[i] == delimiter.data[matched])
+        ++matched;
+      prefix[i] = matched;
+    }
+    size_t count = 1, at = 0;
+    for (;;) {
+      size_t end = separator(value, delimiter, prefix, at);
+      if (end == value.size)
+        break;
+      ++count;
+      at = end + delimiter.size;
+    }
+    RillValue out = alloc(h, RILL_V_LIST, nullptr, count, nullptr, 0, d);
+    if (d->kind) {
+      free(prefix);
+      return out;
+    }
+    RillRoot root = {};
+    rill_runtime_root(h, &root, &out, 1);
+    at = 0;
+    for (size_t i = 0; i < count; ++i) {
+      size_t end = separator(value, delimiter, prefix, at);
+      out.as.object->values[i] =
+          alloc(h, RILL_V_STRING, nullptr, 0, value.data + at, end - at, d);
+      if (d->kind || end == value.size)
+        break;
+      at = end + delimiter.size;
+    }
+    free(prefix);
+    rill_runtime_unroot(h, &root);
+    return out;
+  }
+  if (!strcmp(op, "join")) {
+    if (a.kind != RILL_V_STRING || !list(b))
+      return fail(d, RILL_TYPE,
+                  "join requires a String separator and a List of Strings");
+    RillBytes delimiter = a.as.object->bytes;
+    [[gnu::cleanup(rill_text_clear)]] RillBuffer out = {};
+    for (size_t i = 0; i < rill_runtime_count(b); ++i) {
+      RillValue item = rill_runtime_at(b, i);
+      if (item.kind != RILL_V_STRING)
+        return fail(d, RILL_TYPE, "join requires String items");
+      if ((i && !rill_text_append(&out, delimiter.data, delimiter.size)) ||
+          !rill_text_append(&out, item.as.object->bytes.data,
+                            item.as.object->bytes.size))
+        return fail(d, RILL_MEMORY, "text allocation failed");
+    }
+    return alloc(h, RILL_V_STRING, nullptr, 0, out.data, out.size, d);
+  }
+  if (!strcmp(op, "entries")) {
+    if (a.kind != RILL_V_RECORD)
+      return fail(d, RILL_TYPE, "entries requires Record");
+    size_t count = a.as.object->count / 2;
+    RillValue out = alloc(h, RILL_V_LIST, nullptr, count, nullptr, 0, d);
+    if (d->kind)
+      return out;
+    RillRoot root = {};
+    rill_runtime_root(h, &root, &out, 1);
+    for (size_t i = 0; i < count; ++i) {
+      out.as.object->values[i] =
+          alloc(h, RILL_V_LIST, a.as.object->values + i * 2, 2, nullptr, 0, d);
+      if (d->kind)
+        break;
+    }
+    rill_runtime_unroot(h, &root);
+    return out;
+  }
+  if (!strcmp(op, "join_path") || !strcmp(op, "basename") ||
+      !strcmp(op, "dirname")) {
+    bool join = !strcmp(op, "join_path");
+    if (!bytes(a) ||
+        memchr(a.as.object->bytes.data, 0, a.as.object->bytes.size) ||
+        (join && (!bytes(b) ||
+                  memchr(b.as.object->bytes.data, 0, b.as.object->bytes.size))))
+      return fail(d, RILL_TYPE,
+                  "path operation requires Path, String or Bytes without NUL");
+    RillBytes x = a.as.object->bytes;
+    if (join) {
+      RillBytes y = b.as.object->bytes;
+      if (!x.size || (y.size && y.data[0] == '/'))
+        return alloc(h, RILL_V_PATH, nullptr, 0, y.data, y.size, d);
+      [[gnu::cleanup(rill_text_clear)]] RillBuffer out = {};
+      if (!rill_text_append(&out, x.data, x.size) ||
+          (y.size && x.data[x.size - 1] != '/' &&
+           !rill_text_append(&out, "/", 1)) ||
+          !rill_text_append(&out, y.data, y.size))
+        return fail(d, RILL_MEMORY, "path allocation failed");
+      return alloc(h, RILL_V_PATH, nullptr, 0, out.data, out.size, d);
+    }
+    if (!x.size)
+      return alloc(h, RILL_V_PATH, nullptr, 0, ".", 1, d);
+    size_t end = x.size;
+    while (end > 1 && x.data[end - 1] == '/')
+      --end;
+    size_t start = end;
+    while (start && x.data[start - 1] != '/')
+      --start;
+    if (!strcmp(op, "basename"))
+      return alloc(h, RILL_V_PATH, nullptr, 0,
+                   x.data + (start == end ? 0 : start),
+                   start == end ? 1 : end - start, d);
+    if (!start)
+      return alloc(h, RILL_V_PATH, nullptr, 0, ".", 1, d);
+    while (start > 1 && x.data[start - 1] == '/')
+      --start;
+    return alloc(h, RILL_V_PATH, nullptr, 0, x.data, start, d);
   }
   if (!strcmp(op, "scalars")) {
     if (a.kind != RILL_V_STRING)
@@ -332,7 +497,7 @@ RillValue rill_library_pure(RillHeap *h, RillValue input, RillDiagnostic *d) {
          b.kind != RILL_V_STRING) ||
         (a.as.object->tag && a.as.object->tag != b.kind))
       return fail(d, RILL_TYPE,
-                  "sort keys must be homogeneous comparable values");
+                  "sort keys must be comparable values of the same type");
     a.as.object->tag = b.kind;
     RillError status = rill_runtime_charge(h, a, b);
     if (status)
@@ -364,7 +529,7 @@ RillValue rill_library_pure(RillHeap *h, RillValue input, RillDiagnostic *d) {
            kind != RILL_V_STRING)) {
         *d = (RillDiagnostic){
             .kind = RILL_TYPE,
-            .message = "sort keys must be homogeneous comparable values"};
+            .message = "sort keys must be comparable values of the same type"};
         break;
       }
     }

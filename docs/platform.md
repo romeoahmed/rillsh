@@ -15,14 +15,14 @@ facilities it uses rather than full platform certification. Missing required fac
 are build errors; Linux/macOS API differences belong in the platform adapter. Older
 compiler modes, obsolete terminal dialects, and speculative ports are outside scope.
 
-| Area | Baseline | Project boundary |
-| --- | --- | --- |
-| Implementation language | GNU C23, based on ISO/IEC 9899:2024 | Standard facilities first, selected GCC/Clang extensions; no older-C fallback or C2y dependency |
-| Processes and system services | POSIX.1-2024 / Issue 8 | Linux/macOS user-space APIs; no POSIX shell grammar claim |
-| User directories | XDG Base Directory 0.8 | Same config/state policy on both platforms |
-| Text and segmentation | Unicode 18.0.0; matching UAX #29 and data | UTF-8 language text; extended grapheme editing |
-| JSON | RFC 8259 | Stricter duplicate-key and numeric-range policy in execution |
-| Terminal UI | Modern VT/xterm-compatible UTF-8 profile | SGR, cursor control, bracketed paste; plain fallback |
+| Area                          | Baseline                                  | Project boundary                                                                                |
+| ----------------------------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| Implementation language       | GNU C23, based on ISO/IEC 9899:2024       | Standard facilities first, selected GCC/Clang extensions; no older-C fallback or C2y dependency |
+| Processes and system services | POSIX.1-2024 / Issue 8                    | Linux/macOS user-space APIs; no POSIX shell grammar claim                                       |
+| User directories              | XDG Base Directory 0.8                    | Same config/state policy on both platforms                                                      |
+| Text and segmentation         | Unicode 18.0.0; matching UAX #29 and data | UTF-8 language text; extended grapheme editing                                                  |
+| JSON                          | RFC 8259                                  | Stricter duplicate-key and numeric-range policy in execution                                    |
+| Terminal UI                   | Modern VT/xterm-compatible UTF-8 profile  | SGR, cursor control, bracketed paste; plain fallback                                            |
 
 `termios` controls a terminal device; `terminfo` describes capabilities. The shell uses
 the former and a fixed modern protocol profile, with no terminfo dependency or
@@ -35,10 +35,12 @@ according to their native contracts. `poll`, monotonic clocks, `sigaction`, and
 `waitpid` are shared services. The terminal adapter contains the system's window-size
 query and `/dev/tty` access. These are platform services rather than ISO C facilities.
 
-Input readiness must not impose a fixed descriptor-number ceiling. Linux uses `poll`;
+Read/write readiness must not impose a fixed descriptor-number ceiling. Linux uses `poll`;
 macOS retains `select` for `/dev/tty`, with a bitmap sized to the descriptor under
 `_DARWIN_C_SOURCE`. Ordinary descriptor numbers use stack storage; see Apple's [select
 contract](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/select.2.html).
+Streams and stderr relays use the same adapter. A readiness failure is distinct from
+waiting; callers retry interruptions and report other errors.
 
 Owned descriptor cleanup calls `close` once and invalidates the stored descriptor. Linux
 and Darwin release ordinary descriptors even when close reports EINTR; retrying can
@@ -98,7 +100,7 @@ update affects future child snapshots. It does not reinitialize C locale or chan
 numeric syntax. Terminal hints are reevaluated at the next prompt; config/history
 locations are resolved once when the session starts.
 
-HOME and XDG variables locate user files. `cd(path)` is explicit: no CDPATH, implicit
+HOME and XDG variables locate user files. `cd path` is explicit: no CDPATH, implicit
 home argument, or tilde expansion. After successful `cd`, maintain physical absolute PWD
 and OLDPWD bytes. Prepare bookkeeping and retain a directory FD for rollback. If
 preparation after chdir fails, restore the old directory and environment. If the OS also
@@ -112,13 +114,16 @@ LANG, LC_ALL, and LC_* pass unchanged to children for their own locale policy.
 
 ## XDG storage
 
-| Purpose | Base variable | Default | Use |
-| --- | --- | --- | --- |
-| Configuration | `XDG_CONFIG_HOME` | `$HOME/.config` | `rillsh/init.rill`, interactive only |
-| Persistent state | `XDG_STATE_HOME` | `$HOME/.local/state` | `rillsh/history` and separate lock file |
-| Disposable cache | `XDG_CACHE_HOME` | `$HOME/.cache` | Reserved; completion cache is in memory |
-| User data | `XDG_DATA_HOME` | `$HOME/.local/share` | Reserved; no implicit module discovery |
-| Session files | `XDG_RUNTIME_DIR` | No general default | Not needed; helper communication uses pipes |
+Configuration is implemented; history storage and its locking rules below are planned.
+Reserved locations are not created or searched.
+
+| Purpose          | Base variable     | Default              | Use                                         |
+| ---------------- | ----------------- | -------------------- | ------------------------------------------- |
+| Configuration    | `XDG_CONFIG_HOME` | `$HOME/.config`      | `rillsh/init.rill`, interactive only        |
+| Persistent state | `XDG_STATE_HOME`  | `$HOME/.local/state` | `rillsh/history` and separate lock file     |
+| Disposable cache | `XDG_CACHE_HOME`  | `$HOME/.cache`       | Reserved; completion cache is in memory     |
+| User data        | `XDG_DATA_HOME`   | `$HOME/.local/share` | Reserved; no implicit module discovery      |
+| Session files    | `XDG_RUNTIME_DIR` | No general default   | Not needed; helper communication uses pipes |
 
 An unset, empty, or relative base value selects its default. If that default needs HOME
 and HOME is not absolute/nonempty, disable the optional facility with one diagnostic. A
@@ -172,7 +177,7 @@ and licensing follow [development](development.md#dependencies-and-generated-dat
 
 ## Terminal profile and color
 
-The rich profile requires a UTF-8 VT/xterm-compatible terminal, usable dimensions,
+The planned rich profile requires a UTF-8 VT/xterm-compatible terminal, usable dimensions,
 relative cursor movement, line erasure, SGR, and bracketed paste. Test common macOS and
 Linux emulators and tmux/screen passthrough. TERM is a capability hint, not proof that a
 brand implements every extension. Known families include `xterm*`, `screen*`, `tmux*`,

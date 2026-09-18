@@ -1,9 +1,44 @@
-export let byte_length = byte_length
-export let scalars = scalars
-export let encode_utf8 = encode_utf8
-export let decode_utf8 = decode_utf8
-export let starts_with = starts_with
-export let ends_with = ends_with
-export let lines = lines
-export let lines_with = lines_with
-export let display_path = display_path
+fn byte_length value = __pure ["byte_length", value]
+
+fn scalars value = __pure ["scalars", value]
+
+fn encode_utf8 value = __pure ["encode_utf8", value]
+
+fn decode_utf8 value = __pure ["decode_utf8", value]
+
+fn starts_with prefix value = __pure ["starts_with", prefix, value]
+
+fn ends_with suffix value = __pure ["ends_with", suffix, value]
+
+fn lines_with options input = __stream ["lines", options, input]
+
+fn display_path value = __data ["display_path", value]
+
+let lines = lines_with {}
+
+fn split delimiter value = __pure ["split", delimiter, value]
+
+fn join separator values = __pure ["join", separator, values]
+
+fn trim value = __pure ["trim", value]
+
+fn parse_int value = __pure ["parse_int", value]
+
+fn parse_float value = __pure ["parse_float", value]
+
+export {
+  byte_length,
+  scalars,
+  encode_utf8,
+  decode_utf8,
+  starts_with,
+  ends_with,
+  lines,
+  lines_with,
+  display_path,
+  split,
+  join,
+  trim,
+  parse_int,
+  parse_float
+}

@@ -3,7 +3,7 @@
  * @brief Monotonic timing for isolated benchmark intervals.
  */
 #pragma once
-#include "../unit/test.h"
+#include "../support/check.h"
 #include <stdint.h>
 #include <time.h>
 

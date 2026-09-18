@@ -2,13 +2,14 @@
  * @file
  * @brief Fuzz line decoding against a byte-oriented reference scan.
  *
- * A fixed adapter expression processes input as data, never source. Compare
- * line content, CRLF handling, final fragments, and errors; each invocation
- * cleans its stream scope and heap without launching processes.
+ * Split input at the midpoint and an input-derived offset, including inside
+ * UTF-8 or CRLF. A fixed adapter expression processes data, never generated
+ * source. Compare content, final fragments, and errors; each invocation cleans
+ * its stream scope and heap without launching processes.
  */
 #include "diagnostic.h"
-#include "library/library.h"
-#include "library/stream.h"
+#include "native/native.h"
+#include "native/stream.h"
 #include "runtime/runtime.h"
 #include "source.h"
 #include "syntax/syntax.h"
@@ -59,19 +60,41 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   RillLibrary library = {.eval = eval};
   RillHeap *heap = rill_runtime_heap(eval);
   heap->stress = size <= 1024;
-  RillValue input = {};
+  RillValue parts[4] = {};
   RillRoot root = {};
-  rill_runtime_root(heap, &root, &input, 1);
-  input = rill_runtime_object(heap, RILL_V_BYTES, nullptr, 0,
-                              (const char *)data, size, 0);
-  if (input.kind != RILL_V_BYTES)
+  rill_runtime_root(heap, &root, parts, 4);
+  // Retain the full payload while mutations deterministically vary its chunks.
+  size_t split = 0, middle = size / 2, chunks = 0;
+  for (size_t i = 0; i < 3 && i < size; ++i)
+    split = (split << 8) | data[i];
+  split %= size + 1;
+  const size_t offsets[] = {0, split < middle ? split : middle,
+                            split < middle ? middle : split, size};
+  for (size_t i = 0; i < 3; ++i) {
+    size_t length = offsets[i + 1] - offsets[i];
+    if (!length)
+      continue;
+    parts[chunks++] =
+        rill_runtime_object(heap, RILL_V_BYTES, nullptr, 0,
+                            (const char *)data + offsets[i], length, 0);
+    if (parts[chunks - 1].kind != RILL_V_BYTES)
+      abort();
+  }
+  parts[3] =
+      rill_runtime_object(heap, RILL_V_LIST, parts, chunks, nullptr, 0, 0);
+  if (parts[3].kind != RILL_V_LIST ||
+      !rill_runtime_define(eval, "input", parts[3]))
     abort();
-  if (!rill_runtime_define(eval, "input", input))
-    abort();
-  RillEvalEvent result = evaluate(
-      &library, "__stream(['collect',{max_items:131072,max_bytes:67108864},"
-                "__stream(['lines',{max_line_bytes:131072},"
-                "__stream(['chunks',input])])])");
+  RillEvalEvent result =
+      evaluate(&library, "__stream [\n"
+                         "  'collect',\n"
+                         "  {max_items: 131072, max_bytes: 67108864},\n"
+                         "  __stream [\n"
+                         "    'lines',\n"
+                         "    {max_line_bytes: 131072},\n"
+                         "    __stream ['items', input]\n"
+                         "  ]\n"
+                         "]");
   if (result.state == RILL_EVAL_DONE) {
     if (result.value.kind != RILL_V_LIST ||
         !rill_text_valid((const char *)data, size))

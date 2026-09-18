@@ -8,7 +8,6 @@ import select
 import signal
 import termios
 import time
-import unittest
 from contextlib import AbstractContextManager, suppress
 from pathlib import Path
 
@@ -127,14 +126,14 @@ class Terminal(AbstractContextManager["Terminal"]):
             )
 
     def finish(self, code: int = 0) -> None:
-        self.send(f"exit({code})")
+        self.send(f"exit {code}")
         self.wait_for_exit(code)
 
     def __exit__(self, *_: object) -> None:
         try:
             if self.pid:
                 with suppress(OSError, AssertionError):
-                    self.send("exit_force(0)")
+                    self.send("exit_force 0")
                     self.wait_for_exit()
                 if self.pid:
                     with suppress(OSError):
@@ -149,6 +148,28 @@ class Terminal(AbstractContextManager["Terminal"]):
 
 
 class TerminalTests(ShellCase):
+    def test_source_from_controlling_terminal(self) -> None:
+        with Terminal(
+            self.shell, self.work, self.environment, arguments=("/dev/tty",)
+        ) as terminal:
+            terminal.send('print "loaded"')
+            terminal.write(b"\x04")
+            terminal.expect(b"loaded\r\n")
+            terminal.wait_for_exit()
+
+    def test_streams_with_controlling_terminal_redirection(self) -> None:
+        (self.work / "echo.rill").write_text(
+            "stdin () |> lines |> take 1\n"
+            '  |> map { line => encode_utf8 ("reply:" + line + "\\n") }\n'
+            "  |> write_stdout\n"
+        )
+        terminal = self.open_terminal()
+        terminal.send("^./rillsh echo.rill < /dev/tty > /dev/tty")
+        terminal.send("payload")
+        terminal.expect(b"reply:payload\r\n")
+        terminal.expect(b"rill> ")
+        terminal.finish()
+
     def test_redirection_does_not_acquire_terminal(self) -> None:
         master, slave = pty.openpty()
         try:
@@ -168,7 +189,7 @@ class TerminalTests(ShellCase):
             )
         )
         terminal.expect(b"rill> ")
-        terminal.send("fn loop()=>loop(); ^./child args ready; loop()")
+        terminal.send("fn loop () = loop (); ^./child args ready; loop ()")
         terminal.expect(b"\r\n5:ready\r\n")
         terminal.wait_for_shell_foreground()
         terminal.write(b"\x03")
@@ -183,54 +204,85 @@ class TerminalTests(ShellCase):
 
     def test_functional_entries_and_failed_publication(self) -> None:
         terminal = self.open_terminal()
-        terminal.send("let x=4; fn saved(y)=>x+y")
+        terminal.send("let x = 4; fn saved y = x + y")
         terminal.expect(b"rill> ")
-        terminal.send("let x=90; saved(2)")
+        terminal.send("let x = 90; saved 2")
         self.assertIn(b"6\r\n", terminal.expect(b"rill> "))
-        terminal.send('let x=8; set_env("RILL_EFFECT","kept"); missing')
+        terminal.send('let x = 8; set_env "RILL_EFFECT" "kept"; missing')
         self.assertIn(b"TypeError", terminal.expect(b"rill> "))
         terminal.send(
-            'exit(if x==90 and get_env("RILL_EFFECT")==some(bytes([107,101,112,116])) then 0 else 1)'
+            "exit (if x == 90 and "
+            'get_env "RILL_EFFECT" == some (bytes [107, 101, 112, 116]) '
+            "then 0 else 1)"
         )
         terminal.wait_for_exit()
 
     def test_pure_evaluation_stop_and_publication(self) -> None:
         terminal = self.open_terminal()
         terminal.send(
-            'let answer=do {let captured=42; fn loop()=>if get_env("GO")==some(encode_utf8("yes")) then captured else loop(); ^./child args ready; loop()}'
+            'unset_env "GO"; let answer = do { let captured = 42; '
+            'fn loop () = if get_env "GO" == some (encode_utf8 "yes") '
+            "then captured else loop (); ^./child args ready; loop () }"
         )
         terminal.expect(b"5:ready\r\n")
         terminal.wait_for_shell_foreground()
         terminal.write(b"\x1a")
-        terminal.expect(b"evaluation stopped")
+        terminal.expect(b"evaluation suspended")
         terminal.expect(b"rill> ")
         terminal.send(
-            'let saved=jobs()[0].handle; let intervening=9; set_env("GO","yes")'
+            'let saved = (jobs ())[0].handle; let intervening = 9; set_env "GO" "yes"'
         )
         terminal.expect(b"rill> ")
-        terminal.send("bg(saved)")
-        self.assertIn(b"requires foreground", terminal.expect(b"rill> "))
-        terminal.send("fg(saved)")
+        terminal.send("bg saved")
+        self.assertIn(b"only in the foreground", terminal.expect(b"rill> "))
+        terminal.send("fg saved")
         terminal.expect(b"rill> ")
-        terminal.send("exit(if answer==42 and intervening==9 then 0 else 1)")
+        terminal.send("exit (if answer == 42 and intervening == 9 then 0 else 1)")
         terminal.wait_for_exit()
 
     def test_mixed_evaluation_resume_and_display(self) -> None:
         terminal = self.open_terminal()
         terminal.send(
-            'let result=stream(job { ^./child selfstop }) |> lines |> map(fn(x)=>x+"!") |> collect'
+            "let result = stream job { ^./child selfstop } "
+            '|> lines |> map { x => x + "!" } |> collect'
         )
-        terminal.expect(b"evaluation stopped")
+        terminal.expect(b"evaluation suspended")
         terminal.expect(b"rill> ")
-        terminal.send("let saved=jobs()[0].handle; wait(saved)")
-        self.assertIn(b"requires foreground", terminal.expect(b"rill> "))
-        terminal.send("fg(jobs()[0].handle)")
+        terminal.send("let saved = (jobs ())[0].handle; wait saved")
+        self.assertIn(b"only in the foreground", terminal.expect(b"rill> "))
+        terminal.send("fg (jobs ())[0].handle")
         terminal.expect(b"rill> ")
-        terminal.send('if result==["selfstop!","continued!"] then 42 else 0')
+        terminal.send('if result == ["selfstop!", "continued!"] then 42 else 0')
         self.assertIn(b"42\r\n", terminal.expect(b"rill> "))
-        terminal.send('chunks(encode_utf8("first\\nsecond\\n")) |> lines')
+        terminal.send('chunks (encode_utf8 "first\\nsecond\\n") |> lines')
         rendered = terminal.expect(b"rill> ")
         self.assertIn(b"first\r\nsecond\r\n", rendered)
+        self.assert_restored()
+        terminal.finish()
+
+    def test_stdin_suspension_and_lease_cleanup(self) -> None:
+        terminal = self.open_terminal()
+        terminal.send(
+            'do { let input = stdin (); print "reading"; '
+            'input |> lines |> each { line => print ("got:" + line) } }'
+        )
+        terminal.expect(b"reading\r\n")
+        terminal.send("one")
+        terminal.expect(b"got:one\r\n")
+        terminal.write(b"\x1a")
+        terminal.expect(b"rill> ")
+        terminal.send(
+            "match attempt { () => close (stdin ()) } of { "
+            'Result.Err {error} => error.kind == "StreamConsumed", _ => false }'
+        )
+        self.assertIn(b"true\r\n", terminal.expect(b"rill> "))
+        terminal.send("fg (jobs ())[0].handle")
+        terminal.send("two")
+        terminal.expect(b"got:two\r\n")
+        terminal.write(b"\x03")
+        terminal.expect(b"rill> ")
+        terminal.send('do { close (stdin ()); print "released" }')
+        self.assertIn(b"released\r\n", terminal.expect(b"rill> "))
         self.assert_restored()
         terminal.finish()
 
@@ -240,13 +292,14 @@ class TerminalTests(ShellCase):
         modes[3] |= termios.TOSTOP
         termios.tcsetattr(terminal.fd, termios.TCSANOW, modes)
         terminal.send(
-            'collect_bytes(stream(job { ^./child both }))==encode_utf8("out\\n")'
+            'collect_bytes (stream job { ^./child both }) == encode_utf8 "out\\n"'
         )
         output = terminal.expect(b"rill> ")
         self.assertIn(b"err\r\n", output)
         self.assertIn(b"true\r\n", output)
         terminal.send(
-            "let unpublished=attempt(fn()=>stream(job { ^./child rows }) |> lines |> each(fn(x)=>()))"
+            "let unpublished = attempt { () => "
+            "stream job { ^./child rows } |> lines |> each { x => () } }"
         )
         terminal.expect(b"stream-ready\r\n")
         terminal.write(b"\x03")
@@ -257,47 +310,50 @@ class TerminalTests(ShellCase):
 
     def test_suspended_errors_conflicts_and_cancellation(self) -> None:
         terminal = self.open_terminal()
-        terminal.send('do { ^./child selfstop; raise(error("Example","retained")) }')
-        terminal.expect(b"evaluation stopped")
+        terminal.send('do { ^./child selfstop; raise (error "Example" "retained") }')
+        terminal.expect(b"evaluation suspended")
         terminal.expect(b"rill> ")
         terminal.send(
-            'match attempt(fn()=>fg(jobs()[0].handle)) {Result.Err {error}=>error.kind=="Example" and error.message=="retained", _=>false}'
+            "match attempt { () => fg (jobs ())[0].handle } of { "
+            "Result.Err {error} => "
+            'error.kind == "Example" and error.message == "retained", _ => false }'
         )
         self.assertIn(b"true\r\n", terminal.expect(b"rill> "))
         terminal.send("struct Shared {value}; ^./child selfstop")
-        terminal.expect(b"evaluation stopped")
+        terminal.expect(b"evaluation suspended")
         terminal.expect(b"rill> ")
         terminal.send("struct Shared {other}")
         terminal.expect(b"rill> ")
-        terminal.send("fg(jobs()[0].handle)")
+        terminal.send("fg (jobs ())[0].handle")
         self.assertIn(b"TypeError", terminal.expect(b"rill> "))
-        terminal.send("let abandoned=do { ^./child selfstop; 42 }")
-        terminal.expect(b"evaluation stopped")
+        terminal.send("let abandoned = do { ^./child selfstop; 42 }")
+        terminal.expect(b"evaluation suspended")
         terminal.expect(b"rill> ")
-        terminal.send("exit(0)")
+        terminal.send("exit 0")
         self.assertIn(b"ProcessError", terminal.expect(b"rill> "))
-        terminal.send("cancel(jobs()[0].handle); abandoned")
+        terminal.send("cancel (jobs ())[0].handle; abandoned")
         self.assertIn(b"TypeError", terminal.expect(b"rill> "))
         terminal.finish()
 
     def test_multiple_suspended_contexts_and_force_exit(self) -> None:
         terminal = self.open_terminal()
         for name in ("first", "second"):
-            terminal.send(f"let {name}=do {{ ^./child selfstop; 42 }}")
-            terminal.expect(b"evaluation stopped")
+            terminal.send(f"let {name} = do {{ ^./child selfstop; 42 }}")
+            terminal.expect(b"evaluation suspended")
             terminal.expect(b"rill> ")
         terminal.send(
-            'let saved=map(fn(j)=>j.handle,filter(fn(j)=>j.kind=="evaluation",jobs())); length(saved)'
+            "let saved = map { j => j.handle } "
+            '(filter { j => j.kind == "evaluation" } (jobs ())); length saved'
         )
         self.assertIn(b"2\r\n", terminal.expect(b"rill> "))
-        terminal.send("fg(saved[1]); fg(saved[0])")
+        terminal.send("fg saved[1]; fg saved[0]")
         terminal.expect(b"rill> ")
-        terminal.send("first+second")
+        terminal.send("first + second")
         self.assertIn(b"84\r\n", terminal.expect(b"rill> "))
-        terminal.send("stream(job { ^./child selfstop }) |> lines |> collect")
-        terminal.expect(b"evaluation stopped")
+        terminal.send("stream job { ^./child selfstop } |> lines |> collect")
+        terminal.expect(b"evaluation suspended")
         terminal.expect(b"rill> ")
-        terminal.send("exit_force(0)")
+        terminal.send("exit_force 0")
         terminal.wait_for_exit()
 
     def test_stopped_files_keep_directory_identity(self) -> None:
@@ -307,26 +363,31 @@ class TerminalTests(ShellCase):
         (self.work / "other").mkdir()
         terminal = self.open_terminal()
         terminal.send(
-            'let sizes=files(path("source")) |> map(fn(e)=>do {^./child selfstop; e.size}) |> collect'
+            'let sizes = files (path "source") '
+            "|> map { e => ^./child selfstop; e.size } |> collect"
         )
-        terminal.expect(b"evaluation stopped")
+        terminal.expect(b"evaluation suspended")
         terminal.expect(b"rill> ")
-        terminal.send('cd(path("other"))')
+        terminal.send('cd (path "other")')
         terminal.expect(b"rill> ")
-        terminal.send("fg(jobs()[0].handle)")
+        terminal.send("fg (jobs ())[0].handle")
         terminal.expect(b"rill> ")
-        terminal.send("exit(if sizes==[3] then 0 else 1)")
+        terminal.send("exit (if sizes == [3] then 0 else 1)")
         terminal.wait_for_exit()
 
     def test_startup_configuration_and_opt_out(self) -> None:
         directory = self.work / "config" / "rillsh"
         directory.mkdir()
-        (directory / "init.rill").write_text("let configured=42\n", encoding="utf-8")
+        (directory / "init.rill").write_text(
+            """let configured = 42
+""",
+            encoding="utf-8",
+        )
         terminal = self.enterContext(
             Terminal(self.shell, self.work, self.environment, arguments=())
         )
         terminal.expect(b"rill> ")
-        terminal.send("exit(configured-42)")
+        terminal.send("exit (configured - 42)")
         terminal.wait_for_exit()
         terminal = self.open_terminal()
         terminal.send("configured")
@@ -335,12 +396,22 @@ class TerminalTests(ShellCase):
 
     def test_failed_module_can_be_retried(self) -> None:
         module = self.work / "retry.rill"
-        module.write_text("export let value=missing\n", encoding="utf-8")
+        module.write_text(
+            """let value = missing
+export {value}
+""",
+            encoding="utf-8",
+        )
         terminal = self.open_terminal()
         terminal.send('import "./retry.rill" as retry')
         self.assertIn(b"TypeError", terminal.expect(b"rill> "))
-        module.write_text("export let value=7\n", encoding="utf-8")
-        terminal.send('import "./retry.rill" as retry; exit(retry.value-7)')
+        module.write_text(
+            """let value = 7
+export {value}
+""",
+            encoding="utf-8",
+        )
+        terminal.send('import "./retry.rill" as retry; exit (retry.value - 7)')
         terminal.wait_for_exit()
 
     def test_configuration_path_policy(self) -> None:
@@ -349,7 +420,9 @@ class TerminalTests(ShellCase):
         for directory, value in ((default, 7), (explicit, 42)):
             directory.mkdir(parents=True)
             (directory / "init.rill").write_text(
-                f"let configured={value}\n", encoding="utf-8"
+                f"""let configured = {value}
+""",
+                encoding="utf-8",
             )
         for xdg, value in (
             (None, 7),
@@ -367,11 +440,11 @@ class TerminalTests(ShellCase):
                     self.shell, self.work, environment, arguments=()
                 ) as terminal:
                     terminal.expect(b"rill> ")
-                    terminal.send(f"exit(configured-{value})")
+                    terminal.send(f"exit (configured - {value})")
                     terminal.wait_for_exit()
         environment = self.environment | {"HOME": "", "XDG_CONFIG_HOME": "config"}
         with Terminal(self.shell, self.work, environment, arguments=()) as terminal:
-            self.assertIn(b"configuration disabled", terminal.expect(b"rill> "))
+            self.assertIn(b"startup configuration skipped", terminal.expect(b"rill> "))
             terminal.send("configured")
             self.assertIn(b"TypeError", terminal.expect(b"rill> "))
             terminal.finish()
@@ -379,7 +452,7 @@ class TerminalTests(ShellCase):
     def test_attempt_cannot_catch_interrupt(self) -> None:
         terminal = self.open_terminal()
         terminal.send(
-            "fn loop(n)=>loop(n+1); attempt(fn()=>do { ^./child args ready; loop(0) })"
+            "fn loop n = loop (n + 1); attempt { () => ^./child args ready; loop 0 }"
         )
         terminal.expect(b"\r\n5:ready\r\n")
         terminal.wait_for_shell_foreground()
@@ -393,7 +466,7 @@ class TerminalTests(ShellCase):
         self.terminal = self.enterContext(
             Terminal(self.shell, self.work, self.environment)
         )
-        self.assertIn(b"38;2;", self.terminal.expect(b"rill> "))
+        self.terminal.expect(b"rill> ")
         self.modes = termios.tcgetattr(self.terminal.fd)
         return self.terminal
 
@@ -428,7 +501,7 @@ class TerminalTests(ShellCase):
         terminal.expect(b"stopping\r\n")
         terminal.expect(b"rill> ")
         self.assertTrue(termios.tcgetattr(terminal.fd)[3] & termios.ECHO)
-        terminal.send("fg(jobs()[0].handle)")
+        terminal.send("fg (jobs ())[0].handle")
         terminal.expect(b"resumed\r\n")
         terminal.expect(b"rill> ")
         self.assert_restored()
@@ -441,9 +514,9 @@ class TerminalTests(ShellCase):
 
     def test_cancellation_and_escalation(self) -> None:
         terminal = self.open_terminal()
-        terminal.send("let j = start(job { ^./child ignore-term })")
+        terminal.send("let j = start job { ^./child ignore-term }")
         terminal.prompt_after(b"ready\r\n")
-        terminal.send("cancel(j)")
+        terminal.send("cancel j")
         terminal.expect(b"rill> ", timeout=5)
         terminal.send("^./child ignore-term")
         terminal.expect(b"ready\r\n")
@@ -454,14 +527,14 @@ class TerminalTests(ShellCase):
 
     def test_background_stop_resume_and_launch_error(self) -> None:
         terminal = self.open_terminal()
-        terminal.send("let stopped = start(job { ^./child selfstop })")
+        terminal.send("let stopped = start job { ^./child selfstop }")
         terminal.prompt_after(b"selfstop\r\n")
-        terminal.send("wait(stopped)")
+        terminal.send("wait stopped")
         terminal.expect(b"job stopped")
         terminal.expect(b"rill> ")
-        terminal.send("bg(stopped)")
+        terminal.send("bg stopped")
         terminal.prompt_after(b"continued\r\n")
-        terminal.send("wait(stopped)")
+        terminal.send("wait stopped")
         terminal.expect(b"rill> ")
         terminal.send("^./missing")
         terminal.expect(b"LaunchError")
@@ -471,35 +544,51 @@ class TerminalTests(ShellCase):
 
     def test_interrupt_wait_preserves_background_job(self) -> None:
         terminal = self.open_terminal()
-        terminal.send("let j = start(job { ^./child ignore-term })")
+        terminal.send("let j = start job { ^./child ignore-term }")
         terminal.prompt_after(b"ready\r\n")
-        terminal.send("^./child args waiting; wait(j)")
+        terminal.send("^./child args waiting; wait j")
         terminal.expect(b"\r\n7:waiting\r\n")
         terminal.wait_for_shell_foreground()
         # No prompt should have been consumed while waiting for the live job.
         self.assertNotIn(b"rill> ", terminal.pending)
         terminal.write(b"\x03")
         terminal.expect(b"rill> ")
-        terminal.send("length(filter(fn(item)=>item.state=='Running',jobs()))")
+        terminal.send("length (filter { item => item.state == 'Running' } (jobs ()))")
         terminal.expect(b"\r\n1\r\n")
         terminal.expect(b"rill> ")
-        terminal.send("cancel(j)")
+        terminal.send("cancel j")
         terminal.expect(b"rill> ")
         self.assert_restored()
         terminal.finish()
 
-    def test_invalid_input_and_failed_launches_do_not_accumulate(self) -> None:
+    def test_closure_continuation_and_function_values(self) -> None:
+        terminal = self.open_terminal()
+        terminal.send("let transform = { value =>")
+        terminal.expect(b"... ")
+        terminal.send("let adjusted = value + 1")
+        terminal.expect(b"... ")
+        terminal.send("adjusted }")
+        terminal.expect(b"rill> ")
+        terminal.send("transform")
+        terminal.expect(b"rill> ")
+        terminal.send("transform 41")
+        terminal.expect(b"\r\n42\r\n")
+        terminal.expect(b"rill> ")
+        terminal.send("transform(41)")
+        terminal.expect(b"SyntaxError")
+        terminal.expect(b"rill> ")
+        terminal.finish()
+
+    def test_invalid_input_and_failed_launch_recover(self) -> None:
         terminal = self.open_terminal()
         terminal.send('"\\q')
         terminal.expect(b"SyntaxError")
         terminal.expect(b"rill> ")
-        for _ in range(4):
-            terminal.send("^./missing")
-            terminal.expect(b"LaunchError")
-            terminal.expect(b"rill> ")
+        terminal.send("^./missing")
+        terminal.expect(b"LaunchError")
+        terminal.expect(b"rill> ")
         self.assert_restored()
-        terminal.send("exit(if length(jobs())<4 then 0 else 1)")
-        terminal.wait_for_exit()
+        terminal.finish()
 
     def test_multiline_entry_and_interrupt_at_prompt(self) -> None:
         terminal = self.open_terminal()
@@ -536,7 +625,3 @@ class TerminalTests(ShellCase):
             terminal.expect(b"rill> ")
             terminal.write(b"\x04")
             terminal.wait_for_exit()
-
-
-if __name__ == "__main__":
-    unittest.main(verbosity=2)

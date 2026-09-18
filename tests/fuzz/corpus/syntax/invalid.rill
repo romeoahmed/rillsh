@@ -1,0 +1,1 @@
+if false then { [x, {key: x}] => x } else 7

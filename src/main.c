@@ -1,9 +1,6 @@
 /**
  * @file
- * @brief Executable entry point.
- *
- * Pass argv and the inherited environment to the session, which owns startup,
- * evaluation, and shutdown.
+ * @brief Pass arguments and the inherited environment to the session owner.
  */
 #include "session/session.h"
 extern char **environ;

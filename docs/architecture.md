@@ -4,7 +4,7 @@ Rill Shell combines a strict functional language with explicit process and strea
 ownership. This document explains how the components preserve those semantics.
 [Language](language.md), [execution](execution.md), and [interaction](interaction.md)
 own user-visible behavior; [status](status.md) distinguishes implemented features from
-stage-4 editor work. [The implementation plan](implementation-plan.md) maps these
+planned stream extensions and editor work. [The implementation plan](implementation-plan.md) maps these
 boundaries to files and milestones.
 
 ## Design principles
@@ -27,7 +27,7 @@ compilation, Windows support, and configurable editor modes.
 ```text
                         session
                     /      |      \
-              library     exec    editor (planned)
+               native     exec    editor (planned)
                  |         |         |
               runtime   platform   syntax
                  |                   |
@@ -38,15 +38,20 @@ This is an orientation map; the [dependency
 table](implementation-plan.md#module-boundaries) is authoritative. Components expose
 internal ownership boundaries, not a public C ABI.
 
-- `syntax` owns source, trees, completeness, and grammar metadata.
+- `source` and `diagnostic` define shared text ownership and error views.
+- `syntax` owns parsed trees, copied source, completeness, and grammar metadata.
 - `runtime` owns Values, traced code, lexical bindings, GC, and continuations.
-- `library` converts between language Values and concrete native services.
+- `native` converts between language Values and concrete native services.
 - `exec` supervises evaluated launch specifications without knowing ASTs or Values.
 - `platform` contains POSIX mechanisms and observed Linux/macOS differences.
 - `text` supplies byte buffers, Unicode operations, and styles.
 - `session` coordinates effects, input, presentation, and suspended contexts.
 - The planned `editor` consumes syntax results and materialized metadata, never an
   evaluator to invoke.
+
+The JSON adapter isolates yyjson types and calls. Pure decimal parsing reuses its
+number-token conversion through a Rill-only interface; the runtime and general
+primitive dispatcher do not depend on yyjson representations.
 
 Lower components return structured diagnostics. The session renders them and consumes
 borrowed text before releasing its owner. Native state machines yield through the
@@ -60,24 +65,45 @@ and display coordinates. Source NUL is invalid; a valid String escape may produc
 until an OS boundary rejects it.
 
 The recursive-descent/precedence parser has explicit expression and command modes and a
-256-level nesting limit. Stable typed node blocks own decoded text; clearing any parse
-result is iterative. Operator spellings become enums during parsing. Code preparation
+256-level nesting limit. Quoted strings copy ordinary byte runs in bulk and decode
+escapes separately. Record validation sorts borrowed key pointers and scans adjacent
+keys; it never reorders fields or their effects. Comparisons include byte lengths and
+embedded NUL. Stable typed node blocks own decoded text; parsed identifier tokens use
+bounded `strndup` copies without growable-buffer slack. Clearing any parse result is
+iterative. Operator spellings become enums during parsing. Code preparation
 consumes and resets the parse result, including on failure, and assigns constant and
-function-layout slots without executing user code. Pattern diagnostics remain deferred
-until matching, after subject or argument effects.
+function-layout slots and aggregate frame capacities without executing user code.
+These capacities reuse kind-specific node payload storage; no parallel IR or extra
+per-node allocation is needed. Structural pattern errors are
+rejected before execution. Nominal resolution and value mismatches remain runtime
+checks. Closure headers and Record fields share brace syntax; lexical lookahead over
+the header selects the form without parsing a body twice.
+Application is a separate left-associative layer above prefix and infix operators.
 
-Multi-parameter functions lower to unary functions. User functions, native functions,
-callbacks, and constructors share one application protocol. A value pipe evaluates its
-left operand before the callable; grouped arguments preserve each intermediate unary
-application. Preparation must not reorder those effects.
+Multi-parameter functions lower to unary functions. Recursive function expressions
+lower to a private block containing a named recursive declaration and its value;
+there is no second recursion mechanism. Export tables evaluate directly to immutable
+namespaces instead of annotating declarations and rescanning a module afterward.
+Module frames retain their own export value. During bootstrap, explicit module imports
+share the loader cache; freezing the prelude installs only its exported bindings.
+User functions, native functions, callbacks, and constructors share one application protocol. A value pipe evaluates its
+left operand before the callable; whitespace application preserves each intermediate
+unary application. A closure body is a lexical statement block; single-expression bodies
+need no extra scope or continuation. Preparation must not reorder those effects.
 
 The prepared-AST evaluator uses explicit continuation frames. Each frame roots its
 scope, code, and initialized operand prefix. Atomic literals and name references write
 directly into a parent's rooted slot; other expressions use the normal continuation
-protocol. String literals read a prepared slot without allocation.
+protocol. String literals read a prepared slot without allocation. Free-name references
+inside functions use prepared capture slots, including constructor references in
+patterns. Local scopes are traversed to the closure boundary without comparing names;
+local and top-level references retain ordinary lexical lookup. The slot belongs to code,
+while its value belongs to each closure instance. Recursive slots still read through
+their cells. Preparation adds neither an AST node allocation nor a second IR.
 
 Tail calls replace frames and discard obsolete operands promptly. Sequential forms use
-fixed-size frames; aggregates reserve the operands they retain. A bounded cache reuses
+fixed-size frames; aggregates read their precomputed operand capacity rather than
+walking the child chain on every invocation. A bounded cache reuses
 small inactive frames, while wide frames return to libc. Replacement can shrink a wide
 frame, so tail recursion does not retain an unbounded high-water allocation. Non-tail
 continuations are limited to 65,536.
@@ -97,14 +123,14 @@ Compile-time assertions protect interior alignment; sizes are not a public ABI.
 
 ### Data and code ownership
 
-| Representation | Ownership and access |
-| --- | --- |
-| List/slice | Immutable backing array; a suffix view retains that array, a full view reuses its input, and an empty view has no backing edge |
-| Record | Unique length-aware String keys in presentation order; wider Records add an interior sorted key index |
-| Nominal value | Unique descriptor and immutable payload; fieldless constructors are singleton values |
-| Closure | One code edge followed by exact resolved captures; layout names borrow the retained code |
-| Code | Owned source, syntax blocks, capture-analysis layouts, and a traced String constant pool |
-| Committed bindings | One immutable snapshot with Values, name index, and copied names; no edge to the replaced snapshot |
+| Representation     | Ownership and access                                                                                                           |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| List/slice         | Immutable backing array; a suffix view retains that array, a full view reuses its input, and an empty view has no backing edge |
+| Record             | Unique length-aware String keys in presentation order; wider Records add an interior sorted key index                          |
+| Nominal value      | Unique descriptor and immutable payload; fieldless constructors are singleton values                                           |
+| Closure            | One code edge followed by exact resolved captures; layout names borrow the retained code                                       |
+| Code               | Owned source, syntax blocks, capture-analysis layouts, and a traced String constant pool                                       |
+| Committed bindings | One immutable snapshot with Values, name index, and copied names; no edge to the replaced snapshot                             |
 
 Private aggregate builders begin with initialized Unit slots. Root the owner before
 allocating children and expose only initialized slots to GC. Finalize Record keys and
@@ -131,8 +157,14 @@ Constants have no back edge to code, so an escaped String can survive after its 
 is collected. Descriptors, closures, and mutable builders are never interned.
 Preparation completes and charges all retained metadata before code publication.
 
-Local scopes use binding chains. Publication sorts pending names with recency
-tie-breaking and merges them with committed bindings into a fresh snapshot. For `k`
+Local scopes use binding chains. A closure itself terminates a parameter-binding scope,
+so all parameter patterns share the same matching path without an empty environment
+allocation. Blocks still introduce boundaries; duplicate checks and nominal descriptor
+resolution keep their original lexical scope. Publication reads the pending chain up
+to its entry boundary and the current committed environment directly, without cloning
+bindings into an intermediate GC chain. It sorts names with pending-entry precedence
+and recency tie-breaking, then merges with the committed snapshot. A resumed entry
+therefore preserves intervening unrelated definitions while publishing its own names. For `k`
 pending and `n` committed names, comparison work is `O(k log k + n)`, with `O(n + k)`
 scratch plus name bytes. An entry without bindings reuses the old snapshot. The frozen
 prelude is rooted independently; later REPL shadowing cannot change existing closures.
@@ -180,10 +212,15 @@ caches would be invalidated by private builder changes and are not used.
 
 ## Resource continuations
 
-`library/stream.c` owns sources, transforms, sinks, and cleanup scopes. Tokens use
+`native/stream.c` owns sources, transforms, sinks, and cleanup scopes. Tokens use
 non-reused identities; transfer claims the old token and returns a new one. Each edge
 retains at most one language item. Byte queues and incomplete text records have separate
 bounds defined in [execution](execution.md#consumption-and-materialization).
+
+A complete line within one Bytes chunk is validated and copied directly to its String.
+Incomplete line fragments use staging storage. The producer item remains rooted
+until the result allocation and copy finish; CRLF handling and raw-byte limits are the
+same on both paths.
 
 Consumers propagate demand iteratively. Language callbacks use ordinary evaluator frames
 and return callback events; nested consumers have explicit sink frames. Closing releases
@@ -337,18 +374,31 @@ without changing allocator contracts. Persistent trees and ropes trade contiguou
 traversal for indirection and different costs across versions; introduce them only for
 measured workloads.
 
+Layout changes must preserve alignment and improve measured workloads, not only
+reduce `sizeof`. Keep ownership and reclamation unchanged unless their replacement
+has independent evidence.
+
+[Chez Scheme's generations and relocation](references.md#runtime-memory-design) and
+[page-local allocator design](references.md#runtime-memory-design) are useful comparison
+points, not drop-in changes. Prioritize removal of unnecessary allocations and repeated
+traversals before changing root, barrier, or reclamation contracts. No cache-miss or RSS
+improvement follows from the current size and timing measurements alone.
+
 ### Preparation and immutable sharing
 
-Nested free-name summaries avoid repeated body visits. A chain of `d` functions around
-`n` nodes with one free name takes `O(n + d)` visits rather than `O(d n)`. This is not a
-bound for all capture analysis: local-name searches and wide capture layouts still cost
-work. Instances must continue to resolve distinct captured values.
+The [code-owned layouts](#data-and-code-ownership) move repeated name and literal work
+into preparation while each closure resolves its own values. For a chain of `d`
+functions around `n` nodes with one free name, nested summaries take `O(n + d)` visits
+rather than `O(d n)`. This is not a bound for all capture analysis: local-name searches
+and wide layouts still cost work.
 
 Constant preparation trades sorting and cold-code work for cheaper repeated reads and
 less repetitive storage. Distinct-literal workloads also matter. Preparation runs
 outside evaluator quanta; do not cache expressions whose errors, effects, or nominal
-identity are observable. Local scopes, pattern-name validation, module identities, and
-environment names still have linear scans; some large-pattern operations are quadratic.
+identity are observable. Local binding searches, free-name deduplication, module
+identities, and environment names still have linear scans; some large-pattern operations
+are quadratic. Profile wide scopes before adding symbol tables or persistent
+environment trees.
 
 ### Bytecode decision
 

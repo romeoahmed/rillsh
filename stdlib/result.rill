@@ -1,0 +1,24 @@
+import "std:core" as core
+let {Result, ..} = core
+
+fn map transform input = match input of {
+  Result.Ok {value} => Result.Ok {value: transform value},
+  Result.Err {error: _} => input
+}
+
+fn bind transform input = match input of {
+  Result.Ok {value} => transform value,
+  Result.Err {error: _} => input
+}
+
+fn unwrap_or fallback input = match input of {
+  Result.Ok {value} => value,
+  Result.Err {error: _} => fallback
+}
+
+fn unwrap_or_else fallback input = match input of {
+  Result.Ok {value} => value,
+  Result.Err {error} => fallback error
+}
+
+export {map, bind, unwrap_or, unwrap_or_else}

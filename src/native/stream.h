@@ -5,7 +5,7 @@
  */
 #pragma once
 #include "exec/exec.h"
-#include "library.h"
+#include "native.h"
 #include "runtime/runtime.h"
 #include <stdint.h>
 /** @brief Owned resource scope; no OS resource depends on garbage collection.
@@ -18,9 +18,13 @@ typedef struct RillStreams RillStreams;
  * advance it with rill_stream_progress(). Filesystem operations may block.
  */
 bool rill_stream_call(RillLibrary *library, RillValue request);
-/** @brief Close resources newer than a checkpoint, then resume with result.
+/**
+ * @brief Close checkpoint-owned resources, then resume with result.
  *
- * May suspend for reaping; retains a root for result until completion. */
+ * Includes dependencies transferred from before the checkpoint. May suspend
+ * for reaping; result remains rooted until completion. Continue driving
+ * rill_stream_progress() while cleanup is pending.
+ */
 void rill_stream_unwind(RillLibrary *library, int64_t checkpoint,
                         RillValue result);
 /**

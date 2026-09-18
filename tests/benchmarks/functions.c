@@ -5,7 +5,7 @@
  * Repeated entries retain a function List and verify an invocation; report
  * heap storage after collection. Meson measures whole-process duration.
  */
-#include "../unit/test.h"
+#include "../support/check.h"
 #include "diagnostic.h"
 #include "runtime/runtime.h"
 #include "source.h"
@@ -16,14 +16,14 @@
 
 int main() {
   [[gnu::cleanup(rill_text_clear)]] RillBuffer text = {};
-  CHECK(rill_text_append(&text, "let functions=[", 15));
+  CHECK(rill_text_append(&text, "let functions = [", 17));
   for (size_t i = 0; i < 2048; ++i)
-    CHECK(rill_text_format(&text, "%sfn(x)=>x+%zu", i ? "," : "", i));
-  const char result[] = "]; functions[2047](1)";
+    CHECK(rill_text_format(&text, "%s{ x => x + %zu }", i ? ", " : "", i));
+  const char result[] = "]; functions[2047] 1";
   CHECK(rill_text_append(&text, result, sizeof(result) - 1));
   [[gnu::cleanup(rill_source_clear)]] RillSource source = {};
-  CHECK(rill_source_init(&source, "layouts-benchmark", text.data, text.size) ==
-        RILL_OK);
+  CHECK(rill_source_init(&source, "functions-benchmark", text.data,
+                         text.size) == RILL_OK);
   RillEval *eval = rill_runtime_new(nullptr, 0);
   CHECK(eval);
   size_t retained = 0;
@@ -38,8 +38,7 @@ int main() {
     CHECK(event.state == RILL_EVAL_DONE && event.value.kind == RILL_V_INT &&
           event.value.as.integer == 2048);
     rill_runtime_collect(rill_runtime_heap(eval));
-    size_t bytes = rill_runtime_heap(eval)->bytes;
-    retained = bytes;
+    retained = rill_runtime_heap(eval)->bytes;
   }
   CHECK(printf("{\"retained_bytes\":%zu}\n", retained) > 0);
   rill_runtime_free(eval);

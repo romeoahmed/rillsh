@@ -1,0 +1,24 @@
+import "std:core" as core
+let {Option, ..} = core
+
+fn map transform input = match input of {
+  Option.Some {value} => Option.Some {value: transform value},
+  Option.None => input
+}
+
+fn bind transform input = match input of {
+  Option.Some {value} => transform value,
+  Option.None => input
+}
+
+fn unwrap_or fallback input = match input of {
+  Option.Some {value} => value,
+  Option.None => fallback
+}
+
+fn unwrap_or_else fallback input = match input of {
+  Option.Some {value} => value,
+  Option.None => fallback ()
+}
+
+export {map, bind, unwrap_or, unwrap_or_else}

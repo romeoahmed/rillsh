@@ -3,23 +3,24 @@
  * @brief Measure equality of differently shared, equal DAGs.
  *
  * Layered graphs have equal unfoldings but different transitions, exercising
- * equivalence classes instead of only matching-shape traversal.
+ * equivalence classes instead of only matching-shape traversal. Report only
+ * comparison time; graph construction and collection precede measurement.
  */
-#include "../unit/test.h"
 #include "diagnostic.h"
 #include "runtime/runtime.h"
+#include "timing.h"
+#include <inttypes.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 
 int main() {
-  enum { WIDTH = 32, LEVELS = 96 };
+  constexpr size_t WIDTH = 32;
+  constexpr size_t LEVELS = 96;
   RillHeap heap = {.threshold = SIZE_MAX};
   RillValue rows[4 * WIDTH] = {};
   RillRoot root = {};
   rill_runtime_root(&heap, &root, rows, sizeof(rows) / sizeof(*rows));
-  // Two layered DAGs have equal unfoldings but different transitions. Paired
-  // traversal revisits many combinations; equivalence classes collapse them.
   for (size_t level = 0; level < LEVELS; ++level) {
     size_t old = (level % 2) * 2, next = ((level + 1) % 2) * 2;
     for (size_t i = 0; i < WIDTH; ++i) {
@@ -38,12 +39,20 @@ int main() {
     }
   }
   rill_runtime_collect(&heap);
-  for (size_t i = 0; i < 16; ++i) {
+  size_t result = (LEVELS % 2) * 2 * WIDTH;
+  constexpr size_t iterations = 128;
+  uint64_t elapsed = 0;
+  for (size_t i = 0; i < iterations; ++i) {
     bool equal = false;
-    CHECK(rill_runtime_equal(rows[0], rows[WIDTH], &equal) == RILL_OK);
-    CHECK(equal);
+    uint64_t start = nanoseconds();
+    RillError error =
+        rill_runtime_equal(rows[result], rows[result + WIDTH], &equal);
+    elapsed += nanoseconds() - start;
+    CHECK(error == RILL_OK && equal);
   }
-  CHECK(printf("{\"retained_bytes\":%zu}\n", heap.bytes) > 0);
+  CHECK(printf("{\"iterations\":%zu,\"equal_ns\":%" PRIu64
+               ",\"retained_bytes\":%zu}\n",
+               iterations, elapsed, heap.bytes) > 0);
   rill_runtime_unroot(&heap, &root);
   rill_runtime_heap_clear(&heap);
 }

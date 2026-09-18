@@ -6,7 +6,7 @@
  * escape sequences without requiring a live terminal.
  */
 #include "text/style.h"
-#include "test.h"
+#include "../support/check.h"
 #include "text/text.h"
 #include <stddef.h>
 #include <string.h>
@@ -51,6 +51,7 @@ int main() {
       CHECK(!strcmp(b.data, "content"));
       CHECK(!strcmp(error.data, "content"));
     } else {
+      CHECK(b.size >= 4 && error.size >= 4);
       CHECK(b.data[0] == '\033');
       CHECK(!strcmp(b.data + b.size - 4, "\033[0m"));
       CHECK(error.data[0] == '\033');

@@ -34,8 +34,8 @@ struct RillJob {
   RillBuffer feed, captured[2];
   size_t fed, limit;
   RillDiagnostic error;
-  char error_text[160]; // Bounded numeric limit diagnostics; no error-path
-                        // allocation.
+  // Limit diagnostics fit here without error-path allocation.
+  char error_text[160];
 };
 struct RillExec {
   RillPlatform *platform;

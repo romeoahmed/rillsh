@@ -133,16 +133,17 @@ bool rill_platform_cd(RillEnvironment *e, const char *path,
     if (fchdir(fd) < 0) {
       bool unset = rill_platform_env_set(e, "PWD", nullptr);
       (void)unset;
-      *error = (RillDiagnostic){
-          .kind = RILL_IO,
-          .code = errno,
-          .message =
-              "cd bookkeeping failed and rollback failed; PWD invalidated"};
+      *error = (RillDiagnostic){.kind = RILL_IO,
+                                .code = errno,
+                                .message =
+                                    "cannot update directory state or restore "
+                                    "the previous directory; PWD is unset"};
     } else
       *error = (RillDiagnostic){
           .kind = RILL_IO,
           .code = saved,
-          .message = "cd bookkeeping failed; directory restored"};
+          .message =
+              "cannot update directory state; previous directory restored"};
     free(cwd);
     free(old);
     rill_platform_env_clear(&next);

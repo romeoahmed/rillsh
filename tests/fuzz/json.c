@@ -6,7 +6,7 @@
  * decoding must re-encode without a type error and preserve structural values
  * when it fits the output budget.
  */
-#include "library/json.h"
+#include "native/json.h"
 #include "diagnostic.h"
 #include "runtime/runtime.h"
 #include <stddef.h>

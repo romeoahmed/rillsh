@@ -78,8 +78,7 @@ reference](https://www.doxygen.nl/manual/config.html) guide declaration-local co
 and the generated C reference. [AGENTS.md](https://agents.md/) informs the separate,
 actionable build and change instructions in the coding-agent guide. [Awesome
 README](https://github.com/matiassingers/awesome-readme) informs the user-facing
-introduction: purpose, working examples, setup, and navigation. These are organizational
-references, not requirements to add badges, banners, or duplicate documentation.
+introduction: purpose, runnable examples, setup, and navigation.
 
 ## Language and interaction ideas
 
@@ -109,6 +108,12 @@ These sources provide concrete implementations and alternative tradeoffs:
 - [Lua parser](https://www.lua.org/source/5.5/lparser.c.html) and
   [closure ownership](https://www.lua.org/source/5.5/lfunc.c.html): separate function
   code, lexical analysis, and closure instances.
+- [LLVM GC integration](https://llvm.org/docs/GarbageCollection.html) and
+  [statepoints](https://llvm.org/docs/Statepoints.html): roots, safepoints, barriers,
+  and relocation of derived pointers. Rill keeps its explicit nonmoving root contract.
+- [Princeton sorting applications](https://algs4.cs.princeton.edu/25applications/):
+  duplicate detection by sorting and scanning adjacent keys. Rill uses libc sorting over
+  borrowed pointers to preserve source-order evaluation.
 - [LLVM Programmer's Manual](https://llvm.org/docs/ProgrammersManual.html): allocation
   for objects sharing a lifetime.
 - [Cornell amortized analysis](https://www.cs.cornell.edu/courses/cs3110/2014fa/lectures/25/lec25.html):
@@ -149,6 +154,9 @@ These sources provide concrete implementations and alternative tradeoffs:
 
 ## Bytecode and program analysis
 
+- Cornell, [Redundancy elimination](https://www.cs.cornell.edu/courses/cs4120/2026sp/notes.html?id=redund_elim):
+  available expressions and value numbering. Rill precomputes structural metadata;
+  arbitrary calls, errors, and resource boundaries cannot be treated as pure expressions.
 - Shi et al., [Virtual Machine Showdown: Stack Versus Registers](https://www.cs.tufts.edu/comp/150FP/archive/david-gregg/vm-showdown.pdf):
   dispatch count, operand traffic, and instruction size tradeoffs. Its measured JVM
   workloads do not predict Rill's speedup.
@@ -158,7 +166,8 @@ These sources provide concrete implementations and alternative tradeoffs:
   language semantics or instruction encoding.
 - Cornell, [Functional programming and closure conversion](https://www.cs.cornell.edu/courses/cs4120/2026sp/notes.html?id=functional):
   lexical environments, escaping bindings, and closure representation. Rill's cached
-  free-name summaries preserve exact captures without adding an optimizer framework.
+  free-name summaries and prepared capture slots preserve lexical bindings and instance
+  lifetimes without adding an optimizer framework.
 - Tufts, [VM garbage collection](https://www.cs.tufts.edu/cs/106/modules/11gc.html):
   register roots, liveness, relocation, and interior instruction pointers. A bytecode
   conversion must preserve these ownership obligations as well as evaluation results.
