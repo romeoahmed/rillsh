@@ -68,6 +68,53 @@ fn native_environment_is_snapshotted_at_each_launch() {
         b"firstsecondoverride",
     );
 }
+
+#[test]
+fn external_commands_do_not_inherit_unrelated_descriptors() -> io::Result<()> {
+    use rustix::io::{FdFlags, fcntl_setfd};
+    use std::os::{fd::AsRawFd, unix::process::CommandExt};
+
+    let file = tempfile::NamedTempFile::new()?;
+    std::fs::write(file.path(), b"private descriptor")?;
+    for through_shell in [false, true] {
+        let inherited = file.reopen()?;
+        let path = format!("/dev/fd/{}", inherited.as_raw_fd());
+        let mut command = if through_shell {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_rillsh"));
+            command.args(["-c", &format!("^/bin/cat {path}")]);
+            command
+        } else {
+            let mut command = Command::new("/bin/cat");
+            command.arg(path);
+            command
+        };
+        // SAFETY: the owned descriptor stays open; fcntl is async-signal-safe and allocates nothing.
+        // Only this child inherits it, leaving other concurrently running tests unaffected.
+        unsafe {
+            command.pre_exec(move || {
+                fcntl_setfd(&inherited, FdFlags::empty())?;
+                Ok(())
+            });
+        }
+        let output = command.output()?;
+        if through_shell {
+            assert!(
+                !output.status.success(),
+                "an unrelated descriptor reached the target"
+            );
+            assert!(output.stdout.is_empty());
+        } else {
+            // Prove the fixture actually passes a readable descriptor across exec.
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(output.stdout, b"private descriptor");
+        }
+    }
+    Ok(())
+}
 #[test]
 fn capture_limit_failure_is_catchable_after_cleanup() {
     success(

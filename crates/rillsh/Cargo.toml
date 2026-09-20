@@ -31,7 +31,6 @@ insta.workspace = true
 criterion.workspace = true
 tempfile.workspace = true
 rustix = { workspace = true, features = ["pty", "event", "fs", "pipe"] }
-libc.workspace = true
 vt100.workspace = true
 
 [[bench]]

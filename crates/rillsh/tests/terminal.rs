@@ -8,10 +8,7 @@ use rustix::{
 };
 use std::{
     io,
-    os::{
-        fd::{AsRawFd, OwnedFd},
-        unix::process::CommandExt,
-    },
+    os::{fd::OwnedFd, unix::process::CommandExt},
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
@@ -89,11 +86,8 @@ impl Terminal {
         // The captured slave remains open even when standard streams are redirected.
         unsafe {
             command.pre_exec(move || {
-                if libc::setsid() < 0
-                    || libc::ioctl(slave.as_raw_fd(), libc::TIOCSCTTY.into(), 0) < 0
-                {
-                    return Err(io::Error::last_os_error());
-                }
+                rustix::process::setsid()?;
+                rustix::process::ioctl_tiocsctty(&slave)?;
                 Ok(())
             });
         }
@@ -1353,7 +1347,6 @@ fn blocked_launch_setup_can_stop_and_cancel_without_releasing_targets() -> io::R
 
 #[test]
 fn foreground_resume_continues_the_original_blocked_launch_barrier() -> io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
     let mut terminal = Terminal::new()?;
     terminal.until(|s| s.contents().trim_end() == "rill>")?;
     let gate = terminal.home.path().join("resume-launch-gate");
@@ -1383,18 +1376,16 @@ fn foreground_resume_continues_the_original_blocked_launch_barrier() -> io::Resu
     terminal.send(b"fg (jobs ())[0].handle\r")?;
     let deadline = Instant::now() + Duration::from_secs(10);
     let writer = loop {
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .custom_flags(libc::O_NONBLOCK)
-            .open(&gate)
-        {
+        match open(
+            &gate,
+            OFlags::WRONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
             Ok(writer) => break writer,
-            Err(error)
-                if error.raw_os_error() == Some(libc::ENXIO) && Instant::now() < deadline =>
-            {
+            Err(Errno::NXIO) if Instant::now() < deadline => {
                 std::thread::yield_now();
             }
-            Err(error) => return Err(error),
+            Err(error) => return Err(error.into()),
         }
     };
     terminal.until(|s| {

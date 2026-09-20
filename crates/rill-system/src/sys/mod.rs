@@ -172,8 +172,10 @@ pub fn prepare_exec() -> io::Result<()> {
     }
     #[cfg(target_os = "linux")]
     {
+        // libc exposes the bitmask as unsigned but close_range takes a C int.
+        let flags = libc::CLOSE_RANGE_CLOEXEC.cast_signed();
         // SAFETY: CLOEXEC changes flags without closing live Rust-owned descriptors.
-        if unsafe { libc::close_range(3, u32::MAX, libc::CLOSE_RANGE_CLOEXEC) } != 0 {
+        if unsafe { libc::close_range(3, u32::MAX, flags) } != 0 {
             return Err(io::Error::last_os_error());
         }
     }

@@ -38,8 +38,11 @@ cargo afl fuzz -i fuzz/corpus/syntax -o fuzz/target/findings/syntax -V 60 -G 819
 
 Replace `syntax` with `json`, `evaluation`, `producer`, `lines` or `equality` for the
 other targets. Read AFL++'s host checks before running; system configuration changes are
-not part of the normal Cargo gate. Native Linux CI owns the instrumented smoke
-campaigns. Replay an exact seed by passing it on standard input to its built target.
+not part of the normal Cargo gate. Native Linux CI runs bounded campaigns with
+`AFL_EXIT_ON_SEED_ISSUES=1`; AFL++ checks the initial corpus and owns execution timeouts.
+CI also rejects saved crashes and hangs, since normal campaign completion returns zero
+even with findings. For manual reproduction, pass an exact seed on standard input to
+its built target.
 
 Keep generated findings under `fuzz/target/`. Minimize failures and commit a normal Rust
 regression with a reviewed fixture. A short campaign is supplementary evidence, not

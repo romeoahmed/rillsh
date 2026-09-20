@@ -1166,7 +1166,6 @@ dependencies = [
  "clap",
  "criterion",
  "insta",
- "libc",
  "rill-editor",
  "rill-runtime",
  "rill-syntax",

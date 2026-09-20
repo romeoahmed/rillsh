@@ -86,9 +86,9 @@ Proptest's source-parallel default. Commit generated regression seeds and replay
 before random cases. A seed is tied to its strategy, so also retain a direct test for
 each fixed bug. The [fuzz workspace](../fuzz/README.md) instruments syntax/lowering,
 JSON, bounded pure evaluation, producers, UTF-8 lines and graph equality through
-cargo-afl. Host effects are unavailable in evaluation fuzz targets. Replay committed
-seeds and retain minimized failures as ordinary regression tests. Seed replay is not a
-mutation campaign. Finite fuzz domains run to completion; AFL++ owns hang detection,
+cargo-afl. Host effects are unavailable in evaluation fuzz targets. AFL++ checks committed
+seeds during campaign startup; retain minimized failures as ordinary regression tests.
+Finite fuzz domains run to completion; AFL++ owns hang detection,
 not an arbitrary count of VM quanta inside the target.
 
 Criterion workloads belong to their crates. Distinguish prepared VM work from complete

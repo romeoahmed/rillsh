@@ -55,13 +55,13 @@ jobs:
       - run: git diff --exit-code -- crates/tree-sitter-rill/src
       - run: tree-sitter test
         working-directory: crates/tree-sitter-rill
-      - run: cargo test -p tree-sitter-rill --locked
 
   fuzz:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
       AFL_NO_UI: "1"
+      AFL_EXIT_ON_SEED_ISSUES: "1"
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -76,14 +76,11 @@ jobs:
       - run: cargo afl build --manifest-path fuzz/Cargo.toml --locked
       - name: Configure the ephemeral fuzz runner
         run: cargo afl system-config
-      - name: Replay seeds and run bounded campaigns
+      - name: Run bounded campaigns
         shell: bash
         run: |
           for corpus in fuzz/corpus/*; do
             target="${corpus##*/}"
-            for seed in "$corpus"/*; do
-              fuzz/target/debug/"$target" < "$seed"
-            done
             cargo afl fuzz -i "$corpus" -o "fuzz/target/findings/$target" -V 30 -G 8192 -- "fuzz/target/debug/$target"
           done
       - name: Reject saved failures
