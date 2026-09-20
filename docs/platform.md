@@ -3,9 +3,8 @@
 This document defines the target Linux/macOS boundary and first-release conventions.
 [Execution](execution.md) specifies job semantics; [architecture](architecture.md)
 specifies process and terminal mechanisms. [Current status](status.md) records verified
-support. Configuration, process services, UTF-8 segmentation, and color selection are
-implemented. History storage, grapheme editing, full display width, and rich-terminal
-selection remain stage-4 requirements.
+support. Rust libraries own Unicode algorithms and native backend selection; no custom
+Unicode database or obsolete terminal dialect is maintained.
 
 ## Standards and support boundary
 
@@ -15,14 +14,14 @@ facilities it uses rather than full platform certification. Missing required fac
 are build errors; Linux/macOS API differences belong in the platform adapter. Older
 compiler modes, obsolete terminal dialects, and speculative ports are outside scope.
 
-| Area                          | Baseline                                  | Project boundary                                                                                |
-| ----------------------------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| Implementation language       | GNU C23, based on ISO/IEC 9899:2024       | Standard facilities first, selected GCC/Clang extensions; no older-C fallback or C2y dependency |
-| Processes and system services | POSIX.1-2024 / Issue 8                    | Linux/macOS user-space APIs; no POSIX shell grammar claim                                       |
-| User directories              | XDG Base Directory 0.8                    | Same config/state policy on both platforms                                                      |
-| Text and segmentation         | Unicode 18.0.0; matching UAX #29 and data | UTF-8 language text; extended grapheme editing                                                  |
-| JSON                          | RFC 8259                                  | Stricter duplicate-key and numeric-range policy in execution                                    |
-| Terminal UI                   | Modern VT/xterm-compatible UTF-8 profile  | SGR, cursor control, bracketed paste; plain fallback                                            |
+| Area                          | Baseline                                 | Project boundary                                             |
+| ----------------------------- | ---------------------------------------- | ------------------------------------------------------------ |
+| Implementation language       | Current stable Rust, Edition 2024        | Cargo workspace; generated C only for Tree-sitter            |
+| Processes and system services | POSIX.1-2024 / Issue 8                   | Linux/macOS user-space APIs; no POSIX shell grammar claim    |
+| User directories              | XDG Base Directory 0.8                   | Same config/state policy on both platforms                   |
+| Text and segmentation         | UTF-8 and supported library Unicode data | Extended grapheme editing; byte-preserving native paths      |
+| JSON                          | RFC 8259                                 | Stricter duplicate-key and numeric-range policy in execution |
+| Terminal UI                   | Modern VT/xterm-compatible UTF-8 profile | SGR, cursor control, bracketed paste; plain fallback         |
 
 `termios` controls a terminal device; `terminfo` describes capabilities. The shell uses
 the former and a fixed modern protocol profile, with no terminfo dependency or
@@ -33,21 +32,19 @@ replacement database.
 Use process groups, sessions, descriptors, pipes, exec, wait, signals, and termios
 according to their native contracts. `poll`, monotonic clocks, `sigaction`, and
 `waitpid` are shared services. The terminal adapter contains the system's window-size
-query and `/dev/tty` access. These are platform services rather than ISO C facilities.
+query and `/dev/tty` access. These services stay behind the system crate’s ownership
+boundary.
 
-Read/write readiness must not impose a fixed descriptor-number ceiling. Linux uses `poll`;
-macOS retains `select` for `/dev/tty`, with a bitmap sized to the descriptor under
-`_DARWIN_C_SOURCE`. Ordinary descriptor numbers use stack storage; see Apple's [select
-contract](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/select.2.html).
-Streams and stderr relays use the same adapter. A readiness failure is distinct from
-waiting; callers retry interruptions and report other errors.
+Tokio supplies asynchronous readiness for supported descriptors. Canonical terminal and
+inherited-stdin reads use a cancellable POSIX poll worker, joined before input handoff.
+Do not impose a fixed descriptor-number ceiling. Readiness errors remain errors;
+interruption and EOF are distinct outcomes.
 
-Owned descriptor cleanup calls `close` once and invalidates the stored descriptor. Linux
-and Darwin release ordinary descriptors even when close reports EINTR; retrying can
-close an unrelated descriptor that reused the number. This deliberately follows [Linux
-behavior](https://man7.org/linux/man-pages/man2/close.2.html) and [Darwin
-implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_descrip.c),
-which differ from the POSIX.1-2024 EINTR rule.
+Use owned descriptors and native library cleanup. Do not retry an ordinary descriptor
+close after ownership has ended. Backend details belong to rustix and Rust's platform
+implementation, not a second Rill close protocol. Rustix selects its Linux raw backend
+on supported Linux targets and its libc backend on macOS by default; forcing libc
+workspace-wide is unnecessary for POSIX portability.
 
 Do not create a new session per command. Interactive terminal jobs receive the
 foreground process group; background jobs remain subject to terminal access rules.
@@ -55,12 +52,10 @@ Noninteractive execution does not acquire interactive terminal control, although
 children may have private groups for cancellation. Launch and restoration ordering
 belongs to [architecture](architecture.md#process-launch-and-io).
 
-Initialization saves the inherited signal mask and dispositions, installs handlers and
-their wakeup pipe, then unblocks the signals owned by the session. Unrelated mask bits
-remain unchanged. Cleanup and failed initialization restore the inherited state;
-children reset their mask and the shell's dispositions before exec. An inherited mask is
-not implicitly cleared by
-[exec](https://pubs.opengroup.org/onlinepubs/9799919799/functions/exec.html).
+Tokio owns signal delivery to the coordinator. The fresh child helper restores the
+required default dispositions and mask before executing a target. Terminal ownership,
+stop/resume and launch barriers are explicit system contracts, not assumptions about
+`std::process::Command` defaults.
 
 Script, configuration, module, and redirection opens use `O_NOCTTY` to prevent
 accidental terminal acquisition. File modules must be regular files; opening with
@@ -96,16 +91,17 @@ behavior for duplicate environment names is not defined. Undecodable names remai
 preservable without becoming language identifiers.
 
 `get_env`, `set_env`, and `unset_env` are explicit effects; unset differs from empty. An
-update affects future child snapshots. It does not reinitialize C locale or change
-numeric syntax. Terminal hints are reevaluated at the next prompt; config/history
-locations are resolved once when the session starts.
+update affects future child snapshots. It does not change numeric syntax. Terminal hints
+are reevaluated at the next prompt; config/history locations are resolved once when the
+session starts.
 
 HOME and XDG variables locate user files. `cd path` is explicit: no CDPATH, implicit
 home argument, or tilde expansion. After successful `cd`, maintain physical absolute PWD
-and OLDPWD bytes. Prepare bookkeeping and retain a directory FD for rollback. If
-preparation after chdir fails, restore the old directory and environment. If the OS also
-rejects rollback, report both failures and invalidate PWD rather than claiming the old
-state was preserved. At startup, an unavailable cwd likewise leaves PWD unset.
+and OLDPWD bytes. Validate the destination and prepare its physical name before swapping
+the owned cwd capability. The coordinator never changes process-global cwd, so failed
+preparation leaves its directory and environment unchanged. If the old directory no
+longer has a name, remove OLDPWD rather than inventing one. At startup, an unavailable
+physical cwd leaves PWD unset.
 
 Preserve SHELL as the inherited preferred-shell setting. Do not import exported
 functions, IFS behavior, SHLVL semantics, or `_` updates from other shells. Inherit
@@ -114,90 +110,64 @@ LANG, LC_ALL, and LC_* pass unchanged to children for their own locale policy.
 
 ## XDG storage
 
-Configuration is implemented; history storage and its locking rules below are planned.
-Reserved locations are not created or searched.
+The xdg crate resolves the user's configuration and state directories. Rill adds the
+`rillsh` application prefix and uses two files:
 
-| Purpose          | Base variable     | Default              | Use                                         |
-| ---------------- | ----------------- | -------------------- | ------------------------------------------- |
-| Configuration    | `XDG_CONFIG_HOME` | `$HOME/.config`      | `rillsh/init.rill`, interactive only        |
-| Persistent state | `XDG_STATE_HOME`  | `$HOME/.local/state` | `rillsh/history` and separate lock file     |
-| Disposable cache | `XDG_CACHE_HOME`  | `$HOME/.cache`       | Reserved; completion cache is in memory     |
-| User data        | `XDG_DATA_HOME`   | `$HOME/.local/share` | Reserved; no implicit module discovery      |
-| Session files    | `XDG_RUNTIME_DIR` | No general default   | Not needed; helper communication uses pipes |
+| Purpose | Default location                                                                  | Selection                                                                |
+| ------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| Startup | `$XDG_CONFIG_HOME/rillsh/init.rill` (`$HOME/.config/rillsh/init.rill` by default) | Interactive only; `--config FILE` replaces it, `--no-config` disables it |
+| History | `$XDG_STATE_HOME/rillsh/history` (`$HOME/.local/state/rillsh/history` by default) | Reedline's native file backend                                           |
 
-An unset, empty, or relative base value selects its default. If that default needs HOME
-and HOME is not absolute/nonempty, disable the optional facility with one diagnostic. A
-valid explicit absolute XDG base works without HOME. Never fall back to the cwd or
-create unused directories. XDG_CONFIG_DIRS and XDG_DATA_DIRS are not startup-code or
-module search paths for this shell; preserve them for children.
+Directory defaults and HOME resolution belong to xdg; Rill has no second fallback or
+search policy. XDG_CONFIG_DIRS and XDG_DATA_DIRS remain child environment variables, not
+startup-code or module search paths. No cache or runtime directory is reserved.
 
-Create the project state directory with mode 0700 and its files with mode 0600, without
-changing user-managed base-directory permissions. Unwritable state disables persistence,
-not the REPL. History locking and replacement belong to interaction.
+A missing default startup file is normal. An explicitly selected missing file or any
+other startup failure reports a diagnostic and leaves a usable prompt. History uses mode
+0700 for the application state directory and 0600 for its file, without changing
+user-managed base directories. Unwritable state leaves in-memory editing available.
 
 ## UTF-8, graphemes, and display width
 
 Byte offsets, scalar values, extended grapheme clusters, and terminal cells are distinct
 units. Source and String decoding reject overlong UTF-8, surrogates, out-of-range code
 points, and malformed sequences. Incremental decoders retain incomplete sequences across
-reads. Bytes and Path preserve non-UTF-8 OS data. Invalid terminal input is reported
-without changing previously accepted text; it is not silently replaced.
+reads. Bytes and Path preserve non-UTF-8 OS data. Canonical input validates UTF-8
+explicitly; rich input uses Crossterm's native decoding.
 
 Identifiers remain ASCII. Text equality/order uses scalar sequences without implicit
-normalization or locale collation. macOS filesystem behavior does not authorize
-rewriting path bytes. Numeric syntax, JSON, and language formatting use `.` and stable
-ASCII rules. Keep locale-independent language operations independent of
-`setlocale(LC_ALL, "")`; the initial runtime leaves the C locale in place and uses
-explicit UTF-8 services. It does not force a locale into the child's environment.
+normalization or locale collation. Numeric syntax, JSON and formatting are locale
+independent. LANG, LC_ALL and LC_* pass unchanged to children. macOS filesystem behavior
+does not authorize normalization of Path bytes; actual filesystem support for invalid
+UTF-8 filenames can differ from the shell's byte-preserving argument contract.
 
-Editor Left/Right and deletion operate on default extended grapheme clusters under
-Unicode 18.0.0 UAX #29. Generate property tables from that release's UCD, including
-Grapheme_Cluster_Break, Extended_Pictographic, and Indic_Conjunct_Break; run its
-official GraphemeBreakTest corpus. Do not copy handwritten ranges or invent emoji
-adjacency rules. Language indexing and comparison are not implicitly changed by editor
-behavior.
-
-A separate, explicit display policy uses East_Asian_Width, combining/default-ignorable
-properties, and the same release's emoji sequence/presentation data. Ordinary text
-clusters use the maximum visible constituent width (wide/fullwidth: 2; ambiguous and
-other printable text: 1); combining/default-ignorable constituents add no width.
-Recognized emoji-presentation clusters use 2 cells, with variation selectors resolved
-before the fallback text rule. A standalone cluster with no visible base gets a visible
-placeholder of known width. Newlines, tabs, escaped controls, and placeholders are
-layout operations rather than characters passed to this width formula.
-
-This is a deterministic terminal policy, not a claim that UAX #11 defines terminal width
-or every terminal/font agrees. Do not combine platform `wcwidth` results with another
-table in one layout. Source is edited in logical order; full bidirectional reordering is
-outside scope. Expose invisible directional controls in source diagnostics.
-Unknown/newly assigned glyphs remain valid text even when terminal width is imperfect.
-
-Use one Unicode version for properties, algorithms, and test corpora. Data generation
-and licensing follow [development](development.md#dependencies-and-generated-data).
+Reedline owns grapheme editing and layout. Rill uses unicode-segmentation and
+unicode-width for its own bounded tables; Ariadne owns diagnostic layout. Cargo.lock
+records the resolved implementations. Accept supported dependency Unicode updates; do
+not synchronize private tables, promise a particular Unicode release or recreate editor
+algorithms. Terminal fonts and emoji presentation can still disagree with library width
+estimates. Full bidirectional editing is outside scope.
 
 ## Terminal profile and color
 
-The planned rich profile requires a UTF-8 VT/xterm-compatible terminal, usable dimensions,
-relative cursor movement, line erasure, SGR, and bracketed paste. Test common macOS and
-Linux emulators and tmux/screen passthrough. TERM is a capability hint, not proof that a
-brand implements every extension. Known families include `xterm*`, `screen*`, `tmux*`,
-`rxvt*`, `foot*`, `kitty*`, and `alacritty*`.
+Rich editing requires a VT-compatible terminal, usable dimensions and standard streams
+attached to the same terminal. Reedline owns cursor movement, line erasure and bracketed
+paste. Rill does not maintain a terminal-brand allowlist or probe terminal identity.
 
-Missing/empty TERM, `TERM=dumb`, unknown/legacy profiles, or unusable dimensions select
-plain interaction: canonical input, parser-driven continuation prompts, no
-cursor-addressed editing, completion UI, or paste guarantee. No legacy console escape
-implementation is required. On EOF, incomplete accumulated source is diagnosed; never
-execute a valid prefix of an incomplete entry. Plain and rich input feed the same parser
-and evaluator.
+Missing/empty TERM, `TERM=dumb`, or unusable dimensions select plain interaction:
+canonical input and parser-driven continuation prompts, without cursor-addressed
+editing or completion UI. On EOF, incomplete accumulated source is diagnosed; never
+execute a valid prefix of an incomplete entry. Both modes use the same parser and
+evaluator.
 
 Do not link terminfo/ncurses, run `tput`, parse terminal databases, or negotiate
 mouse/clipboard/enhanced keyboard protocols. No terminal-identity or background-color
-query is needed. Use kernel dimensions; decoder deadlines keep partial keys from
-blocking the event loop. Resize and Ctrl-L invalidate layout and redraw safely.
+query is needed. Use kernel dimensions and the editor library's native input decoder.
+Resize and Ctrl-L request a redraw.
 
-Automatic color is per output destination and requires a TTY, a known profile, and no
-nonempty NO_COLOR. A known profile with `COLORTERM=truecolor`/`24bit` or a `-direct`
-TERM uses RGB; `-256color` uses 256 colors; other known profiles use 16. Do not infer
+Automatic color is per output destination and requires a TTY, nonempty TERM other than
+`dumb`, and no nonempty NO_COLOR. A terminal with `COLORTERM=truecolor`/`24bit` or a `-direct`
+TERM uses RGB; `-256color` uses 256 colors; other terminals use 16. Do not infer
 RGB from `xterm-256color`. Map semantic RGB styles to the selected palette centrally.
 
 `--color=never` disables generated styles. `--color=always` overrides TTY/NO_COLOR

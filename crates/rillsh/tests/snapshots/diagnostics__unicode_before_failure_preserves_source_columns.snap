@@ -1,0 +1,11 @@
+---
+source: crates/rillsh/tests/diagnostics.rs
+expression: "diagnostic(\"let greeting = \\\"\\u{1f30a}\\\"; greeting + 1\")"
+---
+Error: TypeError
+   ╭─[ <command>:1:21 ]
+   │
+ 1 │ let greeting = "🌊"; greeting + 1
+   │                      ──────┬─────  
+   │                            ╰─────── invalid String and Int operands
+───╯

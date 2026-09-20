@@ -1,43 +1,41 @@
 # Working on Rill Shell
 
-Rill Shell (`rillsh`) is a GNU C23 shell for Linux and macOS. Read
-[status](docs/status.md) for implemented features, the
-[plan](docs/implementation-plan.md) for scope, and
-[development](docs/development.md) for code and tool conventions.
+Rill Shell is a Rust shell for Linux and macOS. Read [status](docs/status.md), the
+[architecture](docs/architecture.md), and the owning [language](docs/language.md) or
+[execution](docs/execution.md) contract before changing behavior. Preserve Rill syntax
+and semantics; report deliberate behavioral changes explicitly.
 
 ## Build and verify
 
-```sh
-meson subprojects download
-meson setup build/dev --buildtype=debugoptimized --wrap-mode=nodownload
-meson compile -C build/dev
-meson test -C build/dev --print-errorlogs
-```
-
-Select affected suites with `--suite NAME`. Use a separate Clang build with
-`-Db_sanitize=address,undefined`. Before completion, run the applicable
-[quality gate](docs/development.md#quality-gate), including formatting, clang-tidy,
-and Doxygen; keep these tools in PATH. For Python changes, also run:
+Use current stable Rust and the committed lockfiles:
 
 ```sh
-uvx ruff check tools tests
-uvx ruff format --check tools tests
-uvx ty check tools tests
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
 ```
 
-Report results and omitted checks. Tests do not establish unimplemented features.
+The complete [quality gate](docs/development.md#quality-gate) adds release tests,
+rustdoc and benchmark checks. Grammar and fuzz packages document their extra gates.
+Report checks actually run and remaining gaps; local macOS results do not establish
+Linux support.
 
 ## Change boundaries
 
-- Prefer native C23, libc/POSIX, and Meson facilities. Support GCC and Clang without
-  older-C fallbacks or speculative compatibility branches.
-- Check allocation sizes, document borrowed lifetimes, and root live C references
-  across GC safepoints. Release OS resources explicitly, never through GC finalizers.
-- Put English Doxygen contracts in boundary headers and implementation invariants
-  near the code. Keep behavior in its owning specification; link rather than repeat.
-- Keep yyjson private. Do not edit downloaded dependencies or generated Unicode
-  tables; update pinned inputs and regenerate with `python3 tools/unicode.py`.
-- Keep personal paths, credentials, machine details, and host-specific container
-  commands out of tracked files. Put local evidence in ignored build directories.
-- Preserve unrelated work. Add dependencies, abstractions, or configuration only for
-  a project requirement, not a local environment workaround.
+- Keep dependency versions in `workspace.dependencies`; inherit required features in
+  the owning crate. The isolated fuzz workspace owns its instrumentation dependencies.
+- Keep traced references inside arena mutation; root every suspended continuation.
+  Explicitly close resources, join workers and reap children. GC never runs OS cleanup.
+- Validate inputs at their owning boundary and preserve guarantees in types. Delete
+  duplicate checks and speculative fallbacks; retain explicit resource cleanup.
+- Prefer library APIs and Rust ownership over handwritten infrastructure. Do not patch
+  dependencies or edit generated Tree-sitter artifacts; regenerate through its CLI.
+- Fix lint findings. Use a scoped `#[expect]` only for a demonstrated false positive,
+  with its reason; stale expectations fail the build. Keep dependency configuration
+  tied to actual API use and measured build or runtime needs.
+- Write English rustdoc for API behavior, errors and ownership; explain implementation
+  invariants with ordinary comments. Keep each behavior in one owning specification.
+- Test values, effects and resource lifetimes with dedicated fixtures. Keep Markdown
+  layout and examples outside the test inputs; rustdoc tests cover Rust API examples.
+- Preserve unrelated work. Keep personal paths, host details and credentials out of
+  tracked files. Use ignored build directories for local verification evidence.

@@ -1,0 +1,39 @@
+[package]
+name = "rillsh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A functional shell with structured data pipelines"
+
+[dependencies]
+bytes.workspace = true
+rill-editor.workspace = true
+rill-runtime.workspace = true
+rill-syntax.workspace = true
+rill-system.workspace = true
+rustix = { workspace = true, features = ["process", "termios"] }
+clap = { workspace = true, features = ["derive"] }
+ariadne.workspace = true
+tokio = { workspace = true, features = [
+  "rt",
+  "net",
+  "time",
+  "signal",
+  "sync",
+  "macros",
+] }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+criterion.workspace = true
+tempfile.workspace = true
+rustix = { workspace = true, features = ["pty", "event", "fs", "pipe"] }
+libc.workspace = true
+vt100.workspace = true
+
+[[bench]]
+name = "pipelines"
+harness = false

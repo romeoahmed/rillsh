@@ -1,0 +1,1 @@
+match xs of { [] => 0, [head, ..tail] => head }

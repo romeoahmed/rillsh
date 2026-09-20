@@ -1,9 +1,0 @@
-fn repeat n text = if n == 0 then text else repeat (n - 1) (text + text)
-
-let line = "abcdefghijklmnop\r\n"
-let input = encode_utf8 (repeat 16 line)
-let output = chunks input |> lines |> collect
-
-if length output == 65536 and output[0] == "abcdefghijklmnop" and
-   output[65535] == output[0] then ()
-else raise (error "Benchmark" "line decoder result")

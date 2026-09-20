@@ -4,289 +4,120 @@ This guide owns build, implementation, and documentation conventions. [Current
 status](status.md) identifies the available feature set; [testing](testing.md) defines
 behavior and acceptance evidence.
 
-## Build and test
-
-Use Linux/glibc or macOS with GNU C23, Meson 1.12 or newer, Ninja, and Python 3.14 or
-newer. GCC and Clang are supported; choose with `CC` at initial setup. The selected
-compiler and C library must provide the facilities used by the source, including
-`<stdckdint.h>`. Meson selects the language mode; no duplicate feature-probe catalogue
-or compiler-version gate is needed.
-
-Acquire dependencies explicitly, then configure without network access:
-
-```sh
-meson subprojects download
-CC=clang meson setup build/asan --buildtype=debugoptimized \
-  --wrap-mode=nodownload -Db_sanitize=address,undefined
-meson compile -C build/asan
-meson test -C build/asan --print-errorlogs
-
-meson setup build/release --buildtype=release --wrap-mode=nodownload
-meson compile -C build/release
-meson test -C build/release --print-errorlogs
-```
-
-Keep separate build directories for compilers, profiles, and operating systems. Use a
-consistent LLVM release for Clang, clang-format, clang-tidy, and sanitizer runtimes. On
-macOS, supply `SDKROOT` from `xcrun --show-sdk-path` when analysis needs the active SDK;
-do not store the resolved path in project files.
-
-ASan/UBSan is the default correctness profile. Meson supplies frame-pointer flags;
-undefined-behavior recovery is disabled for direct runs and fuzzing as well as tests.
-Preserve Meson's sanitizer test environment and provide the matching symbolizer. Verify
-leak-checking support per platform. The fuzz targets use a separate libFuzzer build with
-`-Db_sanitize=address,undefined,fuzzer-no-link`, so linked libraries receive coverage
-instrumentation through Meson; only the fuzz executable links the driver. MSan requires
-an instrumented environment; TSan is not a default for this single-threaded runtime.
-Measure release performance separately.
-
-### Optional Fedora environment
-
-The root `Containerfile` provisions `quay.io/fedora/fedora:45` with GCC, LLVM, Meson,
-Ninja, Doxygen, Python, and development headers. Use a compatible OCI builder with the
-project root as context; `.containerignore` excludes local outputs. Mount the checkout
-at the image's work directory when running it. No particular container runtime is
-required.
-
-Keep credentials and source checkouts out of the image. Record image digests, tool
-versions, architecture, and results with validation evidence. Linux tests do not
-establish native macOS support; unavailable matrix entries remain unverified.
-
 ## Quality gate
 
-Put LLVM tools and Doxygen in PATH before Meson setup and keep them available for
-reconfiguration. If added later, run `meson setup --reconfigure build/asan` to discover
-their native targets. Then run from the repository root:
+Use current stable Rust and the committed lockfile. `rust-toolchain.toml` selects stable
+with rustfmt and Clippy. Run locally; native Linux validation belongs in CI. Default
+`cargo build` and `cargo run` select the CLI; use `--workspace` for every crate.
 
 ```sh
-meson format --check-only --recursive meson.build meson.options \
-  subprojects/packagefiles/yyjson/meson.build
-meson compile -C build/asan api-docs
-ninja -C build/asan clang-format-check clang-tidy
-meson test -C build/asan --print-errorlogs
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+cargo test --workspace --release --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+cargo bench --workspace --no-run --locked
 ```
 
-Meson owns build/test scheduling, results, timeouts, and tool targets. Unicode
-regeneration is a Meson test. Formatting, clang-tidy, and API documentation use their
-native targets directly. Review component dependencies, Markdown links, tables,
-examples, and accidental local information in the diff; these remain review duties.
+Use `cargo test -p CRATE` to select an affected crate. The test profile inherits dev;
+only the property/snapshot engines and their RNG/diff dependencies use higher dev
+optimization, following
+[Proptest](https://proptest-rs.github.io/proptest/proptest/tips-and-best-practices.html)
+and [Insta](https://insta.rs/docs/quickstart/#optional-faster-runs). Project code
+retains normal debug information and checks. Release and bench use Cargo defaults;
+change LTO, codegen units or optimization levels only after representative measurements,
+not by assuming that more optimization is always faster. Preserve unwinding for
+owned-resource fallback cleanup.
 
-For Python changes:
+Criterion workloads live in their owning crates. `cargo bench --workspace` measures
+them; `-- --test` runs a smoke check. Each workload names its boundary:
+
+- Parsing includes grammar construction and AST release.
+- Prepared evaluation, equality, constructors and record matching exclude fixture
+  setup and engine destruction through `iter_batched_ref`. Source-to-result includes
+  parsing, initialization and destruction through `iter`. Equality workloads include
+  equal values and early/late mismatches.
+- VM work includes quanta and GC pacing. Large fixtures use `BatchSize::LargeInput`
+  to limit simultaneously live engines. Pure workloads reject unexpected host requests.
+- Completion measures lexical context or prepared name/record metadata.
+- CLI pipelines include startup, embedded modules, I/O and cleanup; filesystem fixture
+  creation is untimed.
+
+For a short process-pipeline measurement:
 
 ```sh
-uvx ruff check tools tests
-uvx ruff format --check tools tests
-uvx ty check tools tests
+cargo bench -p rillsh --bench pipelines --locked -- --sample-size 10 --warm-up-time 1 --measurement-time 2
 ```
 
-Format locally with `uvx ruff format tools tests` and `ninja -C build/asan
-clang-format`. Use `meson format --inplace --recursive meson.build meson.options` for
-project build files; format the tracked yyjson overlay separately. Keep Meson's
-formatter defaults without a project style file. Checks must not rewrite sources. Use
-the relevant test suites while developing; [testing](testing.md) describes selection,
-repetition, fixtures, and final gates.
+Run performance measurements without concurrent builds, tests or fuzzing. Keep timing
+thresholds out of correctness tests. See the [grammar
+package](../crates/tree-sitter-rill/README.md) for regeneration/corpus commands and
+[fuzzing](../fuzz/README.md) for instrumented targets. The grammar uses generated C
+through `cc`; normal Cargo builds need no grammar generator. The fuzz workspace has its
+own manifest, lockfile and lint gate.
 
-## GNU C23, standard facilities first
+## Implementation
 
-Prefer ISO/IEC 9899:2024 facilities and selected GNU extensions that express intent
-clearly. Require the facilities actually used, without older-C fallbacks or C2y syntax.
+Workspace lints enable Clippy `all`, `pedantic`, and `nursery`. Fix findings rather than
+suppress groups. Exact language Float equality has a scoped, explained `float_cmp`
+expectation; stale expectations fail. `future_not_send` expectations are confined to the
+current-thread coordinator: traced state intentionally cannot migrate to a worker. All
+actual worker inputs and results remain owned and `Send`. Keep unsafe POSIX boundaries
+in `rill-system::sys`, with owned inputs and documented safety invariants. The PTY
+fixture has a narrow async-signal-safe pre-exec callback. GC state remains rooted
+between quanta; collection and host I/O happen outside mutation callbacks. Explicit
+shutdown joins workers and reaps children; Drop is a fallback, not the asynchronous
+cleanup protocol. Producer callbacks run in traced child scopes. Drive
+`Engine::interrupt` or `Engine::finish` until finalization completes. Beginning another
+entry cannot discard active work, and there is no public abort path that bypasses
+release callbacks. Preserve the original error and source location while attaching
+cleanup failures. Keep lexical layouts local to compiled code and immutable after
+lowering. Frame-local reads use scope/slot indices; closures retain selected values and
+share layouts across partial applications. Borrow pattern names during matching and
+publish bindings only after a complete match. Entry publication merges declarations, not
+a stale global snapshot.
 
-| Need                               | Convention                                                              |
-| ---------------------------------- | ----------------------------------------------------------------------- |
-| Boolean/null values and assertions | `bool`, `true`, `false`, `nullptr`, `static_assert`                     |
-| Interface annotations              | `[[nodiscard]]`, `[[maybe_unused]]`, `[[fallthrough]]`                  |
-| Checked integer arithmetic         | `<stdckdint.h>`: `ckd_add`, `ckd_sub`, `ckd_mul`                        |
-| Constants and local inference      | `constexpr`, `auto`, `typeof` when clearer                              |
-| Bit operations                     | `<stdbit.h>` when needed                                                |
-| Initialization and representation  | `{}`, designated initializers, compound literals, tagged unions         |
-| Headers and no-argument functions  | `#pragma once`; `f()` declarations and definitions                      |
-| Variadic formatting                | C23 `va_start(args)` and `[[gnu::format(printf, ...)]]`                 |
-| Simple scope-owned storage         | `[[gnu::cleanup(function)]]` with an exactly typed, infallible callback |
+## Tests and reviewed outputs
 
-Use libc for allocation, copying, formatting, and sorting when its contract fits. A
-helper should add ownership, bounds, or meaningful errors rather than rename libc.
-Implement project-specific GC and segmentation directly; avoid generic allocator,
-`defer`, or preprocessor frameworks. Keep roots, launch gates, and transactional OS
-cleanup explicit because their ordering matters. Do not use nested-function trampolines,
-`void *` arithmetic, packed-layout tricks, or statement-expression frameworks.
+Use native Rust unit and owning-crate integration tests. Keep semantic assertions on
+values, errors, effect order and owned-resource lifetimes. Executable and PTY fixtures
+exercise the actual binary with explicit shutdown and deadlines. Do not skip a missing
+PTY capability or use sleeps as readiness evidence.
 
-Initialize locals at declaration, using `{}` for empty state and meaningful sentinels
-such as `-1` for descriptors. Output-only scratch arrays may remain uninitialized when
-only the written portion is read; initialize opaque POSIX sets with their prescribed
-functions. Do not clear large scratch storage merely for visual consistency. Scope
-cleanup runs in reverse declaration order on normal scope exit; it is not an `exit()` or
-`_exit()` handler. Never jump past a cleanup variable's initialization. Use typed
-callbacks rather than casting pointer-to-pointer arguments through `void **`.
+Diagnostic snapshots use insta. Review the source label, Unicode location and cleanup
+notes before accepting a change; never enable automatic snapshot updates in CI. Proptest
+regression files and minimized fuzz inputs are reviewed source artifacts.
 
-### Memory and interface contracts
+## Documentation
 
-Use explicit lengths, `size_t` for sizes, fixed-width language integers, and checked
-conversions at boundaries. Check aggregate sizes before allocating or indexing; never
-request `realloc(pointer, 0)`. Avoid VLAs and unbounded C recursion. Assertions express
-internal invariants; malformed input and OS failures require release checks.
+Use `//!` for a crate or module's purpose and ownership boundary; use `///` for an
+item's observable contract. Start with a useful summary, then document non-obvious
+ownership, cancellation and `# Errors`, `# Panics` or `# Safety` requirements. Link to
+Rust items with intra-doc links. Small Rust API examples should run as rustdoc tests. Do
+not repeat type signatures or add empty documentation sections to satisfy a template.
 
-Separate mutable owners from borrowed `const` views. State whether an interface copies,
-borrows, or consumes data; never cast away `const` to free it. Ordinary C conversions
-between object pointers and `void *` need no cast. Numeric narrowing requires a range
-check or a documented bound. Initialize allocated structs with typed compound literals;
-root only initialized Values. Retained `calloc` pointer arrays rely on the supported
-POSIX ABIs' null representation, not an ISO C guarantee.
+Ordinary `//` comments explain invariants, ordering or a reason the code alone cannot
+show. Safety comments justify the specific unsafe operation and its borrowed lifetimes.
+Keep English prose concise and update it with the implementation.
 
-Do not equate NUL-terminated strings with all language or OS text. Encoded bytes use
-`unsigned char`. Empty spans must not pass null pointers to libc functions requiring
-valid pointers. Check `snprintf`'s required length before using it as a written count.
-Append inputs must not alias growable destination storage. Format strings are trusted.
-Fallible results must be handled; an intentional discard needs a local rationale when it
-is not evident from the cleanup policy.
+README introduces the shell with useful examples and a short build path. Specifications
+own Rill behavior; architecture explains mechanisms; status records delivered work and
+verification gaps. Link instead of copying contracts between them. Manually check
+changed Rill examples, preserving readable pipeline layout; do not make tests parse
+Markdown. Keep personal paths and host-specific setup out of tracked files.
 
-Read `errno` only after a documented failure and preserve it across cleanup. Semantic
-diagnostics leave the native code zero: an earlier operation's `errno` must not change
-their category or recoverability. The [POSIX error contract](https://pubs.opengroup.org/onlinepubs/9799919799/functions/errno.html)
-does not make successful calls reset it.
+## Dependencies and CI
 
-Headers compile independently and include the public standard or component declarations
-they use. Use forward declarations for incomplete types, not transitive includes.
-Include-cleaner findings need review: SDK-internal files do not replace public headers.
-Keep feature-test macros in build configuration and actual Linux/macOS differences in
-platform code. Conditional branches require an observed supported-platform difference.
+Keep versions and internal paths in root `workspace.dependencies`. Each owning crate
+inherits its dependencies and enables the features it uses. Check affected crates
+individually as well as together to catch accidental feature-unification dependencies.
+Use released dependencies with Cargo's native feature unification and committed
+lockfiles. Reedline owns editing and history; its unused optional editing modes stay
+disabled. Tree-sitter owns generated C and binding conventions. Use Cargo for
+application builds and the upstream CLI for grammar generation. Review upstream licenses
+when upgrading dependencies.
 
-## Dependencies and generated data
-
-The sole third-party runtime library is yyjson, private and static through Meson's
-`dependency()` and wrap fallback. The wrap owns its version, archive hash, and MIT
-notice; its types never cross component interfaces. `force_fallback_for=yyjson` keeps
-the dependency instrumented with the selected build. The current release has no upstream
-Meson file, so a small overlay declares the library and overrides the dependency. Review
-its warning settings on upgrades instead of patching it for unrelated checks. Meson's
-`include_type: 'system'` keeps vendor headers outside project diagnostics without
-weakening checks on the adapter or removing sanitizer instrumentation.
-
-Track both `data/unicode/` and `src/text/unicode_tables.inc`. The former contains the
-pinned official inputs, manifest, license, and independent conformance corpus; the
-latter allows ordinary compilation without regeneration. Neither is a cache. Update
-inputs explicitly, run `python3 tools/unicode.py`, and verify with `--check`. Ordinary
-builds fetch no Unicode data. Keep upstream notices and data comments intact.
-The generator separates verified file reads from pure parsing and rendering. Range
-normalization rejects conflicting overlaps before emitting tables for binary search;
-the Unicode test suite covers both those transformations and official segmentation.
-
-Bundled `stdlib/*.rill` sources use native C23 `#embed` in `native/bundle.c`. Compiler
-dependency files track changes; there is no generated C or embedding script. Generate
-shared metadata only when it eliminates real duplication. Python tools and tests use the
-standard library; no Python package is needed by the installed shell.
-
-## Tool configuration
-
-Start from upstream defaults or a named preset, retaining only project-specific choices.
-Meson owns language mode, build type, sanitizers, optimization, LTO, dependency wiring,
-and the compile database. Use shared `files()` lists when the same sources need
-different compile flags; fault injection recompiles those lists in a separate archive
-and never changes production targets. Keep default undefined-symbol checking. Add custom
-options only for real optional products, such as `-Dfuzz=true` for fuzz targets and seed replay.
-Use `find_program` with a version constraint for build-time Python; no Python extension
-module is built. Static-library link dependencies propagate through Meson: only targets
-compiling the JSON adapter need yyjson headers. Keep the boundary-header list as Meson
-file objects so missing documentation inputs fail during setup.
-
-`warning_level=3` and `werror=true` establish the compiler baseline. The root Meson file
-owns additional warnings; `.clang-tidy` owns analyzer and C safety checks. Avoid
-`-Weverything`, duplicate groups, CERT aliases of enabled checks, and unrelated C++
-migrations. C23 `()` is already a prototype. Consult the
-[GCC](https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html) and
-[Clang](https://clang.llvm.org/docs/DiagnosticsReference.html) group definitions when
-changing diagnostics.
-
-`.clang-format` uses LLVM style. Meson's include lists restrict formatting and analysis
-to authored C, including untracked files. Validate clang-tidy with `--verify-config` and
-review `--list-checks` on upgrades; there is no universal upstream strict-C preset. Keep
-these deliberate exceptions:
-
-- `bugprone-unused-return-value` and `cert-err33-c` have different default function sets.
-- The analyzer's `DeprecatedOrUnsafeBufferHandling` rule recommends Annex K APIs absent
-  from the supported libraries. It is disabled; `bugprone-unsafe-functions` remains.
-- `misc-include-cleaner` is a reviewed audit aid, not a required gate: SDK-internal
-  declarations can produce unsuitable replacement-header suggestions.
-
-Local suppressions name the check and explain the specific exception. Do not satisfy a
-warning by adding unsafe casts or replacing portable public headers with SDK internals.
-
-Python targets 3.14. Prefer pure transformations, iterators, `pathlib`, context
-managers, `argparse`, and `unittest`; keep I/O and process ownership explicit. Local
-mutable state is appropriate for buffering and cleanup. `pyproject.toml` owns Ruff and
-ty settings. Neither tool is imported by the scripts, and tests install or download
-nothing.
-
-## Comments and API documentation
-
-Write concise English. Boundary headers own API contracts; implementation comments
-explain reasoning and invariants. Comment changes must be checked against definitions
-and callers, especially around allocation and callbacks. Markdown specifications own
-language behavior. Document what names and types cannot express: ownership, lifetime,
-units, empty inputs, failure guarantees, effects, and GC or blocking boundaries.
-
-Use [Doxygen blocks](https://www.doxygen.nl/manual/docblocks.html) beside declarations,
-with a one-sentence `@brief` and a blank line before details. Each authored C file and
-header starts with an `@file` block. An implementation introduction explains its
-responsibility, main flow, and important ownership boundary in a few sentences; a tiny
-entry point needs only a short description. Use an ASCII diagram inside `@verbatim` /
-`@endverbatim` when it clarifies a state machine or ownership graph. Keep algorithms and
-exceptional paths beside the code they explain. Use `///<` for short member contracts.
-Keep one authoritative comment per declaration; do not repeat signatures with `@fn` or
-duplicate contracts in source files. Link related operations with their function names
-and `()` so Doxygen can resolve them. Use `@pre`, `@return`, or complete `@param` lists
-only when they add clarity. Do not put multi-paragraph contracts into `@brief` or add
-tags that repeat parameter names. State whether failure leaves outputs unchanged,
-partially written, or invalid; never promise rollback unless the implementation provides
-it.
-
-```c
-/**
- * @brief Append bytes to an owned buffer.
- *
- * The source must not alias buffer storage. Empty input is valid.
- * @return True on success; false leaves the payload unchanged.
- */
-```
-
-Ordinary `//` or `/* ... */` comments explain such decisions as root retention, signal
-masking, or cleanup order. Avoid assignment narration, decorative banners, historical
-audit notes, and commented-out code. Private helpers need explanation only where their
-names and implementation leave a meaningful question unanswered.
-
-### Doxygen build
-
-With Doxygen available at Meson setup, generate the HTML reference explicitly:
-
-```sh
-meson compile -C build/asan api-docs
-```
-
-Output is under the build directory's `api/html/`. `src/meson.build` owns one
-boundary-header list; `docs/meson.build` configures `docs/Doxyfile.in`. Component-private
-headers, tests, generated tables, and dependencies are excluded. Ordinary compilation
-does not require Doxygen, but the quality gate does. `EXTRACT_STATIC=YES` includes boundary-header `static constexpr`
-limits. Source-file introductions orient readers of the code; this target deliberately
-extracts only boundary headers. Keep default HTML styling and warning checks.
-`EXTRACT_ALL` would hide missing documentation and stays off; warnings fail the target.
-
-Review rendered C23 signatures, links, and contracts as well as the exit status.
-Generated configuration and HTML stay in the build tree; published artifacts must not
-contain personal paths. The [Doxygen configuration
-manual](https://www.doxygen.nl/manual/config.html) defines these options.
-
-## Documentation maintenance
-
-Use **Rill Shell** for the product and `rillsh` for the executable/package. Keep each
-contract in its owning document and link to it elsewhere. README introduces the project
-and working examples; AGENTS.md provides concise contributor-agent instructions; status
-distinguishes implementation from design. Update these when scope changes.
-
-Keep personal paths, account names, hostnames, credentials, environment dumps, and
-host-specific container tooling out of repository files and published evidence. Use
-relative paths, standard OS paths, or portable placeholders. Versions and hashes are
-appropriate validation identifiers. Review tracked and newly added files before
-publication; ignored logs are local artifacts, not publication-ready evidence.
-
-Escape literal pipes even inside Markdown table code spans. Check links, anchors,
-fences, tables, and examples. Record actual pass/fail/unavailable results; a written
-contract is not evidence that its implementation exists.
+CI checks pull requests and pushes to `main`, avoiding duplicate branch-push checks for
+open pull requests. A newer run cancels superseded work for the same PR or branch.
+Platform, grammar and fuzz jobs use separate gates; release publishing is not
+configured.

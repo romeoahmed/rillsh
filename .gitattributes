@@ -2,11 +2,13 @@
 * text=auto eol=lf
 
 # Fuzz seeds are exact byte inputs, including CRLF and malformed text.
-tests/fuzz/corpus/** -text
+fuzz/corpus/** -text
 
-# These shared extensions contain C in this repository.
+# Tree-sitter headers contain C.
 *.h linguist-language=C
-*.inc linguist-language=C
 
-# Keep generated tables out of language statistics and collapsed in GitHub diffs.
-src/text/unicode_tables.inc linguist-generated
+# Tree-sitter's generated parser follows its own C toolchain.
+crates/tree-sitter-rill/src/parser.c linguist-generated
+crates/tree-sitter-rill/src/grammar.json linguist-generated
+crates/tree-sitter-rill/src/node-types.json linguist-generated
+crates/tree-sitter-rill/src/tree_sitter/* linguist-generated

@@ -1,0 +1,31 @@
+[package]
+name = "tree-sitter-rill"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Rill Shell grammar for incremental editor parsing"
+build = "bindings/rust/build.rs"
+include = [
+  "README.md",
+  "bindings/rust/*",
+  "grammar.js",
+  "queries/*",
+  "src/*",
+  "tree-sitter.json",
+]
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language.workspace = true
+
+[build-dependencies]
+cc.workspace = true
+
+[dev-dependencies]
+tree-sitter.workspace = true
+rill-syntax.workspace = true
+
+[lints]
+workspace = true

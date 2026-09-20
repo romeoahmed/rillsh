@@ -1,0 +1,22 @@
+[package]
+name = "rill-syntax"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Rill Shell source, tokens, and execution syntax"
+
+[dependencies]
+logos.workspace = true
+chumsky.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+criterion.workspace = true
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "syntax"
+harness = false

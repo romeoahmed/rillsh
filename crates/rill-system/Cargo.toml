@@ -1,0 +1,33 @@
+[package]
+name = "rill-system"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Owned Unix services for Rill Shell"
+
+[dependencies]
+bytes.workspace = true
+libc.workspace = true
+slotmap.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = [
+  "macros",
+  "rt",
+  "net",
+  "time",
+  "signal",
+] }
+rustix = { workspace = true, features = [
+  "event",
+  "fs",
+  "pipe",
+  "process",
+  "stdio",
+  "termios",
+] }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

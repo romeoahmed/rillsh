@@ -1,11 +1,8 @@
 # Interaction
 
-This document specifies the first-release target for invocation and interaction.
-[Architecture](architecture.md) defines editor mechanisms; [platform](platform.md)
-defines encoding and terminal capabilities. [Current status](status.md) describes the
-canonical-input REPL and incremental stream display available today. Invocation is
-implemented. Grapheme editing, completion, history, and rich presentation below are
-stage-4 requirements, not current prompt behavior.
+This document defines invocation, editing and presentation. [Platform](platform.md) owns
+encoding and terminal capabilities; [architecture](architecture.md) explains the
+mechanisms. [Status](status.md) records platform verification gaps.
 
 ## Invocation and session boundaries
 
@@ -19,14 +16,17 @@ editor, prompt, automatic value display, startup config, or history writes.
 
 `args ()` returns FILE arguments as a List of Bytes, excluding the filename; it is empty
 in other modes. `-c` accepts one source argument and no positional arguments. `--help`,
-`--version`, `--no-config`, and `--color=auto|always|never` have fixed meanings. The
-interactive startup file is `rillsh/init.rill` under the resolved XDG config base.
-Startup-file failure reports a diagnostic and leaves a usable prompt. Do not discover
-startup code in ancestor directories or execute code during completion.
+`--version`, and `--color=auto|always|never` have fixed meanings. Interactive startup
+reads `rillsh/init.rill` under the user XDG config base. `--config FILE` replaces that
+path; `--no-config` disables startup loading. The two options conflict. `--config`
+cannot accompany FILE or `-c`. A missing default file is normal; an explicit file error
+or other startup failure reports a diagnostic and leaves a usable prompt. Do not
+discover startup code in ancestor directories or execute code during completion.
 
 Interactive expressions display their results. Unit and declarations display nothing.
-Today Functions display as `<Function>` and containers show counts; signature help and
-tables are stage-4 work. A JobPlan is described without launching it. The REPL parses the complete submitted entry before
+Functions display their remaining parameters without invocation. Records and
+materialized Lists use bounded tables; nested values use concise summaries. A JobPlan is
+described without launching it. The REPL parses the complete submitted entry before
 executing any prefix. Runtime effects completed before a later failure remain real.
 
 ## Expression submission
@@ -40,16 +40,13 @@ Incomplete input. Enter inside the buffer inserts a newline. Invalid input is su
 for a diagnostic instead of collecting lines indefinitely.
 
 Alt-Enter explicitly submits the entire buffer, including incomplete input for a syntax
-diagnostic. Ctrl-J or Shift-Tab always inserts a newline. The Alt binding uses the
-ordinary ESC-prefixed sequence; terminals need not support distinct Ctrl/Shift-Enter
-codes. The help view lists these actions and their available aliases. No backslash-based
+diagnostic. Ctrl-J inserts a newline; Shift-Tab does so outside the completion menu.
+The Alt binding uses the ordinary ESC-prefixed sequence; terminals need not support
+distinct Ctrl/Shift-Enter codes. The help view lists these actions and their available aliases. No backslash-based
 editor continuation rewrites source text.
 
-Indentation after a newly inserted line uses parser context and a two-space step. It
-only adds whitespace at the insertion point. Inside a multiline string, insert only the
-requested newline: indentation and string contents must not be rewritten. Highlight
-matching delimiters; do not silently insert/correct braces or quotes. One complete
-submitted entry is one history item and one execution boundary.
+Newlines use Reedline's native editing behavior and do not rewrite indentation or string
+contents. One complete submitted entry is one history item and one execution boundary.
 
 ## Familiar terminal controls
 
@@ -77,11 +74,10 @@ keymaps are outside the first release.
 | Suspend the shell while editing               | Ctrl-Z                                           |
 | Redraw; show help                             | Ctrl-L; F1                                       |
 
-Word deletion uses runs of whitespace, identifier characters, or punctuation; it is an
-editing convenience rather than a second language tokenizer. A completion menu consumes
-Enter to accept a candidate, never to execute it. Escape closes an overlay without
-clearing the main buffer. Search acceptance returns to editing; it does not execute the
-selected history entry.
+Word deletion follows Reedline’s native word boundaries; it does not tokenize Rill. A
+completion menu consumes Enter to accept a candidate, never to execute it. Escape closes
+an overlay without clearing the main buffer. Search acceptance returns to editing; it
+does not execute the selected history entry.
 
 Ctrl-C discards the unsubmitted entry. Ctrl-D requests `exit 0` only when the buffer is
 empty; outstanding jobs follow the execution shutdown contract. Ctrl-Z restores terminal
@@ -94,46 +90,44 @@ suspend meaning; undo has a separate binding.
 On the rich terminal profile, bracketed paste is one insertion transaction. Its contents
 are not interpreted as shortcuts, completion requests, or submit keys. CRLF and lone CR
 are normalized to LF at this terminal-input boundary; no such normalization applies to
-files, strings, argv, or process data. Other control bytes remain literal data and are
-displayed safely; invalid source receives a diagnostic.
+files, strings, argv, or process data. Other control bytes remain source data; invalid
+source receives a diagnostic. Reedline owns their appearance while editing and recalling
+history. Rill does not promise a separate escaped editor display with exact cursor
+mapping.
 
-Buffer a paste incrementally with a fixed limit, service other events between chunks,
-and commit only after its closing marker and UTF-8 validation. On invalid UTF-8 or
-overflow, discard that paste and drain through its closing marker; do not interpret its
-remainder as commands. An externally delivered interrupt may abort editing, but input
-remains in discard-until-marker state before accepting new keys. EOF or terminal loss
-cancels the pending paste. There is no time-based inference that rapidly typed
-characters must be pasted text.
+Reedline and Crossterm own paste buffering, decoding, undo grouping and escape-sequence
+recognition. Rill does not patch or duplicate those mechanisms. Their public APIs do not
+provide incremental paste-memory limits, discard-until-marker cancellation, bounded undo
+storage or configurable byte/deadline limits for key sequences. These are not Rill
+guarantees. Large input can consume memory before submission validation runs.
 
-| Resource                                       | First-release limit                            |
-| ---------------------------------------------- | ---------------------------------------------- |
-| Editable entry, including an uncommitted paste | 1 MiB of UTF-8 bytes                           |
-| Undo/redo log                                  | 1,000 transactions and 8 MiB of retained edits |
-| Persistent history                             | 10,000 entries and 16 MiB                      |
-| Completion list                                | 200 candidates and 1 MiB of retained text      |
-| Key-sequence recognition                       | 64 bytes; 100 ms ESC/key ambiguity deadline    |
+| Resource                        | Policy                                                     |
+| ------------------------------- | ---------------------------------------------------------- |
+| Submitted source                | Reject entries exceeding 1 MiB before parsing or execution |
+| Editable buffer, paste and undo | Reedline's native behavior; no Rill memory ceiling         |
+| History                         | At most 10,000 entries; no aggregate byte ceiling          |
+| Completion results              | At most 200 candidates and 1 MiB of retained text          |
 
-Over-limit edits leave the previous buffer unchanged and produce a concise message. Old
-undo/history entries may be evicted according to their stated bounds. Consecutive text
-insertion forms an undo group until navigation or another action; a paste or completion
-replacement is one group. Paste and discarded control-string payloads are not key
-sequences; their terminators, not this deadline, delimit draining. Plain terminals have
-reduced editing and no bracketed-paste guarantee, as documented in platform.
+Oversized submissions do not execute a prefix and do not enter persistent history.
+Reedline may retain its latest leading-space exclusion for in-memory recall even when
+submission is rejected; this is part of the native editor buffer policy. Plain input
+bounds its accumulated source while reading; rich input is checked after submission.
+Paste is never deliberately interpreted as submit keys. There is no time-based inference
+that rapidly typed characters must be pasted text.
 
 ## Completion, highlighting, and responsiveness
 
-Highlighting uses lexical/parser spans and in-memory metadata, with no filesystem access
-or user evaluation. Functions, constructors, module exports, and builtin signatures
-supply help and identifier completion; field completion inspects only materialized data
-and descriptors.
+Highlighting uses lexer spans without filesystem access or evaluation. Completion uses
+published names, value kinds and remaining function parameters. Field completion
+inspects materialized Records and nominal payloads; it never calls a function.
 
 Filesystem completion begins on explicit Tab. A short-lived helper process receives a
 bounded query and returns bounded candidates. A result expires after 200 ms; the
 supervisor cancels/reaps the worker without waiting inside the editor. At most one
-worker may remain unreaped, so a slow filesystem cannot accumulate helpers. Requests
-carry the buffer revision and completion generation; cursor movement, cancellation, or
-another request invalidates the generation even if the text did not change. Stale
-results cannot open a menu, replace text, or move the cursor.
+worker may remain unreaped, so a slow filesystem cannot accumulate helpers. Reedline
+owns menu generations; Rill binds each reply to its complete buffer/cursor origin,
+discards superseded replies and replaces the completer between entries. Stale results
+must not open a menu, replace newer text or move its cursor.
 
 Insertion must round-trip to the intended value or exactly one command argument,
 including spaces, quotes, `$`, wildcard characters, and non-UTF-8 paths. Use this
@@ -147,32 +141,37 @@ valid revision, syntax coloring must not disagree with tokenization.
 
 ## Text, styles, and output
 
-Content and style are separate data. Semantic roles include keyword, function,
-constructor, string, number, path, operator, comment, suggestion, error, warning, and
-hint. One default RGB palette with accessible plain wording is sufficient; there is no
-markup parser or user theme language. Terminal capability and color precedence belong to
-platform and apply consistently to editor and diagnostics.
+The editor uses one palette for strings, scalar literals, keywords and pipeline syntax,
+with plain text for other tokens. Native hints and diagnostics provide their own styles.
+Color has no semantic role and never replaces useful wording; there is no markup parser
+or theme language. [Platform](platform.md#terminal-profile-and-color) defines capability
+detection and color precedence.
 
-Source snippets, filenames, history, and values are literal spans. Escape terminal
-controls in shell-generated display; never splice untrusted ANSI/OSC sequences into
-output. Use one width/layout service for the editor, diagnostics, and tables. External
-bytes deliberately written by a program remain unchanged.
+Rill escapes control and bidirectional-formatting characters in diagnostics, completion
+labels and automatic value summaries. Raw editor buffers, native history navigation and
+hints follow Reedline's rendering behavior; a source-to-display remapping layer is
+outside the accepted native-editor scope. Reedline, Ariadne and Rill tables use their
+owning libraries' layout services. Explicit byte/text writes and external program output
+remain unchanged.
 
-Diagnostics carry kind, source name, byte span, message, and optional notes/help. No
-evaluator or codec prints directly into a pipeline. Builtin metadata supplies parameter
-names, accepted value categories, effect class, materialization behavior, and help; it
-does not create a separate function/type system.
+Diagnostics carry an error kind, message, optional source range and cleanup notes. The
+CLI renders them; evaluators and codecs never print into a pipeline. Completion
+signatures describe remaining parameters, not a static type or effect system. The
+language and execution references own accepted arguments and materialization rules.
 
 Use concise English: state what failed, then give an actionable correction when known.
 Quote syntax and callable examples so they stand out from prose. Use public type and
 function names instead of storage or scheduling terminology. Collection summaries name
 their units (items, fields, stages); help separates usage, options, and examples.
 
-The planned renderer will display records and materialized lists as tables. A returned stream is
-drained before publication and displayed as items arrive. If shown as a table, the first
-row and terminal width determine columns; later cells may be truncated. Formatting never
-pulls extra items merely to sample widths. Heterogeneous rows use ordinary value
-presentation. Display is not serialization for process input or files.
+A Record displays as field/value rows. A nonempty List displays at most 100 rows; record
+rows use up to eight field names from the first row when all displayed records contain
+them. Other Lists use index/value rows. Tables fit the terminal width, capped at 240
+cells, and mark omitted rows or fields; long cells are abbreviated.
+
+A returned Stream displays each non-Unit item as a summary as it arrives, then finishes
+cleanup before publication. It does not sample or materialize rows to build a table.
+Display is not serialization; explicit output functions preserve their data.
 
 Shell-owned job notifications and relayed output use a coordinated clear/write/redraw
 operation that preserves the edit buffer, cursor, and viewport. Direct inherited output
@@ -181,15 +180,19 @@ arbitrary program escape sequences. Ctrl-L restores its own editing area.
 
 ## History and recovery
 
-History stores submitted nonempty entries, including failed submissions. An entry
-beginning with ASCII space remains in memory only. Preserve complete multiline text in a
-length-aware, versioned format; reject malformed or over-limit stored entries.
+History uses Reedline's native file backend, including its synchronization, multiline
+encoding and consecutive-duplicate policy. Submitted nonempty entries, including failed
+submissions, are eligible. A leading ASCII space uses Reedline's memory-only exclusion;
+only the latest excluded entry is retained for recall.
 
-Private modes, path resolution, and failure behavior are specified in platform. Use a
-separate advisory-lock file for read/merge/atomic-replace updates, so replacement of the
-history inode cannot bypass synchronization. Under the lock, reload current history,
-append only this session's unpersisted entries, and retain the newest entries within the
-limits. Storage failure reports once and leaves in-memory editing usable.
+The backend encodes newlines with the marker `<\n>`. Entries containing that literal
+marker are omitted from history with a notice, because saving them would change their
+source on reload. Oversized submissions are also omitted. Rill does not introduce a
+custom history format, database, lock protocol or compatibility reader. Existing files
+must use the backend's native format.
+
+Use the private XDG state location and permissions specified in [platform](platform.md).
+Unavailable storage reports a notice and keeps in-memory editing usable.
 
 Every controlled editor exit disables enabled terminal modes and restores the saved
 attributes. Terminal/job state is owned by the session, not by a GC finalizer or editor

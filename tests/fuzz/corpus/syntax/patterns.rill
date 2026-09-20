@@ -1,5 +1,0 @@
-enum E {A, B {value}}
-match subject of {
-  E.B {value: [first, ..rest]} if true => rest,
-  _ => []
-}

@@ -1,0 +1,140 @@
+==================
+Calls and statement newlines
+==================
+f x y
+f
+x
+(f
+ x)
+
+---
+
+(source_file
+  (call_expression
+    (call_expression
+      (identifier)
+      (identifier))
+    (identifier))
+  (identifier)
+  (identifier)
+  (group
+    (call_expression
+      (identifier)
+      (identifier))))
+
+==================
+Nominal patterns and recursive closure
+==================
+enum Option {None, Some {value}}
+let factorial = rec { loop n =>
+  if n == 0 then 1 else n * loop (n - 1)
+}
+match some 3 of {
+  Option.Some {value} => factorial value,
+  Option.None => 0
+}
+
+---
+
+(source_file
+  (enum_declaration
+    (binding)
+    (variant_declaration
+      (field_identifier))
+    (variant_declaration
+      (field_identifier)
+      (field_declarations
+        (field_identifier))))
+  (let_declaration
+    (binding)
+    (recursive_closure
+      (binding)
+      (binding)
+      (if_expression
+        (binary_expression
+          (identifier)
+          (number))
+        (number)
+        (binary_expression
+          (identifier)
+          (call_expression
+            (identifier)
+            (group
+              (binary_expression
+                (identifier)
+                (number))))))))
+  (match_expression
+    (call_expression
+      (identifier)
+      (number))
+    (match_arm
+      (constructor_pattern
+        (qualified_name
+          (identifier)
+          (field_identifier))
+        (record_pattern
+          (pattern_field
+            (binding))))
+      (call_expression
+        (identifier)
+        (identifier)))
+    (match_arm
+      (constructor_pattern
+        (identifier)
+        (field_identifier))
+      (number))))
+
+==================
+Commands, ordered redirects and spread
+==================
+let plan = job { ^printf "%s" $value ...$args 2>&1 > out | ^cat < input }
+run plan
+
+---
+
+(source_file
+  (let_declaration
+    (binding)
+    (job
+      (command_pipeline
+        (command
+          (command_word)
+          (string)
+          (substitution
+            (identifier))
+          (spread_argument
+            (substitution
+              (identifier)))
+          (redirection)
+          (redirection
+            (command_word)))
+        (command
+          (command_word)
+          (redirection
+            (command_word))))))
+  (call_expression
+    (identifier)
+    (identifier)))
+
+==================
+Scoped blocks reset soft newlines
+==================
+[do { f
+x }, { x => x
+x }, f
+x]
+
+---
+
+(source_file
+  (list
+    (block
+      (identifier)
+      (identifier))
+    (closure
+      (binding)
+      (identifier)
+      (identifier))
+    (call_expression
+      (identifier)
+      (identifier))))

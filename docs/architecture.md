@@ -1,420 +1,172 @@
 # Architecture
 
-Rill Shell combines a strict functional language with explicit process and stream
-ownership. This document explains how the components preserve those semantics.
-[Language](language.md), [execution](execution.md), and [interaction](interaction.md)
-own user-visible behavior; [status](status.md) distinguishes implemented features from
-planned stream extensions and editor work. [The implementation plan](implementation-plan.md) maps these
-boundaries to files and milestones.
+Rill combines a strict functional language with explicit process and stream ownership.
+[Language](language.md), [execution](execution.md) and [interaction](interaction.md) own
+observable behavior; [status](status.md) records evidence and gaps.
 
-## Design principles
-
-Keep the language core small: unary application, lexical bindings, immutable data,
-pattern matching, and explicit errors. Standard-library functions express composition;
-native primitives provide representation access and OS effects. Parsing, completion, and
-presentation never execute user code.
-
-One thread owns mutable runtime and session state. Cooperative steps preserve effect
-order while allowing signal, job, and I/O progress. Garbage collection owns language
-storage; explicit scopes own descriptors, directories, and child processes.
-
-The first release excludes POSIX-shell syntax compatibility, implicit expansion, mutable
-bindings, classes, macros, static typing, native plugins, a package manager, JIT
-compilation, Windows support, and configurable editor modes.
-
-## Cohesive components
+## Ownership boundaries
 
 ```text
-                        session
-                    /      |      \
-               native     exec    editor (planned)
-                 |         |         |
-              runtime   platform   syntax
-                 |                   |
-               syntax ------------- text
+rillsh ── rill-runtime ── rill-syntax
+  │             └─────── rill-system
+  ├────── rill-system
+  └────── rill-editor ─── rill-syntax
+
+tree-sitter-rill          Independent editor grammar
 ```
 
-This is an orientation map; the [dependency
-table](implementation-plan.md#module-boundaries) is authoritative. Components expose
-internal ownership boundaries, not a public C ABI.
+The six Cargo crates separate responsibilities, not deployment units. The application
+owns scheduling; syntax and system services know nothing about language heap values. The
+editor receives owned metadata snapshots and never accesses the VM. Finer divisions are
+modules inside the owning crate. Each crate owns its tests and benchmarks. The separate
+`fuzz/` workspace isolates instrumentation; the grammar follows Tree-sitter’s upstream
+package layout.
 
-- `source` and `diagnostic` define shared text ownership and error views.
-- `syntax` owns parsed trees, copied source, completeness, and grammar metadata.
-- `runtime` owns Values, traced code, lexical bindings, GC, and continuations.
-- `native` converts between language Values and concrete native services.
-- `exec` supervises evaluated launch specifications without knowing ASTs or Values.
-- `platform` contains POSIX mechanisms and observed Linux/macOS differences.
-- `text` supplies byte buffers, Unicode operations, and styles.
-- `session` coordinates effects, input, presentation, and suspended contexts.
-- The planned `editor` consumes syntax results and materialized metadata, never an
-  evaluator to invoke.
+- `rill-syntax` owns Logos lexical modes, Chumsky parsing, completeness, indexed ASTs,
+  validation and byte spans. Commands and expressions have explicit lexical contexts.
+- `rill-runtime` owns lowering, bytecode, lexical layouts, values, GC, modules, native
+  primitives and stream continuations. Ordinary Rill modules live in its `stdlib/`.
+- `rill-system` owns plans, launch snapshots, child groups, descriptors, directory
+  capabilities, source transport, terminal state and the narrow POSIX unsafe boundary.
+- `rill-editor` integrates Reedline validation, highlighting, completion, keys and
+  native history. Library code owns Unicode editing, paste decoding and repainting.
+- `rillsh` coordinates quanta, host requests, signals, notifications and foreground
+  suspension. Its supervised helpers isolate filesystem traversal and child setup.
+- `tree-sitter-rill` supplies incremental trees and queries for external tools. Its
+  generated parser does not execute Rill or decide REPL completeness.
 
-The JSON adapter isolates yyjson types and calls. Pure decimal parsing reuses its
-number-token conversion through a Rill-only interface; the runtime and general
-primitive dispatcher do not depend on yyjson representations.
+Validate language values when converting them into native requests. Checked ownership
+types carry those guarantees across layers: native strings use `CString`, redirects
+name stdout or stderr, and resources use owned descriptors. Downstream code should not
+reconstruct and revalidate an already checked request. Libraries own their supported
+editing and encoding behavior; the shell owns language contracts and resource cleanup.
 
-Lower components return structured diagnostics. The session renders them and consumes
-borrowed text before releasing its owner. Native state machines yield through the
-existing evaluator protocol instead of running recursive evaluators or nested event
-loops. Completion will use supervised helper processes, not a background user evaluator.
+## Language and heap
 
-## Syntax and evaluation
+Lexing produces stable tokens before parsing; parser backtracking cannot change lexical
+state. Tokens retain source byte spans and separation information. Lowering resolves
+local reads to scope/slot indices, gathers constants and records explicit captures.
+Instructions borrow immutable executable storage during dispatch; only retained operands
+acquire ownership. Closures share immutable layouts across partial application. Every
+callable uses the same unary protocol; tail calls replace frames rather than growing the
+Rust stack.
 
-Source is owned UTF-8 with a logical name and byte offsets. Presentation derives line
-and display coordinates. Source NUL is invalid; a valid String escape may produce NUL
-until an OS boundary rejects it.
+`gc-arena` traces language values, lexical environments and active or parked VM state.
+Derived tracing and mutation barriers preserve cycles. No borrowed arena value escapes a
+mutation callback into an async operation, worker or editor channel. A VM quantum ends
+before collection or host I/O. GC debt service is incremental. Known backing capacities
+add pressure through the library's `adjust_debt` API; sampled debt checks can end a VM
+quantum early. These weights are scheduling policy, not a hard pause or heap-byte bound.
+Materialization and transport enforce their own budgets.
 
-The recursive-descent/precedence parser has explicit expression and command modes and a
-256-level nesting limit. Quoted strings copy ordinary byte runs in bulk and decode
-escapes separately. Record validation sorts borrowed key pointers and scans adjacent
-keys; it never reorders fields or their effects. Comparisons include byte lengths and
-embedded NUL. Stable typed node blocks own decoded text; parsed identifier tokens use
-bounded `strndup` copies without growable-buffer slack. Clearing any parse result is
-iterative. Operator spellings become enums during parsing. Code preparation
-consumes and resets the parse result, including on failure, and assigns constant and
-function-layout slots and aggregate frame capacities without executing user code.
-These capacities reuse kind-specific node payload storage; no parallel IR or extra
-per-node allocation is needed. Structural pattern errors are
-rejected before execution. Nominal resolution and value mismatches remain runtime
-checks. Closure headers and Record fields share brace syntax; lexical lookahead over
-the header selects the form without parsing a body twice.
-Application is a separate left-associative layer above prefix and infix operators.
+Lists use shared contiguous storage with suffix views; records retain insertion order
+through IndexMap. Nominal construction checks descriptor names against the input map,
+avoiding quadratic key scans, and stores payloads in declaration order. Record-rest
+matching uses the existing key index to mark selected positions, then copies remaining
+fields in insertion order. Structural equality ignores record order, distinguishes
+nominal identities and validates hidden noncomparable leaves before mismatch shortcuts.
+Its traced work state processes graph edges and long scalar buffers in bounded batches.
+Union-find avoids repeatedly unfolding shared subgraphs. Hashing, allocation and GC
+still have costs outside the instruction budget. JSON conversion, collection
+construction and stable sorting also retain traced work state and spend VM fuel. JSON
+uses borrowed Serde spans transiently and stores offsets across collection; encoding
+keeps one child cursor per nesting level. Sorting uses the standard sorter for short
+runs and checkpoints during stable merging. Scalar library calls and the bounded
+retained-value accounting walk remain synchronous; no wall-clock preemption is promised.
 
-Multi-parameter functions lower to unary functions. Recursive function expressions
-lower to a private block containing a named recursive declaration and its value;
-there is no second recursion mechanism. Export tables evaluate directly to immutable
-namespaces instead of annotating declarations and rescanning a module afterward.
-Module frames retain their own export value. During bootstrap, explicit module imports
-share the loader cache; freezing the prelude installs only its exported bindings.
-User functions, native functions, callbacks, and constructors share one application protocol. A value pipe evaluates its
-left operand before the callable; whitespace application preserves each intermediate
-unary application. A closure body is a lexical statement block; single-expression bodies
-need no extra scope or continuation. Preparation must not reorder those effects.
+Bindings publish transactionally at successful entry completion. Existing external
+effects remain real when a later expression fails. A parked VM retains its lexical
+snapshot. The active VM owns global publication and the nominal-name ledger; a traced
+module cache and scope-identity allocator are shared with callback continuations.
+Publication merges new declarations into current globals without restoring stale ones.
 
-The prepared-AST evaluator uses explicit continuation frames. Each frame roots its
-scope, code, and initialized operand prefix. Atomic literals and name references write
-directly into a parent's rooted slot; other expressions use the normal continuation
-protocol. String literals read a prepared slot without allocation. Free-name references
-inside functions use prepared capture slots, including constructor references in
-patterns. Local scopes are traversed to the closure boundary without comparing names;
-local and top-level references retain ordinary lexical lookup. The slot belongs to code,
-while its value belongs to each closure instance. Recursive slots still read through
-their cells. Preparation adds neither an AST node allocation nor a second IR.
+## Modules and standard library
 
-Tail calls replace frames and discard obsolete operands promptly. Sequential forms use
-fixed-size frames; aggregates read their precomputed operand capacity rather than
-walking the child chain on every invocation. A bounded cache reuses
-small inactive frames, while wide frames return to libc. Replacement can shrink a wide
-frame, so tail recursion does not retain an unbounded high-water allocation. Non-tail
-continuations are limited to 65,536.
+`include_str!` embeds nine ordinary Rill modules. Native primitives expose
+representation access, checked conversion, codecs and OS effects; Rill code owns
+reusable composition, curried interfaces and public exports. The prelude selects
+bindings without duplicating implementation or defining another callable model.
 
-An entry publishes bindings and nominal names together after validation. Failed entries
-preserve completed external effects but publish no bindings. Abort clears pending work
-and borrowed diagnostics before collection; committed bindings remain rooted.
-
-## Values and memory
-
-Values use a tagged C union with immediate scalars or nonmoving object pointers. There
-is no NaN boxing, packed layout, or pointer tagging. Each object has collector links,
-kind/mark state, allocation size, and an initialized edge count. Its kind selects a
-union for text, code, capture layouts, Record indexes, budgets, or stage policy. Values,
-optional indexes, and inline bytes follow the header in the same allocation.
-Compile-time assertions protect interior alignment; sizes are not a public ABI.
-
-### Data and code ownership
-
-| Representation     | Ownership and access                                                                                                           |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
-| List/slice         | Immutable backing array; a suffix view retains that array, a full view reuses its input, and an empty view has no backing edge |
-| Record             | Unique length-aware String keys in presentation order; wider Records add an interior sorted key index                          |
-| Nominal value      | Unique descriptor and immutable payload; fieldless constructors are singleton values                                           |
-| Closure            | One code edge followed by exact resolved captures; layout names borrow the retained code                                       |
-| Code               | Owned source, syntax blocks, capture-analysis layouts, and a traced String constant pool                                       |
-| Committed bindings | One immutable snapshot with Values, name index, and copied names; no edge to the replaced snapshot                             |
-
-Private aggregate builders begin with initialized Unit slots. Root the owner before
-allocating children and expose only initialized slots to GC. Finalize Record keys and
-indexes before publication. A copied finalized Record relocates its interior index;
-changing values preserves it, while changing keys or count requires finalization. Small
-Records use linear lookup; wider ones use binary search over an index sorted by libc.
-Indexed immutable updates take `O(n + k log n)` field work for `k` replacements, plus
-key-byte comparisons.
-
-List-rest matching shares backing storage; a tiny retained slice can therefore keep a
-large array alive. Ignored rest patterns create no suffix or remainder Record. Language
-immutability does not prohibit writes to unpublished builders or recursive binding
-cells.
-
-Each function has one code-owned free-name summary. An enclosing function consumes
-nested summaries instead of rewalking nested bodies. Each closure instance resolves its
-own bindings, retaining recursive cells rather than their current contents. Exact
-captures prevent unrelated resources or replaced bindings from extending lifetimes.
-
-Equal String literals and Record keys share code-local constant slots. Temporary node
-pointers are sorted by length-aware bytes; there is no global intern table. String nodes
-release redundant decoded buffers, while Record keys retain text needed by matching.
-Constants have no back edge to code, so an escaped String can survive after its syntax
-is collected. Descriptors, closures, and mutable builders are never interned.
-Preparation completes and charges all retained metadata before code publication.
-
-Local scopes use binding chains. A closure itself terminates a parameter-binding scope,
-so all parameter patterns share the same matching path without an empty environment
-allocation. Blocks still introduce boundaries; duplicate checks and nominal descriptor
-resolution keep their original lexical scope. Publication reads the pending chain up
-to its entry boundary and the current committed environment directly, without cloning
-bindings into an intermediate GC chain. It sorts names with pending-entry precedence
-and recency tie-breaking, then merges with the committed snapshot. A resumed entry
-therefore preserves intervening unrelated definitions while publishing its own names. For `k`
-pending and `n` committed names, comparison work is `O(k log k + n)`, with `O(n + k)`
-scratch plus name bytes. An entry without bindings reuses the old snapshot. The frozen
-prelude is rooted independently; later REPL shadowing cannot change existing closures.
-
-### Collector and allocator
-
-A precise nonmoving mark/sweep collector traces registered roots, object edges, code,
-modules, and suspended continuations. Marking uses an intrusive worklist without C
-recursion or scratch allocation. A one-bit epoch changes each collection; survivors need
-no separate mark reset. Sweep releases unreachable allocations and kind-specific owned
-storage. Every language-heap allocation may collect before copying its inputs.
-
-C references needed across a safepoint must be rooted, including owners of interior byte
-or Value views. Root registrations may be removed independently; their storage must
-remain at stable addresses while registered. Only initialized slots are traced. Stress
-mode collects at every allocation to expose missing roots.
-
-Use checked sizes and libc allocation. Syntax blocks share code lifetime; frame reuse is
-bounded. Buffers and OS bookkeeping have explicit C owners. There is no generic
-allocator framework or GC finalization of OS resources.
-
-Trace/sweep work is `O(roots + live objects + live edges + allocated objects)`,
-excluding owned-storage disposal. Full collection has no pause bound. The growth
-threshold is based on retained bytes; evaluator quanta do not bound GC or native-call
-latency.
-
-### Materialization and graph checks
-
-Collectors and sorting fill rooted private builders directly. Capacity stays separate
-from the traced prefix. A full builder can become the result; a partial builder is
-copied to exact storage before publication. Geometric growth bounds slot-copy work, not
-graph charging or GC work.
-
-Retained-byte budgets count distinct reachable backing objects, including captured code
-and shared List storage. A traced private set keeps charged objects alive across
-incremental calls. Nested materializations have separate budgets; reject excess before
-another callback or publication. The budget includes its own storage and is discarded
-after error.
-
-Stream escape checks walk all reachable edges, including recursive cells and stage
-policies. They reuse an intrusive queue with a separate temporary visit bit, retaining
-the complete discovery chain to clear it on success or early rejection. No allocation,
-collection, callback, or suspension occurs during this `O(V + E)` walk. Persistent
-caches would be invalidated by private builder changes and are not used.
-
-## Resource continuations
-
-`native/stream.c` owns sources, transforms, sinks, and cleanup scopes. Tokens use
-non-reused identities; transfer claims the old token and returns a new one. Each edge
-retains at most one language item. Byte queues and incomplete text records have separate
-bounds defined in [execution](execution.md#consumption-and-materialization).
-
-A complete line within one Bytes chunk is validated and copied directly to its String.
-Incomplete line fragments use staging storage. The producer item remains rooted
-until the result allocation and copy finish; CRLF handling and raw-byte limits are the
-same on both paths.
-
-Consumers propagate demand iteratively. Language callbacks use ordinary evaluator frames
-and return callback events; nested consumers have explicit sink frames. Closing releases
-dependencies immediately. A doubly linked scope list removes nodes in constant time even
-when unrelated chains are interleaved.
-
-The evaluator emits cleanup events at failed `attempt` checkpoints and top-level
-statement boundaries. The library closes affected nodes in reverse dependency order and
-awaits owned reaping before resuming the rooted result. Unwind visits newer nodes once
-and separately follows dependencies transferred from before the checkpoint. Unrelated
-earlier resources remain valid. OS progress still determines reaping latency.
-
-`session/evaluation.c` owns the active evaluation and suspended contexts. A saved
-context retains continuations, roots, stream scope, pending native operation, and module
-load state. Only foreground resumption runs its callbacks. Existing launch snapshots and
-lexical captures survive; new session reads observe current cwd/environment. Successful
-resumed declarations publish against current bindings, checking nominal conflicts
-atomically.
-
-Cleanup is idempotent. Invalidate descriptors on close/transfer and save diagnostics
-before releasing borrowed storage. Fatal allocation failure uses a non-allocating
-best-effort cleanup path and is not converted to Result.
-
-## Expression editor
-
-The planned editor separates input decoding, edit/undo state, syntax integration,
-layout, and rendering. The session owns terminal reads/writes, dimensions, signals, and
-helper processes. The editor receives typed events and returns edits, submission
-outcomes, and output operations; it has no private wait loop.
-
-Use a growable UTF-8 gap buffer with a byte cursor snapped to extended grapheme
-boundaries. Insertion may join adjacent clusters; recompute from a valid segmentation
-checkpoint rather than a fixed neighboring byte count. Flatten at most once per revision
-for parsing. Bounded undo transactions retain before/after cursor positions; paste and
-completion each form one transaction.
-
-Incremental decoding recognizes supported UTF-8, CSI/SS3/ESC keys, and bracketed paste.
-Deadlines resolve Escape ambiguity in the shared loop. Unknown/oversized CSI sequences
-are drained through their final byte; OSC/DCS/SOS/PM/APC strings are discarded through
-ST, or BEL for OSC. Neither timeout nor invalid input may reinterpret discarded bytes as
-submitted code. [Interaction](interaction.md) owns keys, paste rules, and limits.
-
-Layout shares text metrics with diagnostics and tables. A viewport preserves the full
-entry while showing a bounded region. Reserve the last terminal column, place wraps
-explicitly, and never split a grapheme. Render an over-wide cluster as a placeholder
-while retaining its source bytes. Fall back when dimensions are unusable.
-
-Rendering queues complete operations and preserves unwritten suffixes across partial
-writes. Coalesce future frames without dropping half an emitted escape sequence.
-Coordinated notifications invalidate and redraw the edit area; Ctrl-L recovers after
-uncontrolled background output. The renderer is not a terminal emulator.
+Bundled imports need no filesystem base. File imports retain directory capabilities and
+opened file identities, so renames and aliases cannot silently change module identity.
+Opening and reading are explicit host requests. The coordinator joins filesystem workers
+before discarding their results. Parsing and compilation remain synchronous CPU work
+outside OS waits. Cached identities, cycle checks and busy suspended initializers
+prevent duplicate initialization.
 
 ## Process launch and I/O
 
-One `fork`/`execve` backend implements the launch gate and process-group contract.
-Prepare argv/envp, cwd, descriptor actions, and bookkeeping before fork. Pipes use
-close-on-exec flags; the single-threaded supervisor and descriptor-free signal handlers
-prevent a concurrent fork during setup. A future `posix_spawn` path needs measured
-benefit while preserving this contract.
+A JobPlan contains evaluated arguments and redirects without launching anything. Each
+launch receives an owned cwd descriptor and environment snapshot. The helper inherits
+that environment, applies ordered redirects directly from borrowed arguments, and
+replaces itself with the target executable. Helpers join the job's
+process group before setup; gates prevent a partly prepared pipeline from executing. The
+coordinator owns barrier progress, terminal handoff and cancellation. Every failure path
+closes endpoints, cancels the owned group and reaps its children.
 
-1. Allocate control channels and block job-state signals during registration.
-2. Fork stages. Children perform only async-signal-safe setup and wait at the gate;
-   the parent alone registers their process group.
-3. Complete group registration and any foreground terminal handoff, then grant one
-   permit per child. EOF without a permit aborts before exec.
-4. Restore the parent's signal mask and service launch channels through the event loop.
-   A child writes a fixed-size setup/exec error and exits on failure. Channel EOF alone
-   proves neither successful exec nor termination.
-5. On partial failure, close gates, cancel, restore the terminal, and reap every child.
-   A child whose group registration failed retains its separately addressable PID.
-   Earlier file creation/truncation is not rolled back.
+Tokio supplies signals and readiness on a current-thread runtime. `rustix` supplies
+typed Unix APIs; its default backend selection is Linux `linux_raw` and libc on macOS.
+Narrow libc calls cover POSIX facilities without a suitable rustix API. Workers carry
+owned, Send inputs and results. Blocking work cannot be forcibly aborted through Tokio;
+join it before returning to an editor or releasing its ownership scope.
 
-The gate prevents normal early leader exit before later stages join. External signals
-can still interrupt launch and must follow the same cleanup path. Group signals require
-an unreaped registered member, never a historical process-group ID.
+Generational source handles identify OS resources. A separate traced stream token
+records scope authority and single-consumer transfer. Process and directory sources
+retain partial data and cancellation state outside the language heap. Bounded channels
+and byte budgets provide backpressure; EOF is not successful process completion.
+Terminal stderr from process streams uses the same cancellable writer protocol as
+explicit output, including retained progress across stop/resume.
 
-Children reset the shell's changed dispositions and signal mask before exec. Post-fork
-code does not allocate, log, evaluate, or enter the editor. Closed standard descriptors,
-`dup2(fd, fd)`, and aliasing need explicit handling. PATH and executable conventions
-belong to [platform](platform.md#unix-processes-and-executables).
+### Inherited output
 
-Nonblocking pumps service stdin and stdout/stderr concurrently with bounded queues and
-fair per-channel work. Set O_NONBLOCK only on shell-owned open file descriptions:
-[duplication shares status
-flags](https://pubs.opengroup.org/onlinepubs/9799919799/functions/dup.html). Partial
-I/O, EINTR, and EOF are normal; EOF still requires checked child completion. Inherited
-destinations and filesystem calls can block. Stop/cancellation events and escalation
-deadlines progress during launch and transport as well as evaluation.
+An evaluation caches one idle writer per output stream. Concurrent callback writes own
+separate active helpers and return a completed writer to that cache, reaping any
+surplus. Payloads share owned `bytes::Bytes` storage across the VM/host boundary. A
+frame is acknowledged only after its bytes reach the inherited descriptor. The
+coordinator retains partial IPC progress across suspension; cancellation kills and reaps
+the helper. This avoids changing shared descriptor flags or leaving a Tokio blocking
+thread trapped behind pipe backpressure. Helpers close before their owner finishes and
+move with parked evaluations. Explicit output remains byte-exact.
 
-## Supervisor and terminal ownership
+## Streams and cleanup
 
-Signal handlers preserve errno, set `volatile sig_atomic_t` flags, and write a
-best-effort wakeup byte. Full pipes do not lose pending flags. Ordinary code blocks
-managed signals while exchanging flags and drains `waitpid` with nonblocking,
-stop/continue observations. Crash handling remains with the runtime/sanitizers.
+Lazy graph nodes retain transforms, source state and demand. Consumers retain explicit
+actions across callbacks and host replies. `produce` callbacks run in traced child
+scopes. Acquisition is lazy; release happens once after successful acquisition, with a
+close reason. Cleanup continues after failure, preserving the first operational error
+and attaching release failures. GC never invokes a language release callback.
 
-The session owns the controlling terminal, original state, shell modes, and saved job
-modes. It waits for foreground membership rather than stealing the terminal.
-Terminal-owning `run`/`fg` hands off the foreground group. Data jobs keep the shell
-foreground and receive forwarded interrupt/stop events. The planned raw editor borrows
-the terminal only during input and restores modes before handoff or suspension.
+`zip` holds one tuple and pulls left to right. `merge` preserves each input's order and
+round-robin polls external readiness. Each language callback retains a traced VM stack
+and spends the enclosing quantum's fuel. Source reads, process execution/capture, launch
+readiness, file acquisition, output and job waits yield to ready peers. Owned operations
+use generational readiness keys; errors route through nested merges to the requesting
+callback. Foreground operations queue for one terminal lease, while captures and
+independent I/O can progress. Completed callbacks transfer resource bookkeeping to their
+owner. Cutoff discards ordinary work but finishes already-started release callbacks
+before closing the graph. Cancel pending operations before running producer release so
+abandoned I/O cannot race cleanup. Explicitly foregrounding a parked language evaluation
+freezes its caller and transfers the foreground context; this is distinct from
+independently waiting on an ordinary process job.
 
-One loop services jobs, owned I/O, evaluator steps, and monotonic deadlines. Rendering
-backpressure must not stop supervision. This is cooperative scheduling, not hard
-real-time execution: filesystem calls, inherited writes, collection, and kernel
-termination can delay progress.
+Suspension retains VM frames and host operations together, including capture buffers,
+launch-gate positions and terminal modes. Stop barriers observe stopped or exited
+children before editing resumes. `fg` restores the original continuation; cancellation
+runs its cleanup rather than simply dropping the arena state.
 
-Completion workers will exec a bounded internal worker entry before directory access.
-Permit at most one unreaped worker, including one being cancelled. Expiry invalidates
-the result immediately; only wait results establish reaping. Editing never waits inside
-the worker's filesystem operation.
+## Interaction and verification
 
-## Optimization policy
+Rich editing uses Reedline's native capabilities with a fixed set of familiar shortcuts.
+The execution parser decides completeness. Filesystem completion runs in one supervised
+helper with bounded candidates and a deadline; accepting a filename inserts Rill source
+that denotes one value or argument. Completion never evaluates user code.
 
-Measure release workloads separately from sanitizers and external-program costs. Prefer
-fewer allocations and edges, bounded live state, contiguous traversal, and immutable
-metadata reuse. Object sizes and elapsed time do not establish cache misses, allocator
-traffic, or pause bounds. [Testing](testing.md#performance-evidence) owns measurement
-practice; [status](status.md#performance-evidence) records evidence.
+Plain input uses a cancellable reader and the same parser. Ctrl+C ends the interrupted
+display line and produces a fresh prompt. Ctrl+Z during editing restores terminal modes
+and retains the buffer. History follows the native backend, including documented
+reductions in [interaction](interaction.md); Rill does not patch the dependency.
 
-### Graph equality
-
-Equality validates both complete inputs before identity or mismatch shortcuts, so
-unsupported leaves cannot be hidden by field order or sharing. A bounded tree walk
-handles small values. Exhaustion restarts with graph validation; it is not a language
-error. Validation stores subtree height to enforce depth limits even when a shared node
-is reached along a longer path. Active entries reject cyclic data.
-
-Comparison reuses the stable validation table for union by rank and path halving. A
-union records child-comparison obligations, not unconditional success. Transitivity
-avoids a Cartesian product of equivalent DAG nodes. Disjoint-set work is amortized `O(U
-alpha(V))` for `U` operations and `V` aggregates; hashing, edges, and byte comparisons
-have separate costs. Expected hash lookup is not an adversarial bound. Indexed Records
-zip sorted keys; small Records use bounded linear lookup.
-
-Scratch lives only for the comparison and never crosses GC or callbacks. This follows
-bounded pre-check and equivalence ideas from [Adams and
-Dybvig](references.md#runtime-memory-design), with Rill's stricter comparability and
-cycle semantics.
-
-### Collection and allocation
-
-Retain the nonmoving collector and libc until profiles justify different ownership
-contracts. Moving GC must update interior pointers as well as roots. Generational or
-incremental GC needs barriers for cells, builders, stage metadata, and budgets;
-immutable public values do not remove those writes. Reference counting still needs cycle
-handling. Slabs/regions need reclamation and fragmentation policies.
-
-Exact captures, dense prepared metadata, and relocated Record indexes improve storage
-without changing allocator contracts. Persistent trees and ropes trade contiguous
-traversal for indirection and different costs across versions; introduce them only for
-measured workloads.
-
-Layout changes must preserve alignment and improve measured workloads, not only
-reduce `sizeof`. Keep ownership and reclamation unchanged unless their replacement
-has independent evidence.
-
-[Chez Scheme's generations and relocation](references.md#runtime-memory-design) and
-[page-local allocator design](references.md#runtime-memory-design) are useful comparison
-points, not drop-in changes. Prioritize removal of unnecessary allocations and repeated
-traversals before changing root, barrier, or reclamation contracts. No cache-miss or RSS
-improvement follows from the current size and timing measurements alone.
-
-### Preparation and immutable sharing
-
-The [code-owned layouts](#data-and-code-ownership) move repeated name and literal work
-into preparation while each closure resolves its own values. For a chain of `d`
-functions around `n` nodes with one free name, nested summaries take `O(n + d)` visits
-rather than `O(d n)`. This is not a bound for all capture analysis: local-name searches
-and wide layouts still cost work.
-
-Constant preparation trades sorting and cold-code work for cheaper repeated reads and
-less repetitive storage. Distinct-literal workloads also matter. Preparation runs
-outside evaluator quanta; do not cache expressions whose errors, effects, or nominal
-identity are observable. Local binding searches, free-name deduplication, module
-identities, and environment names still have linear scans; some large-pattern operations
-are quadratic. Profile wide scopes before adding symbol tables or persistent
-environment trees.
-
-### Bytecode decision
-
-The current evaluator is a prepared AST machine. No bytecode speedup has been measured.
-A future replacement should compare small register and stack VMs on identical Rill
-workloads, initially using ordinary C dispatch and code-owned instruction, constant, and
-source tables. Wider instructions, register liveness, and dispatch count all matter; [VM
-references](references.md#bytecode-and-program-analysis) do not establish a universal
-winner.
-
-Keep the replacement inside `runtime` and preserve its event protocol. Suspended
-contexts must retain execution position, roots, and resource checkpoints. Register reuse
-must clear dead references or supply verified liveness maps. Growing storage must rebind
-roots and invalidate borrowed views safely.
-
-Do not fuse curried applications, reorder callbacks, fold errors in unexecuted branches,
-or remove resource boundaries. Acceptance requires differential semantics, stress GC,
-allocation failures, stop/resume, and measurements of startup, code size, retained heap,
-and steady-state execution. No serialized bytecode format is promised.
+Tests live beside their owning crates. Properties, reviewed diagnostic snapshots,
+subprocess/PTY tests and Criterion workloads observe semantic and resource boundaries.
+The independent AFL++ workspace and Tree-sitter regeneration use their upstream tools.
+See [testing](testing.md) and the [quality gate](development.md#quality-gate).

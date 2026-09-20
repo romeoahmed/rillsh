@@ -1,0 +1,58 @@
+[workspace]
+members = ["crates/*"]
+default-members = ["crates/rillsh"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+ariadne = "0.6"
+bytes = "1"
+cc = "1"
+chumsky = "0.13.0"
+clap = "4"
+criterion = "0.8"
+gc-arena = "0.7"
+indexmap = "2"
+insta = "1"
+libc = "0.2"
+logos = "0.16.1"
+nu-ansi-term = "0.50"
+num-traits = "0.2"
+proptest = "1"
+reedline = { version = "0.51", default-features = false }
+rill-editor = { path = "crates/rill-editor" }
+rill-runtime = { path = "crates/rill-runtime" }
+rill-syntax = { path = "crates/rill-syntax" }
+rill-system = { path = "crates/rill-system" }
+rustix = "1"
+serde = "1"
+serde_json = "1"
+slotmap = "1"
+tempfile = "3"
+thiserror = "2"
+tokio = "1"
+tree-sitter = "0.27"
+tree-sitter-language = "0.1"
+unicode-segmentation = "1"
+unicode-width = "0.2"
+vt100 = "0.16"
+xdg = "3"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+
+[workspace.lints.rust]
+unfulfilled_lint_expectations = "deny"
+
+# Test inherits dev; optimize the test engines as their upstream guides recommend.
+[profile.dev.package]
+insta.opt-level = 3
+similar.opt-level = 3
+proptest.opt-level = 3
+rand_chacha.opt-level = 3

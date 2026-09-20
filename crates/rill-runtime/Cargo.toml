@@ -1,0 +1,36 @@
+[package]
+name = "rill-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Rill Shell compiler and traced bytecode evaluation"
+
+[dependencies]
+rill-system.workspace = true
+rill-syntax.workspace = true
+gc-arena = { workspace = true, features = ["indexmap"] }
+indexmap.workspace = true
+bytes.workspace = true
+num-traits.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
+thiserror.workspace = true
+unicode-segmentation.workspace = true
+unicode-width.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+slotmap.workspace = true
+tempfile.workspace = true
+proptest.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "evaluation"
+harness = false
+
+[[bench]]
+name = "equality"
+harness = false

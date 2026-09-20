@@ -1,0 +1,12 @@
+---
+source: crates/rillsh/tests/diagnostics.rs
+expression: "diagnostic(r#\"produce {\n  acquire: { () => 0 },\n  step: { _ => raise (error \"StepFailure\" \"cannot produce a value\") },\n  release: { _ _ => raise (error \"ReleaseFailure\" \"cannot finish cleanup\") }\n} |> collect\"#)"
+---
+Error: StepFailure
+   ╭─[ <command>:3:16 ]
+   │
+ 3 │   step: { _ => raise (error "StepFailure" "cannot produce a value") },
+   │                ──────────────────────────┬─────────────────────────  
+   │                                          ╰─────────────────────────── cannot produce a value
+───╯
+  note: ReleaseFailure: cannot finish cleanup

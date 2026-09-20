@@ -12,14 +12,13 @@ stream job { ^printf "%s\n" "3" "1" "2" }
   |> write_bytes
 ```
 
-Output: `[1,2,3]`. The external program produces bytes; `lines` and `parse_int`
-turn them into values that ordinary functions can transform.
+Output: `[1,2,3]`. `lines` and `parse_int` turn the command’s bytes into values;
+ordinary functions sort them, then JSON encoding returns bytes to stdout.
 
-**Under development.** Commands, the language, structured streams, and job control
-are implemented. The current prompt uses basic terminal input; completion,
-rich editing, and persistent history are planned. Rill has its own syntax and does not
-run POSIX shell scripts. See [current status](docs/status.md) and the
-[implementation plan](docs/implementation-plan.md).
+**Under development.** The interactive shell includes multiline editing, completion and
+persistent history; a Tree-sitter grammar supports editor integration. Rill has its own
+syntax and does not run POSIX shell scripts. See [status](docs/status.md) for delivered
+features and pending Linux validation.
 
 ## What makes Rill different
 
@@ -32,42 +31,35 @@ run POSIX shell scripts. See [current status](docs/status.md) and the
 - **Arguments stay intact.** No implicit word splitting, wildcard expansion, or
   interpolation inside quotes. Errors report invalid conversions and arithmetic overflow.
 - **Streams have clear lifetimes.** Lazy transforms respect demand; early termination
-  closes upstream resources. Materialization limits and producer failures are explicit.
+  closes upstream resources. Custom producers own acquisition and release callbacks;
+  materialization limits and producer failures are explicit.
 
 ## Build and try
 
-Requirements: Linux or macOS, GCC or Clang with GNU C23 and `<stdckdint.h>`, Meson
-1.12+, Ninja, and Python 3.14+. Python is needed for development, not to run the shell.
-
-From the repository root:
+Use current stable Rust on Linux or macOS. From the repository root:
 
 ```sh
-meson subprojects download
-meson setup build/release --buildtype=release --wrap-mode=nodownload
-meson compile -C build/release
-meson test -C build/release --print-errorlogs
-build/release/src/rillsh
+cargo build --release --locked
+cargo test --workspace --locked
+target/release/rillsh
 ```
-
-Dependency download acquires pinned yyjson source. Subsequent configuration and builds
-need no network access. Set `CC=gcc` or `CC=clang` before the initial setup to select a
-compiler. The optional [Containerfile](Containerfile) provides a Fedora toolchain.
 
 Run a command or a saved script from your existing shell:
 
 ```sh
-build/release/src/rillsh -c '^printf "%s\n" "hello"'
-build/release/src/rillsh example.rill argument
-build/release/src/rillsh --help
+target/release/rillsh -c '^printf "%s\n" "hello"'
+target/release/rillsh example.rill argument
+target/release/rillsh --help
 ```
 
-Script arguments are available as Bytes through `args ()`. Install with
-`meson install -C build/release`, using Meson's configured prefix.
+Script arguments are Bytes available through `args ()`. Install from a checkout with
+`cargo install --path crates/rillsh --locked`; the standard library is embedded. See
+[development](docs/development.md) for the complete native quality gate.
 
 ## A small tour
 
-External commands start with `^`. A substitution contributes one argument, even when
-it contains spaces:
+External commands start with `^`. A substitution contributes one argument, even when it
+contains spaces:
 
 ```rill
 let message = "hello world"
@@ -100,34 +92,35 @@ Use `execute plan` for foreground I/O with a returned report, or `start plan` fo
 by `check (wait handle)` for background work. `fg`, `bg`, and `cancel` control jobs.
 Scripts must wait for, foreground, or cancel their background jobs before ending.
 
-At the prompt, incomplete input continues on the next line. Leave `|` or `|>` at the
-end of a line when entering a multiline pipeline. Ctrl-Z suspends a foreground
-execution; `jobs ()` lists handles and `fg handle` resumes it. Exit with `exit 0` or
-Ctrl-D on empty input after finishing or cancelling active work.
+At the prompt, incomplete input continues on the next line. Leave `|` or `|>` at the end
+of a line when entering a multiline pipeline. Ctrl+C cancels an entry or foreground
+execution. During evaluation, Ctrl+Z retains the continuation and its jobs; use `jobs
+()` to find its handle, then `fg handle` to resume or `cancel handle` to clean up. `bg`
+resumes external-only jobs. Exit with `exit 0` or Ctrl+D on empty input after finishing
+or cancelling active work.
 
 Interactive startup reads `rillsh/init.rill` under the XDG configuration directory;
-`--no-config` skips it. Color follows terminal capabilities and can be overridden with
-`--color=auto|always|never`.
+`--config FILE` selects another file and `--no-config` skips startup loading. Color
+follows terminal capabilities and can be overridden with `--color=auto|always|never`.
 
 ## Explore and contribute
 
-| Start here                                                                 | What it covers                                            |
-| -------------------------------------------------------------------------- | --------------------------------------------------------- |
-| [Language](docs/language.md)                                               | Functions, data, patterns, errors, and modules            |
-| [Execution](docs/execution.md)                                             | Commands, streams, reports, filesystem, and JSON          |
-| [Interaction](docs/interaction.md) · [Platform](docs/platform.md)          | Current invocation and target terminal behavior           |
-| [Architecture](docs/architecture.md) · [Plan](docs/implementation-plan.md) | Component ownership, design decisions, and remaining work |
-| [Development](docs/development.md) · [Testing](docs/testing.md)            | Build profiles, code conventions, and verification        |
-| [References](docs/references.md)                                           | Standards and design sources                              |
+| Start here                                                        | What it covers                                       |
+| ----------------------------------------------------------------- | ---------------------------------------------------- |
+| [Language](docs/language.md)                                      | Functions, data, patterns, errors, and modules       |
+| [Execution](docs/execution.md)                                    | Commands, streams, reports, filesystem, and JSON     |
+| [Interaction](docs/interaction.md) · [Platform](docs/platform.md) | Invocation, editing, and platform contracts          |
+| [Architecture](docs/architecture.md) · [Status](docs/status.md)   | Ownership, delivered features, and verification gaps |
+| [Development](docs/development.md) · [Testing](docs/testing.md)   | Building, contributing, and verifying changes        |
+| [References](docs/references.md)                                  | Standards and design sources                         |
 
 For a change, read the owning specification, update the relevant tests, and run the
 [quality gate](docs/development.md#quality-gate). Bug reports should include a minimal
-reproducer, expected and observed behavior, and the platform/compiler used. Avoid
-personal paths or sensitive environment data. Generate the internal C API reference
-with `meson compile -C build/release api-docs` when Doxygen is installed.
-[AGENTS.md](AGENTS.md) gives coding agents a concise working guide.
+reproducer, expected and observed behavior, and the platform and Rust version used.
+Avoid personal paths or sensitive environment data. Browse Rust API documentation with
+`cargo doc --workspace --no-deps --open`. [AGENTS.md](AGENTS.md) gives coding agents a
+concise working guide.
 
 ## License
 
-[MIT](LICENSE). Unicode data retains its [Unicode license](data/unicode/license.txt);
-yyjson retains its upstream MIT notice.
+[MIT](LICENSE). Dependencies retain their upstream licenses.

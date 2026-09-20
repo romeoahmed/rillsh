@@ -1,0 +1,11 @@
+---
+source: crates/rillsh/tests/diagnostics.rs
+expression: "diagnostic(\"let answer =\")"
+---
+Error: ParseError
+   ╭─[ <command>:1:13 ]
+   │
+ 1 │ let answer =
+   │             │ 
+   │             ╰─ found end of input expected any, or something else
+───╯

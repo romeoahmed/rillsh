@@ -1,0 +1,103 @@
+name: Rust
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+      - run: cargo test --workspace --release --locked
+      - run: cargo doc --workspace --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - run: cargo bench --workspace --no-run --locked
+      - name: Install and exercise the embedded library outside the checkout
+        shell: bash
+        run: |
+          cargo install --path crates/rillsh --locked --root "$RUNNER_TEMP/rill-install"
+          cd "$RUNNER_TEMP"
+          test "$(rill-install/bin/rillsh -c 'import "std:seq" as seq; print (text (seq.sum [20, 22]))')" = 42
+
+  grammar:
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install tree-sitter-cli --version 0.27.0 --locked
+      - run: tree-sitter generate --js-runtime native
+        working-directory: crates/tree-sitter-rill
+      - run: git diff --exit-code -- crates/tree-sitter-rill/src
+      - run: tree-sitter test
+        working-directory: crates/tree-sitter-rill
+      - run: cargo test -p tree-sitter-rill --locked
+
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      AFL_NO_UI: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz -> target
+      - run: cargo fmt --manifest-path fuzz/Cargo.toml -- --check
+      - run: cargo clippy --manifest-path fuzz/Cargo.toml --all-targets --locked -- -D warnings
+      - run: cargo install cargo-afl --version 0.18.2 --locked
+      - run: cargo afl build --manifest-path fuzz/Cargo.toml --locked
+      - name: Configure the ephemeral fuzz runner
+        run: cargo afl system-config
+      - name: Replay seeds and run bounded campaigns
+        shell: bash
+        run: |
+          for corpus in fuzz/corpus/*; do
+            target="${corpus##*/}"
+            for seed in "$corpus"/*; do
+              fuzz/target/debug/"$target" < "$seed"
+            done
+            cargo afl fuzz -i "$corpus" -o "fuzz/target/findings/$target" -V 30 -G 8192 -- "fuzz/target/debug/$target"
+          done
+      - name: Reject saved failures
+        shell: bash
+        run: |
+          for finding in fuzz/target/findings/*/default/{crashes,hangs}/id*; do
+            if [[ -f "$finding" ]]; then
+              echo "Fuzz failure: $finding"
+              exit 1
+            fi
+          done
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: fuzz-findings
+          path: fuzz/target/findings/
+          if-no-files-found: ignore

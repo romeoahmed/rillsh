@@ -2,8 +2,8 @@
 
 This document defines commands, process jobs, scoped streams, and effectful library
 operations. [Language](language.md) owns evaluation order; [status](status.md) records
-validation. Planned producer lifecycles and multi-input composition belong to
-[stage 3.5](implementation-plan.md#35-extensible-stream-production-and-composition).
+validation. Producer lifecycles and multi-input composition follow the same scoped
+ownership rules as ordinary streams.
 
 ## Plans, jobs, reports, and streams
 
@@ -49,6 +49,8 @@ Command words use these rules:
 - The word immediately after `^` identifies the executable. It can be literal or
   a scalar substitution; no alias or language-function fallback is performed.
 - An unquoted word is literal text. `*`, `?`, and `~` have no expansion behavior.
+  Parentheses and brackets are also literal inside command words; `$(...)` explicitly
+  enters an expression.
 - Quoted words use the language's string rules and never interpolate internally.
 - `$name` and `$(expression)` each contribute exactly one String, Path, or Bytes
   argument. NUL is rejected. Other types require explicit conversion.
@@ -57,8 +59,9 @@ Command words use these rules:
   contributes none. Spreading a stream is rejected.
 - Adjacent literal, quoted, and substituted fragments without whitespace are
   rejected; use string concatenation inside `$(...)` for a single composed word.
-- Whitespace separates words. Unquoted `|`, `;`, braces, and redirection operators
-  are syntax and must be quoted to be literal. A newline ends a complete command.
+- Space, tab and carriage return separate words. Unquoted `|`, `;`, braces, and
+  redirection operators are syntax and must be quoted to be literal. A newline ends
+  a complete command. Other Unicode whitespace inside a word remains literal.
 - There is no implicit globbing, command substitution, backtick syntax, escape-based
   line continuation, word splitting, or removal of trailing newlines.
 
@@ -72,11 +75,11 @@ index zero. Redirections do not occupy argument indices; each expanded List elem
 does. Invalid redirection paths are reported separately from argument failures.
 
 `command executable arguments` constructs the same one-stage plan programmatically.
-`pipe left right` composes plans and preserves their per-stage policies. There is no
-AST re-parsing. `with_cwd path plan` and `with_env record plan` return new plans
-with overrides applied to every stage. Repeated overrides replace the same key; other
-stage settings remain intact. Environment overrides overlay the launch snapshot and use
-the same name/value validation as `set_env`.
+`pipe left right` composes plans and preserves their per-stage policies. There is no AST
+re-parsing. `with_cwd path plan` and `with_env record plan` return new plans with
+overrides applied to every stage. Repeated overrides replace the same key; other stage
+settings remain intact. Environment overrides overlay the launch snapshot and use the
+same name/value validation as `set_env`.
 
 Unspecified cwd, environment, and PATH are snapshotted at launch. Explicit cwd overrides
 are resolved to an absolute directory at plan construction so later `cd` does not
@@ -84,11 +87,11 @@ reinterpret them. Relative command arguments and redirection paths remain relati
 the launch cwd. Unqualified executables are found using that launch's PATH. Reusing a
 plan therefore does not promise identical external state or output.
 
-Command statements (`^program ...`) always invoke the standard checked runner. A
-lexical binding named `run` affects explicit `run plan` calls only; it cannot change
-the meaning of command syntax. `execute` retains ordinary foreground I/O and exposes
-unsuccessful exit status as data. Setup/exec failures still raise launch errors, and
-user cancellation follows the separate cancellation path.
+Command statements (`^program ...`) always invoke the standard checked runner. A lexical
+binding named `run` affects explicit `run plan` calls only; it cannot change the meaning
+of command syntax. `execute` retains ordinary foreground I/O and exposes unsuccessful
+exit status as data. Setup/exec failures still raise launch errors, and user
+cancellation follows the separate cancellation path.
 
 ## Redirection
 
@@ -137,15 +140,15 @@ set a larger explicit limit. Exceeding the limit cancels/reaps the job and raise
 LimitExceeded with counts, never returns silently truncated success.
 
 Absent explicit redirection, `capture` and `stream` use `/dev/null` for stdin so a data
-source does not unexpectedly read from the user's terminal. `run` and `execute` inherit stdin.
-`start` defaults stdin to `/dev/null` and inherits stdout/stderr; background output may
-appear while editing. Explicit redirection overrides these defaults. `capture`,
-`stream`, and `through` are foreground evaluations but keep the shell in the terminal
-foreground group; the supervisor forwards terminal signals to their attached process
-groups. An inherited stderr TTY destination is relayed through a bounded supervisor
-pipe, so data-job groups do not stop merely because the terminal has TOSTOP enabled.
-Non-TTY inherited stderr may be connected directly. Programs requiring direct access to
-the controlling terminal must use `run` or `execute`.
+source does not unexpectedly read from the user's terminal. `run` and `execute` inherit
+stdin. `start` defaults stdin to `/dev/null` and inherits stdout/stderr; background
+output may appear while editing. Explicit redirection overrides these defaults.
+`capture`, `stream`, and `through` are foreground evaluations but keep the shell in the
+terminal foreground group; the supervisor forwards terminal signals to their attached
+process groups. An inherited stderr TTY destination is relayed through a bounded
+supervisor pipe, so data-job groups do not stop merely because the terminal has TOSTOP
+enabled. Non-TTY inherited stderr may be connected directly. Programs requiring direct
+access to the controlling terminal must use `run` or `execute`.
 
 `through plan byte_stream` is the streaming process sink/source: it feeds the first
 stage's stdin and exposes the last stage's stdout while inheriting stderr. It
@@ -170,8 +173,8 @@ files (path ".")
 ```
 
 `to_json` encodes one materialized value to Bytes; `chunks` turns Bytes into a byte
-stream. There is no dedicated NDJSON codec. Compose `lines` with `map from_json` for
-one JSON value per line; process chunk boundaries never imply document boundaries.
+stream. There is no dedicated NDJSON codec. Compose `lines` with `map from_json` for one
+JSON value per line; process chunk boundaries never imply document boundaries.
 
 ## Job states and completion
 
@@ -303,28 +306,89 @@ and one preceding CR, preserving a final unterminated line, and not emitting a s
 empty line after a final terminator. Empty input emits no lines. Binary data needs
 explicit byte operations; invalid UTF-8 raises DecodeError.
 
-`map`, `filter`, and `filter_map` preserve List versus Stream input category. Lists
-are processed eagerly; streams remain lazy. `take` returns a List slice or a stream
-with cutoff. `drop` returns a List suffix or a lazy stream that discards the specified
-number of items.
-`collect` accepts a value stream and returns a List; collecting bytes uses
+`map`, `filter`, and `filter_map` preserve List versus Stream input category. Lists are
+processed eagerly; streams remain lazy. `take` returns a List prefix or a stream with
+cutoff. `drop` returns a List suffix or a lazy stream that discards the specified number
+of items. `collect` accepts a value stream and returns a List; collecting bytes uses
 `collect_bytes`. Neither scalar values nor nested lists are flattened implicitly.
 `sort_by`, JSON document decoding, and collection are materialization boundaries and
 enforce explicit limits. Initial `collect` limits are 1,000,000 items and a 64 MiB
 retained-representation budget; `collect_with` changes them. The budget counts each
 distinct backing object reachable from collected data once, including shared list
-storage, and uses runtime allocation sizes rather than a JSON estimate. Functions remain
-valid collection items; their reachable code and captured heap objects count once
-against the budget. Session-owned OS state behind Job handles is accounted by the
-session, not copied into a collection. Materialization does not extend a nested resource
-lifetime: a local collection may contain Stream handles, but the same escape check
-applies if it is published. Collecting does not recursively drain nested streams.
-Allocation sizes remain checked independently of these budgets.
+storage, and uses known backing capacities and owned payload sizes rather than a JSON
+estimate. Private allocator metadata and collection bucket layouts are excluded; this is
+a representation budget, not an RSS measurement. Functions remain valid collection
+items; their reachable code and captured heap objects count once against the budget.
+Session-owned OS state behind Job handles is accounted by the session, not copied into a
+collection. Materialization does not extend a nested resource lifetime: a local
+collection may contain Stream handles, but the same escape check applies if it is
+published. Collecting does not recursively drain nested streams. Allocation sizes remain
+checked independently of these budgets.
 
 Callback order is deterministic. `map`/`filter` callbacks run once per visited item,
-left-to-right. `sort_by` evaluates the key once per item before stable sorting.
-`take 0` performs no callback work and closes its source. Scheduler progress and
-cancellation are checked during long pure evaluations, not only on syscalls.
+left-to-right. `sort_by` evaluates the key once per item before stable sorting. `take 0`
+performs no callback work and closes its source. Scheduler progress and cancellation are
+checked during long pure evaluations, not only on syscalls.
+
+## Resource-owning producers
+
+`produce {acquire, step, release}` creates a resource-owning stream. Construction
+validates the protocol; acquisition happens only on first demand:
+
+| Callback  | Application                            | Result                                               |
+| --------- | -------------------------------------- | ---------------------------------------------------- |
+| `acquire` | `acquire ()`, on first demand          | Initial producer state                               |
+| `step`    | `step state`, once per demand          | `Option.Some {value: [item, next]}` or `Option.None` |
+| `release` | `release state reason`, during cleanup | Unit                                                 |
+
+The step result has the same shape as `unfold`'s. The producer owns a child resource
+scope. Successful acquisition and step results may retain resources in that scope;
+yielded items still obey ordinary escape checks. Callback code may consume its
+child-scope streams but cannot consume or adopt a stream owned by an outer scope.
+Closing an undemanded producer performs no acquisition. If acquisition fails, unwind its
+child scope without calling `release`. After successful acquisition, invoke `release`
+once on normal exhaustion, close, cutoff, failure, cancellation, or enclosing scope
+exit, then close remaining child resources.
+
+Release receives the latest successfully returned state; failed or exhausted steps leave
+the previous state current. `std:seq` exports nominal `CloseReason` with `Exhausted`,
+`Closed`, `Cutoff`, `Failed {error}`, and `Cancelled`. Scope exit uses `Closed`.
+Stop/resume does not release the producer. The first transition to closing fixes the
+reason and prevents re-entry.
+
+Cleanup runs through normal VM continuations, with live state traced while suspended. A
+pending operational error remains primary; cleanup errors are attached to it. With no
+primary error, report the first cleanup failure. Cancellation remains cancellation.
+Always attempt remaining cleanup after a failure, and do not let another ordinary
+interrupt skip it. A release callback can catch its own ordinary errors with `attempt`;
+the pending outer failure or cancellation is delivered after cleanup. Keep its original
+source location, and display secondary cleanup failures even during cancellation. Forced
+termination and a nonterminating user callback cannot carry an unconditional completion
+guarantee. GC finalization never calls `release`.
+
+## Multi-input streams
+
+Use `zip inputs` and `merge inputs`, where `inputs` is a List of Streams. Validate all
+tokens, scope relationships, and repeated identities before transferring any input. The
+resulting stream owns all inputs and closes them on failure or downstream cutoff. An
+empty input list produces an empty stream for both operations.
+
+`zip` emits Lists in input order and stops at the shortest input. Pull left to right,
+with at most one pending tuple. If a later input ends, earlier inputs may already have
+yielded one unmatched item; discard it during closure. Do not prefetch the next tuple.
+
+`merge` preserves each input's order and ends after every input completes. Its
+cross-input order is unspecified. Poll ready inputs round-robin with at most one pending
+item per input. Item bounds do not bound arbitrarily large payloads; retain applicable
+value/materialization and byte-transport budgets too. Pending I/O on one input must not
+block another ready input. Language callbacks remain serial and yield at VM checkpoints;
+fairness cannot make a blocking native operation nonblocking.
+
+For both operators, retain the first observed operational failure; use input order to
+break ties observed in the same polling pass. Attempt cleanup in input order and retain
+cleanup failures as secondary diagnostics. Byte EOF is not proof that an associated
+producer or process completed successfully. Backpressure and cancellation must propagate
+through the entire owned graph.
 
 ## Core library contracts
 
@@ -337,7 +401,10 @@ cancellation are checked during long pure evaluations, not only on syscalls.
 | `any p sequence`, `all p sequence`                      | Bool predicates, short-circuit; empty results are false and true respectively         |
 | `filter_map f sequence`                                 | Callback returns Some to emit a value or None to omit it; preserve category           |
 | `drop n sequence`                                       | Nonnegative Int; discard at most n items                                              |
+| `chunks bytes`                                          | Explicit lazy stream of nonempty Bytes chunks; empty Bytes yields no items            |
 | `items list`                                            | Explicit lazy, single-consumer view of a List                                         |
+| `produce protocol`                                      | Lazy acquisition, stateful demand and explicit release in an owned child scope        |
+| `zip inputs`, `merge inputs`                            | Single-consumer composition of a List of Streams; see multi-input contracts above     |
 | `unfold step initial`                                   | Lazy Stream; step returns None or Some `[item, next_state]`                           |
 | `range start end`                                       | Lazy ascending Int stream, inclusive start and exclusive end; empty when start >= end |
 | `fold f initial sequence`                               | Apply `f accumulator item` in order; return the final accumulator                     |
@@ -360,28 +427,23 @@ cancellation are checked during long pure evaluations, not only on syscalls.
 `fold_until` accepts only the shared Control constructors. Stop is normal consumer
 cutoff, not an exception: it closes the upstream chain, waits for owned producers to
 finish cleanup, and returns the payload. An already observed producer/callback error
-still wins. Empty input returns the initial value without invoking the callback.
-`find`, `any`, and `all` build on this mechanism, with no lookahead callback after a
-result is known. Invalid callback results fail explicitly. List transformations remain
-eager and ordered; combining separate transformations must not reorder their effects.
+still wins. Empty input returns the initial value without invoking the callback. `find`,
+`any`, and `all` build on this mechanism, with no lookahead callback after a result is
+known. Invalid callback results fail explicitly. List transformations remain eager and
+ordered; combining separate transformations must not reorder their effects.
 
-`unfold` keeps one state and at most one produced item rooted. It calls the step only
-on demand; `take 0` closes it without invoking the callback. State may capture ordinary
+`unfold` keeps one state and at most one produced item rooted. It calls the step only on
+demand; `take 0` closes it without invoking the callback. State may capture ordinary
 values, but resource escape and single-consumer rules still apply. `items` supplies an
 explicit List-to-Stream boundary; scalars and Lists never become streams implicitly.
 
-Custom acquisition/release callbacks, multi-input `zip`/`merge`, and automatic fusion
-are not available. [Stage 3.5](implementation-plan.md#35-extensible-stream-production-and-composition)
-owns their planned scope and acceptance; `unfold` alone is not a resource lifecycle
-protocol.
-
-`stdin ()` borrows descriptor 0 and never closes it or changes its status flags. At
-most one live stdin source exists per session, including suspended evaluations. EOF,
-close, cutoff, errors, and scope exit release its lease. Reading may buffer a chunk;
-closing discards any already-read unconsumed bytes. A command inheriting stdin is
-rejected while the lease exists; explicit input redirection, `through`, and sources
-whose stdin is `/dev/null` remain usable. With `-c` or a source file, stdin is data;
-when the script itself comes from stdin, source loading consumes it before evaluation.
+`stdin ()` borrows descriptor 0 and never closes it or changes its status flags. At most
+one live stdin source exists per session, including suspended evaluations. EOF, close,
+cutoff, errors, and scope exit release its lease. Reading may buffer a chunk; closing
+discards any already-read unconsumed bytes. A command inheriting stdin is rejected while
+the lease exists; explicit input redirection, `through`, and sources whose stdin is
+`/dev/null` remain usable. With `-c` or a source file, stdin is data; when the script
+itself comes from stdin, source loading consumes it before evaluation.
 
 ```rill
 stdin ()
@@ -393,16 +455,16 @@ stdin ()
 ```
 
 `print` accepts String, never a debug rendering or an implicit conversion. Use `text`
-for supported scalars, `display_path` for safe path display, and `to_json` for structured
-data. Writes are cooperatively scheduled through the existing byte sink, preserving
-cancellation and I/O errors.
+for supported scalars, `display_path` for safe path display, and `to_json` for
+structured data. Writes are cooperatively scheduled through the existing byte sink,
+preserving cancellation and I/O errors.
 
-Filesystem path parameters accept Path, String, or Bytes without NUL; operations
-return Path where a path is produced. `join_path base child` inserts one separator
-when needed; an absolute child replaces the base and an empty child preserves it.
-It does not normalize `..`, resolve symlinks, or consult cwd. `basename` and `dirname`
-ignore trailing separators, return `.` for empty input, and treat all-separator input
-as `/`; a relative basename has dirname `.`. No locale or text decoding is applied.
+Filesystem path parameters accept Path, String, or Bytes without NUL; operations return
+Path where a path is produced. `join_path base child` inserts one separator when needed;
+an absolute child replaces the base and an empty child preserves it. It does not
+normalize `..`, resolve symlinks, or consult cwd. `basename` and `dirname` ignore
+trailing separators, return `.` for empty input, and treat all-separator input as `/`; a
+relative basename has dirname `.`. No locale or text decoding is applied.
 
 `files` emits `name: Path`, `path: Path`, `kind: String`, and `size: Int`; `name`
 contains the entry's basename and `path` the source-relative path. It includes hidden
@@ -447,20 +509,20 @@ depth must be at least one.
 | `sort_by_with options key sequence` | `max_items`, `max_bytes` |
 
 The unqualified functions partially apply their configurable counterparts to empty
-options Records. This binds defaults without executing the operation.
-`collect_bytes` and `read_text` default to 64 MiB; sorting uses collection limits.
-`sort_by_with` applies limits to List input as well as Stream input. Its retained-byte
-budget includes input values and cached keys together, counting shared objects once.
-Check byte/count budgets as data is consumed or retained and before output is emitted.
-Bounded lookahead may detect an excess; it does not permit publishing truncated success.
-Decoded JSON depth is checked during conversion, before publishing a value. Limits apply
-to the named operation, not total process memory. Earlier external effects, including
-written bytes, are not rolled back.
+options Records. This binds defaults without executing the operation. `collect_bytes`
+and `read_text` default to 64 MiB; sorting uses collection limits. `sort_by_with`
+applies limits to List input as well as Stream input. Its retained-byte budget includes
+input values and cached keys together, counting shared objects once. Check byte/count
+budgets as data is consumed or retained and before output is emitted. Bounded lookahead
+may detect an excess; it does not permit publishing truncated success. Decoded JSON
+depth is checked during conversion, before publishing a value. Limits apply to the named
+operation, not total process memory. Earlier external effects, including written bytes,
+are not rolled back.
 
 ## Session state and shutdown
 
-`cd path`, `set_env name value`, and `unset_env name` are ordinary foreground
-session effects, including when called by stream callbacks. They affect later reads and
+`cd path`, `set_env name value`, and `unset_env name` are ordinary foreground session
+effects, including when called by stream callbacks. They affect later reads and
 launches, never mutate an already-launched job's snapshot. There is no hidden
 callback-specific effect restriction. Callback order determines when the effect occurs;
 background jobs execute no user-language callbacks. `pwd ()` returns a Path.
@@ -471,13 +533,13 @@ available through retained handles. `jobs ()` returns records containing `id`, `
 `kind`, and `state`, so even a discarded start result can be recovered through the
 session. Dropping a handle does not detach a process. `get_env name` returns Option of
 Bytes. Environment names are nonempty Strings without NUL or `=`; `set_env` values are
-String or Bytes without NUL. `unset_env name` removes a variable explicitly.
-`exit code` refuses while jobs are live or stopped; Ctrl-D on an empty prompt makes the
-same request with code zero. `exit_force code` explicitly cancels session jobs and
-restores the terminal before exit. There is no detach/disown operation. Script EOF with
+String or Bytes without NUL. `unset_env name` removes a variable explicitly. `exit code`
+refuses while jobs are live or stopped; Ctrl-D on an empty prompt makes the same request
+with code zero. `exit_force code` explicitly cancels session jobs and restores the
+terminal before exit. There is no detach/disown operation. Script EOF with
 unacknowledged background jobs is an error followed by cleanup. Scripts must explicitly
-wait, foreground, or cancel each job, even if the event loop already reaped its children.
-Merely listing a job does not acknowledge its completion.
+wait, foreground, or cancel each job, even if the event loop already reaped its
+children. Merely listing a job does not acknowledge its completion.
 
 Cancellation closes relevant channels, sends SIGTERM to owned live groups, and sends
 SIGCONT to stopped groups. After a 1-second grace period, send SIGKILL if needed. The
@@ -495,5 +557,6 @@ Script exit is 0 on normal completion, 1 for ordinary unhandled language/I/O err
 for syntax/CLI errors, 130 for user interrupt, or the selected checked external stage's
 nonzero code. A policy failure with actual exit zero maps to 1. Signal failures map to
 the smaller of 255 and `128 + signal` while reports retain the actual signal. Explicit
-`exit` accepts codes 0 through 255. Allocation failure is fatal after best-effort non-allocating
-cleanup and produces a nonzero exit.
+`exit` accepts codes 0 through 255. Allocator exhaustion is fatal and may abort without
+running destructors or release callbacks. Operation limits reduce retained data; they do
+not guarantee recovery from process-wide allocation failure.

@@ -1,0 +1,1 @@
+let f = rec { loop n => if n == 0 then 0 else loop (n - 1) }; f 3

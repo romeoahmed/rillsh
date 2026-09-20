@@ -1,0 +1,19 @@
+{
+  "grammars": [
+    {
+      "name": "rill",
+      "camelcase": "Rill",
+      "scope": "source.rill",
+      "path": ".",
+      "file-types": ["rill"],
+      "highlights": "queries/highlights.scm",
+      "locals": "queries/locals.scm"
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "Rill Shell syntax for editors"
+  },
+  "bindings": { "rust": true }
+}

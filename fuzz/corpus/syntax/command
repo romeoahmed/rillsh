@@ -1,0 +1,1 @@
+job { ^printf "%s" $value ...$args 2>&1 | ^cat }

@@ -1,0 +1,18 @@
+[package]
+name = "rill-editor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rill-syntax.workspace = true
+reedline = { workspace = true, features = ["external_printer"] }
+nu-ansi-term.workspace = true
+xdg.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
