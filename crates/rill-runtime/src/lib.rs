@@ -455,3 +455,41 @@ impl Engine {
         self.arena.finish_cycle();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discarded_recursive_closures_are_reclaimed_without_losing_published_captures() {
+        let mut engine = Engine::default();
+        let module = rill_syntax::parse(
+            "cycles",
+            r"
+let saved = do { let value = [40, 2]; { () => value[0] + value[1] } }
+do {
+  let discarded = rec { loop n => if n == 0 then 0 else loop (n - 1) }
+  discarded 10
+}
+()
+",
+        )
+        .unwrap();
+        engine.begin(&module).unwrap();
+        while engine.step(128).unwrap() != Progress::Complete {}
+        let allocated = engine.arena.metrics().total_gc_count();
+        engine.collect();
+        assert!(engine.arena.metrics().total_gc_count() < allocated);
+        engine
+            .begin(&rill_syntax::parse("retained", "saved ()").unwrap())
+            .unwrap();
+        loop {
+            let progress = engine.step(1).unwrap();
+            engine.collect();
+            if progress == Progress::Complete {
+                break;
+            }
+        }
+        assert!(engine.inspect(|value| matches!(value, Value::Int(42))));
+    }
+}

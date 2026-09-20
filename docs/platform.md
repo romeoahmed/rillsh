@@ -1,18 +1,16 @@
 # Platform
 
-This document defines the target Linux/macOS boundary and first-release conventions.
+This document defines Linux/macOS support, native bytes, storage and terminal policy.
 [Execution](execution.md) specifies job semantics; [architecture](architecture.md)
-specifies process and terminal mechanisms. [Current status](status.md) records verified
-support. Rust libraries own Unicode algorithms and native backend selection; no custom
-Unicode database or obsolete terminal dialect is maintained.
+specifies process and terminal mechanisms. Rust libraries own Unicode algorithms and
+native backend selection; no custom Unicode database or obsolete terminal dialect is
+maintained.
 
 ## Standards and support boundary
 
-Use published standards and current supported Linux/glibc and macOS development
-environments. New code follows POSIX.1-2024 terminology and semantics, requiring the
-facilities it uses rather than full platform certification. Missing required facilities
-are build errors; Linux/macOS API differences belong in the platform adapter. Older
-compiler modes, obsolete terminal dialects, and speculative ports are outside scope.
+Target current Linux/glibc and macOS environments using POSIX.1-2024 terminology and
+semantics. Require the facilities in use, not full platform certification. Linux/macOS
+API differences belong in the platform adapter; missing facilities are build errors.
 
 | Area                          | Baseline                                 | Project boundary                                             |
 | ----------------------------- | ---------------------------------------- | ------------------------------------------------------------ |
@@ -40,11 +38,9 @@ inherited-stdin reads use a cancellable POSIX poll worker, joined before input h
 Do not impose a fixed descriptor-number ceiling. Readiness errors remain errors;
 interruption and EOF are distinct outcomes.
 
-Use owned descriptors and native library cleanup. Do not retry an ordinary descriptor
-close after ownership has ended. Backend details belong to rustix and Rust's platform
-implementation, not a second Rill close protocol. Rustix selects its Linux raw backend
-on supported Linux targets and its libc backend on macOS by default; forcing libc
-workspace-wide is unnecessary for POSIX portability.
+Use owned descriptors and native cleanup; never retry an ordinary close after
+ownership ends. rustix selects its Linux raw backend on supported Linux targets and
+libc on macOS. Do not force a workspace-wide backend or add a second close protocol.
 
 Do not create a new session per command. Interactive terminal jobs receive the
 foreground process group; background jobs remain subject to terminal access rules.
@@ -122,10 +118,9 @@ Directory defaults and HOME resolution belong to xdg; Rill has no second fallbac
 search policy. XDG_CONFIG_DIRS and XDG_DATA_DIRS remain child environment variables, not
 startup-code or module search paths. No cache or runtime directory is reserved.
 
-A missing default startup file is normal. An explicitly selected missing file or any
-other startup failure reports a diagnostic and leaves a usable prompt. History uses mode
-0700 for the application state directory and 0600 for its file, without changing
-user-managed base directories. Unwritable state leaves in-memory editing available.
+History uses mode 0700 for the application state directory and 0600 for its file,
+without changing user-managed base directories. Startup and unavailable-history behavior
+are defined in [interaction](interaction.md).
 
 ## UTF-8, graphemes, and display width
 
@@ -141,12 +136,11 @@ independent. LANG, LC_ALL and LC_* pass unchanged to children. macOS filesystem 
 does not authorize normalization of Path bytes; actual filesystem support for invalid
 UTF-8 filenames can differ from the shell's byte-preserving argument contract.
 
-Reedline owns grapheme editing and layout. Rill uses unicode-segmentation and
-unicode-width for its own bounded tables; Ariadne owns diagnostic layout. Cargo.lock
-records the resolved implementations. Accept supported dependency Unicode updates; do
-not synchronize private tables, promise a particular Unicode release or recreate editor
-algorithms. Terminal fonts and emoji presentation can still disagree with library width
-estimates. Full bidirectional editing is outside scope.
+Reedline owns grapheme editing; unicode-segmentation and unicode-width serve Rill tables;
+Ariadne owns diagnostic layout. Cargo.lock records their versions. Accept upstream
+Unicode updates without private tables or a separately pinned Unicode release. Fonts
+and emoji presentation may disagree with width estimates. Full bidirectional editing is
+outside scope.
 
 ## Terminal profile and color
 

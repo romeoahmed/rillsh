@@ -10,7 +10,8 @@ limit in the target:
 - `syntax`: UTF-8 decoding, contextual lexing, completion-span boundaries, quoted-path round trips, parsing, validation and bytecode lowering.
   It never evaluates source or loads imports.
 - `json`: arbitrary byte decoding and round trips over JSON-representable values, with
-  collection between VM quanta. No generated program can request a host effect.
+  collection between VM quanta. Only the initial decode may reject input; encoding and
+  decoding an accepted value must succeed. No generated program can request a host effect.
 - `evaluation`: bounded curried recursion and list-pattern evaluation, checked against
   independent integer arithmetic while collecting suspended state and interleaving
   unrelated entries with parked continuations. This restricted

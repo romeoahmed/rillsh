@@ -2,7 +2,7 @@
 
 This document defines invocation, editing and presentation. [Platform](platform.md) owns
 encoding and terminal capabilities; [architecture](architecture.md) explains the
-mechanisms. [Status](status.md) records platform verification gaps.
+mechanisms.
 
 ## Invocation and session boundaries
 
@@ -41,9 +41,8 @@ for a diagnostic instead of collecting lines indefinitely.
 
 Alt-Enter explicitly submits the entire buffer, including incomplete input for a syntax
 diagnostic. Ctrl-J inserts a newline; Shift-Tab does so outside the completion menu.
-The Alt binding uses the ordinary ESC-prefixed sequence; terminals need not support
-distinct Ctrl/Shift-Enter codes. The help view lists these actions and their available aliases. No backslash-based
-editor continuation rewrites source text.
+The Alt binding uses the ordinary ESC-prefixed sequence. Help lists these actions and
+aliases; no backslash continuation rewrites source text.
 
 Newlines use Reedline's native editing behavior and do not rewrite indentation or string
 contents. One complete submitted entry is one history item and one execution boundary.
@@ -51,9 +50,8 @@ contents. One complete submitted entry is one history item and one execution bou
 ## Familiar terminal controls
 
 Use one fixed key set built around navigation keys, familiar terminal shortcuts, and a
-few aliases. Copy and paste remain available through the terminal emulator. Bindings
-require neither Command-key nor Ctrl-Shift-key delivery. Editing modes and configurable
-keymaps are outside the first release.
+few aliases. Copy and paste remain terminal-emulator actions. There are no alternate
+editing modes or configurable keymaps.
 
 | Action                                        | Default input                                    |
 | --------------------------------------------- | ------------------------------------------------ |
@@ -76,8 +74,8 @@ keymaps are outside the first release.
 
 Word deletion follows Reedline’s native word boundaries; it does not tokenize Rill. A
 completion menu consumes Enter to accept a candidate, never to execute it. Escape closes
-an overlay without clearing the main buffer. Search acceptance returns to editing; it
-does not execute the selected history entry.
+an overlay without clearing the main buffer. History search explicitly indicates when
+no entry matches. Accepting a match returns to editing without executing it.
 
 Ctrl-C discards the unsubmitted entry. Ctrl-D requests `exit 0` only when the buffer is
 empty; outstanding jobs follow the execution shutdown contract. Ctrl-Z restores terminal
@@ -95,11 +93,9 @@ source receives a diagnostic. Reedline owns their appearance while editing and r
 history. Rill does not promise a separate escaped editor display with exact cursor
 mapping.
 
-Reedline and Crossterm own paste buffering, decoding, undo grouping and escape-sequence
-recognition. Rill does not patch or duplicate those mechanisms. Their public APIs do not
-provide incremental paste-memory limits, discard-until-marker cancellation, bounded undo
-storage or configurable byte/deadline limits for key sequences. These are not Rill
-guarantees. Large input can consume memory before submission validation runs.
+Reedline and Crossterm own paste buffering, decoding, undo and key-sequence recognition.
+Rill uses their native APIs without patches. Large input can consume memory before
+submission validation; there is no incremental paste limit or bounded undo guarantee.
 
 | Resource                        | Policy                                                     |
 | ------------------------------- | ---------------------------------------------------------- |
@@ -112,8 +108,7 @@ Oversized submissions do not execute a prefix and do not enter persistent histor
 Reedline may retain its latest leading-space exclusion for in-memory recall even when
 submission is rejected; this is part of the native editor buffer policy. Plain input
 bounds its accumulated source while reading; rich input is checked after submission.
-Paste is never deliberately interpreted as submit keys. There is no time-based inference
-that rapidly typed characters must be pasted text.
+There is no time-based inference that rapidly typed characters are pasted text.
 
 ## Completion, highlighting, and responsiveness
 
@@ -134,10 +129,9 @@ including spaces, quotes, `$`, wildcard characters, and non-UTF-8 paths. Use thi
 language's quoting or explicit Bytes/Path expression syntax, not a POSIX-shell quoting
 routine. Do not accept arbitrary code suggested by filesystem contents.
 
-While editing, the event loop continues handling signals, child state, deadlines, and
-owned I/O. Coalesce redraws rather than repainting once per input byte. Large input may
-temporarily lose highlighting; submission always uses the complete parser result. At a
-valid revision, syntax coloring must not disagree with tokenization.
+While editing, the coordinator handles signals, child state, deadlines and owned I/O.
+Reedline owns repaint scheduling. Plain color mode skips highlighting; large input may
+also lose highlighting, but submission always uses the complete parser result.
 
 ## Text, styles, and output
 
@@ -159,10 +153,8 @@ CLI renders them; evaluators and codecs never print into a pipeline. Completion
 signatures describe remaining parameters, not a static type or effect system. The
 language and execution references own accepted arguments and materialization rules.
 
-Use concise English: state what failed, then give an actionable correction when known.
-Quote syntax and callable examples so they stand out from prose. Use public type and
-function names instead of storage or scheduling terminology. Collection summaries name
-their units (items, fields, stages); help separates usage, options, and examples.
+Messages use concise English and public type/function names, with an actionable
+correction when known. Summaries name their units: items, fields or stages.
 
 A Record displays as field/value rows. A nonempty List displays at most 100 rows; record
 rows use up to eight field names from the first row when all displayed records contain
@@ -187,9 +179,8 @@ only the latest excluded entry is retained for recall.
 
 The backend encodes newlines with the marker `<\n>`. Entries containing that literal
 marker are omitted from history with a notice, because saving them would change their
-source on reload. Oversized submissions are also omitted. Rill does not introduce a
-custom history format, database, lock protocol or compatibility reader. Existing files
-must use the backend's native format.
+source on reload. Oversized submissions are also omitted. Existing files must use the
+backend's native format; Rill maintains no custom history codec or compatibility reader.
 
 Use the private XDG state location and permissions specified in [platform](platform.md).
 Unavailable storage reports a notice and keeps in-memory editing usable.

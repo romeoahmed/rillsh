@@ -1,8 +1,7 @@
 # Language
 
 This document defines Rill syntax, values, and evaluation. [Execution](execution.md)
-owns process and stream effects; [status](status.md) records implementation evidence and
-remaining work.
+owns process and stream effects.
 
 ## Semantic core
 
@@ -39,8 +38,8 @@ Resource handles do not expose OS handles. A Job handle may be retained in persi
 session data; a Stream handle cannot outlive its execution scope. Stream escape rules
 also apply through lists, records, ADTs, and captured function environments.
 
-Integer overflow and division by zero are language errors. There is no bit-shift syntax
-in the initial language. `/` operates on Float operands; `div` and `rem` are named Int
+Integer overflow and division by zero are language errors. There is no bit-shift syntax.
+`/` operates on Float operands; `div` and `rem` are named Int
 functions, with truncation toward zero and the dividend's sign for the remainder. Mixed
 Int/Float arithmetic requires explicit conversion. Float overflow and non-finite
 conversion results are errors. `+` also concatenates two Strings; it never converts
@@ -84,6 +83,8 @@ depend on traversal order. There is no public pointer-identity operator.
 - An unfinished operator continues on the next line. A following line beginning with
   `|>` also continues an expression while the source is buffered. In the REPL, leave
   `|>` at the end of a line to request continuation before submission.
+- Lists, Record fields, type fields, enum cases and match arms use commas and allow
+  one trailing comma. Newlines do not replace commas. Function parameters use whitespace.
 - A bare function or partial application is Complete. Neither callable metadata nor
   a following line supplies implicit arguments. `f` followed by a newline and `x`
   is two statements; enclose a multiline application in parentheses.
@@ -127,7 +128,9 @@ A closure body is a lexical block with the same sequencing and result rules as `
 `{}` is an empty Record, not an empty closure. An empty closure body returns Unit; `{ ()
 => }` accepts only Unit, whereas `{ _ => }` accepts and ignores any value. A closure
 must have at least one parameter; `{ => ... }` is invalid. No expression is implicitly
-converted to a thunk.
+converted to a thunk. Record/closure classification depends only on header syntax;
+comments and strings do not contribute header punctuation. An unfinished header stays
+Incomplete until its syntax determines otherwise.
 
 Multiple parameters lower to nested unary functions:
 
@@ -168,7 +171,8 @@ visible only inside the function and denotes the complete curried function, incl
 from a partial application or a nested returned closure. It does not change when an
 outer binding is shadowed. `self` is an ordinary identifier. Parameters, pattern checks,
 captures, and tail calls use the same rules as every other function. A `rec` expression
-and a mutual `rec { fn ... }` group are distinguished syntactically.
+and a mutual `rec { fn ... }` group are distinguished syntactically. A group contains
+one or more named function declarations.
 
 Closures capture resolved free bindings rather than an entire surrounding scope or names
 to resolve later. An unrelated local Stream must not make a returned closure illegal.
@@ -213,7 +217,9 @@ then binds. Binding failure raises MatchError and installs none of that binding'
 `if` requires both branches and evaluates only the selected branch. `and` and `or`
 short-circuit and require Bool operands; `not` accepts Bool. Sequential effects and
 `each { x => effect x } items` support imperative tasks. There are no mutable variables,
-user-defined setters, `return`, `break`, or assignment operators in the first release.
+user-defined setters, `return`, `break`, or assignment operators. Closure bodies and
+`do` admit expressions, commands, `let`, `fn` and `rec`; imports, exports and nominal
+declarations require top level.
 
 From tightest to loosest: field/index suffixes; application; unary `-` and `not`; `*`
 and `/`; `+` and `-`; comparisons; `and`; `or`; `with`; `|>`. Comparisons do not chain.
@@ -302,7 +308,8 @@ expression. An alias to a constructor preserves its descriptor. A non-constructo
 this position is a diagnostic, not a function invocation. An empty nominal product is
 matched as `Empty {}`; a bare identifier always binds a pattern variable. Fieldless enum
 cases use a qualified path such as `Option.None`. An enum must declare at least one
-case; case names are unique within that enum.
+case; case names are unique within that enum. Empty payload braces and an omitted
+payload both declare a fieldless case.
 
 Nominal identity is never inferred from record keys or JSON. `to_record value`
 explicitly extracts the payload. Products and variants promise identity and shape, not
@@ -363,10 +370,8 @@ patterns are rejected before any statement in the entry executes, including in
 unselected branches or unused functions. `[x, x]` is invalid; use `[x, y] if x == y`.
 List rest views must not copy the full suffix on every recursive call. Matching can
 allocate bindings but cannot read a stream, perform field getters, or execute
-constructor code. Dynamic matches have no exhaustiveness guarantee. A potentially
-incomplete match retains the runtime MatchError contract. Redundancy warnings are not
-currently implemented; any future analysis must avoid evaluating guards or constructor
-paths.
+constructor code. Exhaustiveness and redundancy are not statically checked; an
+unmatched value raises MatchError.
 
 ## Errors and cancellation
 
@@ -438,7 +443,7 @@ have ordinary effects; importing untrusted code is not a sandbox. Standard-libra
 initialization must be effect-free.
 
 The standard-library source is embedded in and versioned with the executable. The
-prelude is a fixed set of imports, not a second function dispatch path. The initial
+prelude is a fixed set of imports, not a second function dispatch path. The
 library modules are `std:core`, `std:seq`, `std:text`, `std:fs`, `std:process`,
 `std:json`, `std:option`, and `std:result`. Each module owns its definitions and
 explicit imports; the prelude only selects public bindings. `std:core` owns the shared
@@ -497,39 +502,12 @@ bootstrap namespace is unavailable to user code.
 
 ## Parsing contract
 
-The parser returns Complete, Incomplete, or Invalid with source ranges. The lexer has
-explicit expression and command modes; these modes are selected by syntax, never by
-whether a name happens to exist at runtime. Closure construction resolves free bindings
-to fixed captures, including constructor paths used in patterns. Parsing does not need
-those values to classify source completeness.
+Parse the whole script, module or submitted entry before executing any statement. The
+result is Complete, Incomplete or Invalid with byte ranges; EOF turns Incomplete into a
+syntax error. Lexical modes depend only on syntax, never runtime bindings or parameter
+counts. Parsing and lowering execute no user code.
 
-Function bodies and patterns retain source locations after lowering. Application
-diagnostics identify the failing application; type errors describe the rejected value
-category when available. Parameter counts never determine syntactic completeness.
-Structural pattern validation runs before execution; nominal identity and value
-mismatches remain runtime checks. A script or module is parsed completely before its
-statements execute; the REPL parses one submitted entry completely. EOF converts
-Incomplete to a syntax error. Parsing and lowering never execute user code; runtime
-name/type errors remain distinct from syntax errors.
-
-## Syntax boundaries
-
-The forms above, fixed precedence, and command grammar define the surface language.
-Parentheses group expressions or patterns; `()` is Unit. Calls require whitespace,
-including before a grouped argument. Parentheses do not introduce a separate call form,
-and braces describe either a Record or an explicit closure header.
-
-Lists, Record fields, type fields, enum cases, and match arms use commas and allow one
-trailing comma. Newlines within these forms do not replace commas. Function parameters
-use whitespace without commas. An enum case with empty payload braces or no payload is
-fieldless; an enum must contain at least one case.
-
-Record/closure classification depends only on header syntax, never on runtime names:
-`{name}` is a Record, `{name: value}` is a Record, and `{ name => body }` is a closure.
-Comments and strings do not contribute header punctuation. An unfinished header remains
-Incomplete until its syntax determines otherwise.
-
-Local closure bodies and `do` blocks admit expressions, command statements, `let`, named
-`fn`, and `rec`. Imports, exports, and nominal declarations remain top-level forms. A
-`rec` group contains one or more named function declarations. A `job` form contains
-exactly one external pipeline; it is not a general statement block.
+Structural validation covers unused functions and unselected branches. Name, nominal
+identity and value errors remain distinct from syntax errors. Lowering retains locations
+for function bodies and patterns so diagnostics identify the failing application and its
+original source. The editor uses this same completeness decision.

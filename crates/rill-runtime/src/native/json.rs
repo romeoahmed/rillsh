@@ -216,12 +216,13 @@ impl<'gc> Decoder<'gc> {
                     values.push(list(mc, children));
                 }
                 Task::Record(keys) => {
-                    let children = values.split_off(values.len() - keys.len());
-                    values.push(Value::Record(crate::heap::record(
-                        mc,
-                        keys.into_iter().zip(children).collect(),
-                    )));
+                    let children = values.drain(values.len() - keys.len()..);
+                    let fields = keys.into_iter().zip(children).collect();
+                    values.push(Value::Record(crate::heap::record(mc, fields)));
                 }
+            }
+            if crate::heap::should_yield(mc, *fuel) {
+                break;
             }
         }
         Ok(None)

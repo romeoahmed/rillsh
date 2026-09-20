@@ -473,6 +473,36 @@ fn native_conversions_keep_their_inputs_and_partial_outputs_alive_across_gc() {
 }
 
 #[test]
+fn allocation_heavy_native_work_yields_and_survives_collection() {
+    let text = "x".repeat(10_000);
+    let json = serde_json::to_string(&vec!["x"; 10_000]).unwrap();
+    for source in [format!("scalars '{text}'"), format!("from_json '{json}'")] {
+        let mut engine = Engine::standard().unwrap();
+        engine.collect();
+        engine
+            .begin(&rill_syntax::parse("gc-pressure", &source).unwrap())
+            .unwrap();
+        // Fuel comfortably exceeds this finite conversion. Allocation pressure must
+        // still return control before materializing the entire result in one quantum.
+        assert_eq!(engine.step(1_000_000).unwrap(), Progress::Yielded);
+        engine.collect();
+        support::finish(&mut engine).unwrap();
+        engine.inspect(|value| {
+            let Value::List(items) = value else {
+                panic!("converted List");
+            };
+            assert_eq!(items.as_slice().len(), 10_000);
+            assert!(
+                items
+                    .as_slice()
+                    .iter()
+                    .all(|value| matches!(value, Value::String(text) if text.as_str() == "x"))
+            );
+        });
+    }
+}
+
+#[test]
 fn materialization_accounts_for_constructor_descriptions() {
     let mut engine = Engine::standard().unwrap();
     let name = "x".repeat(8192);

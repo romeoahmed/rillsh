@@ -86,6 +86,45 @@ fn evaluation(c: &mut Criterion) {
     pipelines(c);
     constructors(c);
     record_patterns(c);
+    allocation(c);
+}
+
+fn allocation(c: &mut Criterion) {
+    for (name, source, expected) in [
+        (
+            "gc/discarded-cycles",
+            r"let repeat = rec { loop n => if n == 0 then 0 else do {
+  let discarded = rec { self () => self () }
+  loop (n - 1)
+} }
+repeat 1000"
+                .into(),
+            0,
+        ),
+        (
+            "gc/scalar-materialization",
+            format!("scalars '{}' |> length", "x".repeat(10_000)),
+            10_000,
+        ),
+    ] {
+        let module = parse(name, &source).unwrap();
+        c.bench_function(name, |b| {
+            b.iter_batched_ref(
+                || {
+                    let mut engine = Engine::standard().unwrap();
+                    engine.begin(&module).unwrap();
+                    engine
+                },
+                |engine| {
+                    finish(engine);
+                    assert!(
+                        engine.inspect(|value| matches!(value, Value::Int(n) if n == expected))
+                    );
+                },
+                BatchSize::LargeInput,
+            );
+        });
+    }
 }
 
 fn record_patterns(c: &mut Criterion) {

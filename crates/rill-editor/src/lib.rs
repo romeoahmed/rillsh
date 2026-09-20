@@ -190,7 +190,7 @@ impl Highlighter for Highlight {
     fn highlight(&self, line: &str, _: usize) -> StyledText {
         use rill_syntax::token::Kind;
         let mut output = StyledText::new();
-        if line.len() > history::ENTRY_LIMIT {
+        if !self.0.enabled() || line.len() > history::ENTRY_LIMIT {
             output.push((Style::new(), line.into()));
             return output;
         }
@@ -200,7 +200,9 @@ impl Highlighter for Highlight {
         };
         let mut position = 0;
         for token in tokens {
-            output.push((Style::new(), line[position..token.span.start].into()));
+            if position != token.span.start {
+                output.push((Style::new(), line[position..token.span.start].into()));
+            }
             let color = match token.kind {
                 Kind::String(_) => self.0.select(Color::Green, 114, (152, 195, 121)),
                 Kind::Number(_) | Kind::True | Kind::False | Kind::Null => {
@@ -234,7 +236,9 @@ impl Highlighter for Highlight {
             output.push((Style::new().fg(color), line[token.span.clone()].into()));
             position = token.span.end;
         }
-        output.push((Style::new(), line[position..].into()));
+        if position != line.len() {
+            output.push((Style::new(), line[position..].into()));
+        }
         output
     }
 }
@@ -253,7 +257,11 @@ impl Prompt for RillPrompt {
         "... ".into()
     }
     fn render_prompt_history_search_indicator(&self, search: PromptHistorySearch) -> Cow<'_, str> {
-        format!("search '{}': ", search.term).into()
+        let label = match search.status {
+            reedline::PromptHistorySearchStatus::Passing => "history",
+            reedline::PromptHistorySearchStatus::Failing => "history (no match)",
+        };
+        format!("{label} '{}': ", search.term.escape_debug()).into()
     }
     fn get_prompt_color(&self) -> Color {
         self.0.select(Color::Blue, 75, (97, 175, 239))
@@ -263,6 +271,43 @@ impl Prompt for RillPrompt {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn highlighting_preserves_source_in_every_color_mode() {
+        for depth in [
+            ColorDepth::Plain,
+            ColorDepth::Ansi16,
+            ColorDepth::Ansi256,
+            ColorDepth::TrueColor,
+        ] {
+            for source in [
+                "",
+                "  ",
+                "let x = \"\u{754c}\"\n# comment\nx |> text",
+                "^printf '%s' $x",
+                "\"unfinished",
+            ] {
+                let styled = Highlight(depth).highlight(source, source.len());
+                assert_eq!(styled.raw_string(), source);
+                if depth == ColorDepth::Plain {
+                    assert_eq!(styled.render_simple(), source);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn history_search_reports_no_match_and_escapes_the_query() {
+        let prompt = RillPrompt(ColorDepth::Plain);
+        let search = PromptHistorySearch::new(
+            reedline::PromptHistorySearchStatus::Failing,
+            "missing\n\u{1b}".into(),
+        );
+        let rendered = prompt.render_prompt_history_search_indicator(search);
+        assert!(rendered.contains("no match"));
+        assert!(!rendered.chars().any(char::is_control));
+    }
+
     #[test]
     fn continuation_uses_language_syntax() {
         for source in ["{ x =>", "let value =", "^printf $("] {

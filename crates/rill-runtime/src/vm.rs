@@ -478,11 +478,10 @@ impl<'gc> Vm<'gc> {
         Ok(())
     }
     fn record(&mut self, mc: &Mutation<'gc>, keys: &[String]) {
-        let values = self.stack.split_off(self.stack.len() - keys.len());
-        self.stack.push(Value::Record(crate::heap::record(
-            mc,
-            keys.iter().cloned().zip(values).collect(),
-        )));
+        let values = self.stack.drain(self.stack.len() - keys.len()..);
+        let fields = keys.iter().cloned().zip(values).collect();
+        self.stack
+            .push(Value::Record(crate::heap::record(mc, fields)));
     }
     fn boundary(&mut self, mc: &Mutation<'gc>, last: bool) -> Result<(), Error> {
         if last
@@ -687,16 +686,19 @@ impl<'gc> Vm<'gc> {
         Ok(())
     }
     fn functions(&mut self, mc: &Mutation<'gc>, codes: &[Rc<FunctionCode>]) -> Result<(), Error> {
-        let names: HashSet<_> = codes.iter().filter_map(|code| code.name.clone()).collect();
-        let mut functions = HashMap::new();
+        let names: HashSet<_> = codes
+            .iter()
+            .filter_map(|code| code.name.as_deref())
+            .collect();
+        let mut functions = HashMap::with_capacity(codes.len());
         for code in codes {
             let mut environment = Scope::new(&code.body.layouts[0]);
             for capture in &code.captures {
-                if !names.contains(&capture.name) {
+                if !names.contains(capture.name.as_str()) {
                     environment.slots[capture.slot] = Some(self.load(&capture.source)?);
                 }
             }
-            let name = code.name.clone().expect("named function declaration");
+            let name = code.name.as_deref().expect("named function declaration");
             functions.insert(
                 name,
                 Value::Function(Gc::new(
@@ -716,7 +718,7 @@ impl<'gc> Vm<'gc> {
             };
             let mut environment = closure.environment.borrow_mut(mc);
             for capture in &closure.code.captures {
-                if let Some(value) = functions.get(&capture.name) {
+                if let Some(value) = functions.get(capture.name.as_str()) {
                     environment.slots[capture.slot] = Some(*value);
                 }
             }
@@ -1429,17 +1431,16 @@ impl<'gc> Vm<'gc> {
             )));
         };
         let mut environment = closure.environment.borrow().clone();
-        environment.extend(pattern::bind(
-            mc,
-            &closure.code.parameters[closure.parameter],
-            argument,
-            &|name| {
+        match &closure.code.parameters[closure.parameter] {
+            rill_syntax::ast::Pattern::Bind(name) => environment.insert(name, argument),
+            rill_syntax::ast::Pattern::Ignore => {}
+            pattern => environment.extend(pattern::bind(mc, pattern, argument, &|name| {
                 environment
                     .get(name)
                     .copied()
                     .ok_or_else(|| Error::new("NameError", format!("unknown constructor '{name}'")))
-            },
-        )?);
+            })?),
+        }
         if closure.parameter + 1 < closure.code.parameters.len() {
             self.stack.push(Value::Function(Gc::new(
                 mc,

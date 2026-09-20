@@ -203,6 +203,29 @@ impl Drop for Terminal {
 }
 
 #[test]
+fn history_search_reports_misses_and_accepts_matches_without_execution() -> io::Result<()> {
+    let mut terminal = Terminal::new()?;
+    terminal.until(|screen| screen.contents().trim_end().ends_with("rill>"))?;
+    terminal.send(b"12345 + 1\r")?;
+    terminal.until(|screen| {
+        screen.contents().lines().any(|line| line == "12346")
+            && screen.contents().trim_end().ends_with("rill>")
+    })?;
+    terminal.send(b"\x12missing-history-entry")?;
+    terminal.until(|screen| screen.contents().contains("history (no match)"))?;
+    terminal.send(b"\x03")?;
+    terminal.until(|screen| screen.contents().trim_end().ends_with("rill>"))?;
+    terminal.send(b"\x1212345")?;
+    terminal.until(|screen| screen.contents().contains("history '12345'"))?;
+    terminal.send(b"\r")?;
+    terminal.until(|screen| screen.contents().trim_end().ends_with("rill> 12345 + 1"))?;
+    terminal.send(b"\x03")?;
+    terminal.until(|screen| screen.contents().trim_end().ends_with("rill>"))?;
+    terminal.send(b"\x04")?;
+    terminal.wait_for_exit()
+}
+
+#[test]
 fn startup_selects_the_default_explicit_file_or_no_file() -> io::Result<()> {
     for (mode, expected) in [
         ("default", Some("default config")),

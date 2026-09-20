@@ -1,8 +1,7 @@
 # References
 
 Rill's specifications own its syntax and policy. These primary sources explain the
-selected mechanisms. Cargo manifests and lockfiles own dependency versions;
-[status](status.md) records evidence and remaining work.
+selected mechanisms. Cargo manifests and lockfiles own dependency versions.
 
 ## Standards and libraries
 

@@ -258,6 +258,29 @@ proptest::proptest! {
             proptest::prop_assert_eq!(support::finish(&mut engine).unwrap_err().kind, "ArithmeticError");
         }
     }
+
+    #[test]
+    fn curried_recursion_is_independent_of_quantum_and_collection_schedule(
+        values in proptest::collection::vec(-1000_i64..1000, 0..64),
+        fuel in 1_usize..129,
+        collect in proptest::prelude::any::<bool>(),
+    ) {
+        let source = format!(
+            "let sum = rec {{ loop total xs => match xs of {{ [] => total, [x, ..tail] => loop (total + x * x) tail }} }}; sum 0 {}",
+            serde_json::to_string(&values).unwrap(),
+        );
+        let mut engine = Engine::default();
+        engine.begin(&parse("schedule", &source).unwrap()).unwrap();
+        loop {
+            match engine.step(fuel).unwrap() {
+                Progress::Complete => break,
+                Progress::Yielded if collect => engine.collect(),
+                Progress::Yielded => {},
+                Progress::Waiting => panic!("pure recursion requested host I/O"),
+            }
+        }
+        proptest::prop_assert_eq!(integer(&engine), values.iter().map(|n| n * n).sum::<i64>());
+    }
 }
 
 #[test]

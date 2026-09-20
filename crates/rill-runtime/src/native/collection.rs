@@ -125,6 +125,9 @@ impl<'gc> Work<'gc> {
                 };
                 return Ok(Some(value));
             }
+            if crate::heap::should_yield(mc, *fuel) {
+                break;
+            }
         }
         Ok(None)
     }

@@ -19,7 +19,7 @@ use std::{
     path::Path,
 };
 use tokio::{
-    io::unix::AsyncFd,
+    io::{Interest, unix::AsyncFd},
     signal::unix::{SignalKind, signal},
 };
 
@@ -281,13 +281,14 @@ impl Job {
             let release = vec![1; self.children.len()];
             while self.gate_written < release.len() {
                 let remaining = &release[self.gate_written..];
-                let mut ready = gate.writable().await?;
-                match ready.try_io(|fd| write(fd, remaining).map_err(io::Error::from)) {
-                    Ok(Ok(0)) => return Err(io::Error::other("launch gate closed")),
-                    Ok(Ok(count)) => self.gate_written += count,
-                    Ok(Err(error)) if error.kind() == io::ErrorKind::Interrupted => {}
-                    Ok(Err(error)) => return Err(error),
-                    Err(_) => {}
+                match gate
+                    .async_io(Interest::WRITABLE, |fd| Ok(write(fd, remaining)?))
+                    .await
+                {
+                    Ok(0) => return Err(io::Error::other("launch gate closed")),
+                    Ok(count) => self.gate_written += count,
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                    Err(error) => return Err(error),
                 }
             }
         }
@@ -597,12 +598,13 @@ fn readiness(fd: OwnedFd) -> io::Result<AsyncFd<OwnedFd>> {
 /// Reports transport errors from the descriptor.
 pub async fn read_chunk(fd: &AsyncFd<OwnedFd>) -> io::Result<Vec<u8>> {
     loop {
-        let mut ready = fd.readable().await?;
-        match ready.try_io(read_available) {
-            Ok(Ok(bytes)) => return Ok(bytes),
-            Ok(Err(error)) if error.kind() == io::ErrorKind::Interrupted => {}
-            Ok(Err(error)) => return Err(error),
-            Err(_) => {}
+        match fd
+            .async_io(Interest::READABLE, |fd| read_available(fd))
+            .await
+        {
+            Ok(bytes) => return Ok(bytes),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
         }
     }
 }

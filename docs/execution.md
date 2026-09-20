@@ -1,9 +1,7 @@
 # Execution
 
 This document defines commands, process jobs, scoped streams, and effectful library
-operations. [Language](language.md) owns evaluation order; [status](status.md) records
-validation. Producer lifecycles and multi-input composition follow the same scoped
-ownership rules as ordinary streams.
+operations. [Language](language.md) owns evaluation order.
 
 ## Plans, jobs, reports, and streams
 
@@ -95,7 +93,7 @@ cancellation follows the separate cancellation path.
 
 ## Redirection
 
-The first release supports `<`, `>`, `>>`, `2>`, `2>>`, and `2>&1`. Other descriptor
+Redirections are `<`, `>`, `>>`, `2>`, `2>>`, and `2>&1`. Other descriptor
 redirections and here-documents are rejected. Paths are a single literal/substituted
 word. `>` truncates; `>>` appends. File creation uses ordinary permissions filtered by
 the process umask.
@@ -232,7 +230,7 @@ capability error and leaves the job stopped. Other commands may execute while a 
 is stopped. Already-launched jobs keep their launch snapshots and open resources remain
 attached to the stopped scope. After resumption, explicit session-state reads and new
 launches observe the current session cwd/environment; lexical captures remain unchanged.
-No user evaluator runs concurrently in the background in the first release. `fg` returns
+User evaluators do not run concurrently in the background. `fg` returns
 the resumed expression result without separately displaying it. Successful resumed
 declarations publish a new REPL scope at completion, while their captured references
 remain those resolved originally. The `fg` caller keeps its original lexical
@@ -312,7 +310,7 @@ cutoff. `drop` returns a List suffix or a lazy stream that discards the specifie
 of items. `collect` accepts a value stream and returns a List; collecting bytes uses
 `collect_bytes`. Neither scalar values nor nested lists are flattened implicitly.
 `sort_by`, JSON document decoding, and collection are materialization boundaries and
-enforce explicit limits. Initial `collect` limits are 1,000,000 items and a 64 MiB
+enforce explicit limits. Default `collect` limits are 1,000,000 items and a 64 MiB
 retained-representation budget; `collect_with` changes them. The budget counts each
 distinct backing object reachable from collected data once, including shared list
 storage, and uses known backing capacities and owned payload sizes rather than a JSON

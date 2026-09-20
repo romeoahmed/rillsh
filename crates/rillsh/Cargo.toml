@@ -3,7 +3,7 @@ name = "rillsh"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "A functional shell with structured data pipelines"
+description = "A functional shell with structured data pipelines and reusable job plans"
 
 [dependencies]
 bytes.workspace = true

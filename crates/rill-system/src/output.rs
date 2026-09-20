@@ -1,6 +1,6 @@
 //! One bounded transport chunk, advanced without blocking the reactor or losing partial writes.
 use std::{io, os::fd::OwnedFd};
-use tokio::io::unix::AsyncFd;
+use tokio::io::{Interest, unix::AsyncFd};
 
 pub struct Output {
     fd: Option<AsyncFd<OwnedFd>>,
@@ -37,21 +37,22 @@ impl Output {
             return Ok(false);
         };
         while self.offset < self.bytes.len() {
-            let mut ready = fd.writable().await?;
-            match ready.try_io(|fd| {
-                rustix::io::write(fd, &self.bytes[self.offset..]).map_err(io::Error::from)
-            }) {
-                Ok(Ok(0)) => return Err(io::ErrorKind::WriteZero.into()),
-                Ok(Ok(count)) => self.offset += count,
-                Ok(Err(error)) if error.kind() == io::ErrorKind::Interrupted => {}
-                Ok(Err(error)) if error.kind() == io::ErrorKind::BrokenPipe => {
+            match fd
+                .async_io(Interest::WRITABLE, |fd| {
+                    Ok(rustix::io::write(fd, &self.bytes[self.offset..])?)
+                })
+                .await
+            {
+                Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+                Ok(count) => self.offset += count,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
                     self.fd.take();
                     self.bytes = bytes::Bytes::new();
                     self.offset = 0;
                     return Ok(false);
                 }
-                Ok(Err(error)) => return Err(error),
-                Err(_) => {}
+                Err(error) => return Err(error),
             }
         }
         self.bytes = bytes::Bytes::new();
