@@ -27,11 +27,15 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --all -- --check
+        if: runner.os == 'Linux'
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       - run: cargo test --workspace --release --locked
       - run: cargo doc --workspace --no-deps --locked
+        if: runner.os == 'Linux'
         env:
           RUSTDOCFLAGS: -D warnings
       - run: cargo bench --workspace --no-run --locked
@@ -49,6 +53,9 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo install tree-sitter-cli --version 0.27.0 --locked
       - run: tree-sitter generate --js-runtime native
         working-directory: crates/tree-sitter-rill
@@ -70,6 +77,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fuzz -> target
+          # cargo-afl installs runtime data outside Cargo's cache; install both together.
+          cache-bin: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --manifest-path fuzz/Cargo.toml -- --check
       - run: cargo clippy --manifest-path fuzz/Cargo.toml --all-targets --locked -- -D warnings
       - run: cargo install cargo-afl --version 0.18.2 --locked
@@ -79,26 +89,32 @@ jobs:
       - name: Run bounded campaigns
         shell: bash
         run: |
-          mkdir -p fuzz/target/findings
+          mkdir -p "$RUNNER_TEMP/fuzz-findings"
           for corpus in fuzz/corpus/*; do
             target="${corpus##*/}"
-            cargo afl fuzz -i "$corpus" -o "fuzz/target/findings/$target" -V 30 -G 8192 -- "fuzz/target/debug/$target"
+            cargo afl fuzz -i "$corpus" -o "$RUNNER_TEMP/fuzz-findings/$target" -V 30 -G 8192 -- "fuzz/target/debug/$target"
           done
       - name: Reject saved failures
         shell: bash
         run: |
-          for finding in fuzz/target/findings/*/default/{crashes,hangs}/id*; do
+          for finding in "$RUNNER_TEMP"/fuzz-findings/*/default/{crashes,hangs}/id*; do
             if [[ -f "$finding" ]]; then
               echo "Fuzz failure: $finding"
               exit 1
             fi
           done
+      # AFL filenames contain colons, which artifact uploads reject outside a tarball.
       - name: Archive fuzz findings
-        id: archive
-        if: always() && hashFiles('fuzz/target/findings/**') != ''
-        run: tar -czf fuzz/target/fuzz-findings.tar.gz -C fuzz/target findings
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          if [[ -d "$RUNNER_TEMP/fuzz-findings" ]]; then
+            tar -czf "$RUNNER_TEMP/fuzz-findings.tar.gz" -C "$RUNNER_TEMP" fuzz-findings
+          fi
       - uses: actions/upload-artifact@v7
-        if: always() && steps.archive.outcome == 'success'
+        if: ${{ !cancelled() }}
         with:
-          path: fuzz/target/fuzz-findings.tar.gz
+          path: ${{ runner.temp }}/fuzz-findings.tar.gz
           archive: false
+          if-no-files-found: ignore
+          retention-days: 7

@@ -84,7 +84,11 @@ and personal paths or host-specific setup out of tracked files.
 
 ## CI
 
-CI checks pull requests and pushes to `main`, without duplicate feature-branch push
-checks. New runs cancel superseded work for the same PR or branch. Linux/macOS, grammar
-and fuzz jobs have separate gates; the native jobs also exercise installation outside
-the checkout. Release publishing is not configured.
+CI checks pull requests and pushes to `main`; newer runs cancel superseded work.
+Linux and macOS run Clippy, debug/release tests, benchmark builds and installation
+checks. Formatting and rustdoc run once on Linux. Grammar and fuzz jobs run independently.
+
+Caches stay separate by job and platform; only `main` updates them. Grammar caches its
+installed CLI, while fuzz installs AFL and its runtime together. Fuzz results stay outside
+build caches and upload as `fuzz-findings.tar.gz`, retained for seven days. Cancelled runs skip
+uploads. Release publishing is not configured.
