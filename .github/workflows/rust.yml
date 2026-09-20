@@ -79,6 +79,7 @@ jobs:
       - name: Run bounded campaigns
         shell: bash
         run: |
+          mkdir -p fuzz/target/findings
           for corpus in fuzz/corpus/*; do
             target="${corpus##*/}"
             cargo afl fuzz -i "$corpus" -o "fuzz/target/findings/$target" -V 30 -G 8192 -- "fuzz/target/debug/$target"

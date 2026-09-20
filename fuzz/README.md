@@ -33,6 +33,7 @@ Follow [cargo-afl](https://github.com/rust-fuzz/afl.rs) for platform prerequisit
 ```sh
 cargo install cargo-afl --locked
 cargo afl build --manifest-path fuzz/Cargo.toml --locked
+mkdir -p fuzz/target/findings
 cargo afl fuzz -i fuzz/corpus/syntax -o fuzz/target/findings/syntax -V 60 -G 8192 -- fuzz/target/debug/syntax
 ```
 
