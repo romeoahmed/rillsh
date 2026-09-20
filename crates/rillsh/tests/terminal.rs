@@ -803,7 +803,10 @@ fn canonical_input_cancels_whole_entries_and_diagnoses_incomplete_eof() -> io::R
     terminal.send(b"21 * 2\r")?;
     terminal.prompt_after(row)?;
     terminal.send(b"\xff\r")?;
-    terminal.until(|screen| screen.contents().contains("input must be UTF-8"))?;
+    terminal.until(|screen| {
+        screen.contents().contains("input must be UTF-8")
+            && screen.contents().trim_end().ends_with("rill>")
+    })?;
     terminal.send(b"\x04")?;
     terminal.wait_for_exit()?;
     assert!(!terminal.output.contains(&0x1b));
@@ -1046,7 +1049,9 @@ fn foreground_stop_retains_lexical_state_and_publishes_on_fg() -> io::Result<()>
         s.contents().lines().any(|line| line == "42") && s.contents().trim_end().ends_with("rill>")
     })?;
     terminal.send(b"saved + captured + interim\r")?;
-    terminal.until(|s| s.contents().lines().any(|line| line == "148"))?;
+    terminal.until(|s| {
+        s.contents().lines().any(|line| line == "148") && s.contents().trim_end().ends_with("rill>")
+    })?;
     terminal.send(b"\x04")?;
     terminal.wait_for_exit()
 }
@@ -1167,7 +1172,9 @@ fn repeated_stop_preserves_the_foreground_callers_remaining_expression() -> io::
         1
     );
     terminal.send(b"resumed_answer + 1\r")?;
-    terminal.until(|s| s.contents().lines().any(|line| line == "43"))?;
+    terminal.until(|s| {
+        s.contents().lines().any(|line| line == "43") && s.contents().trim_end().ends_with("rill>")
+    })?;
     terminal.send(b"\x04")?;
     terminal.wait_for_exit()
 }

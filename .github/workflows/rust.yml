@@ -93,9 +93,12 @@ jobs:
               exit 1
             fi
           done
+      - name: Archive fuzz findings
+        id: archive
+        if: always() && hashFiles('fuzz/target/findings/**') != ''
+        run: tar -czf fuzz/target/fuzz-findings.tar.gz -C fuzz/target findings
       - uses: actions/upload-artifact@v7
-        if: always()
+        if: always() && steps.archive.outcome == 'success'
         with:
-          name: fuzz-findings
-          path: fuzz/target/findings/
-          if-no-files-found: ignore
+          path: fuzz/target/fuzz-findings.tar.gz
+          archive: false
