@@ -46,7 +46,8 @@ impl<'gc> Work<'gc> {
                     bytes: Vec::new(),
                     limit: bytes,
                 },
-                tasks: vec![Emit::Value(input, 1, "$".into())],
+                tasks: vec![Emit::Value(input, 1)],
+                path: Vec::new(),
                 max_depth: depth,
             })),
             _ => Err(Error::type_error("unknown JSON operation")),
@@ -269,8 +270,8 @@ impl Write for Output {
 #[derive(Collect)]
 #[collect(no_drop)]
 enum Emit<'gc> {
-    Value(Value<'gc>, usize, String),
-    Children(Value<'gc>, usize, usize, String),
+    Value(Value<'gc>, usize),
+    Children(Value<'gc>, usize, usize),
 }
 #[derive(Collect)]
 #[collect(no_drop)]
@@ -278,6 +279,8 @@ pub struct Encoder<'gc> {
     #[collect(require_static)]
     output: Output,
     tasks: Vec<Emit<'gc>>,
+    // Ancestor containers keep field names rooted without copying or escaping them.
+    path: Vec<(Value<'gc>, usize)>,
     max_depth: usize,
 }
 impl<'gc> Encoder<'gc> {
@@ -295,11 +298,11 @@ impl<'gc> Encoder<'gc> {
             };
             *fuel -= 1;
             match task {
-                Emit::Value(value, depth, path) => {
+                Emit::Value(value, depth) => {
                     if depth > self.max_depth {
                         return Err(Error::new(
                             "LimitExceeded",
-                            format!("JSON depth limit exceeded at {path}"),
+                            format!("JSON depth limit exceeded at {}", self.path()),
                         ));
                     }
                     match value {
@@ -314,23 +317,22 @@ impl<'gc> Encoder<'gc> {
                             } else {
                                 b"{"
                             })?;
-                            self.tasks.push(Emit::Children(value, 0, depth, path));
+                            self.tasks.push(Emit::Children(value, 0, depth));
                         }
                         _ => {
                             return Err(Error::type_error(format!(
-                                "cannot encode {} at {path}",
-                                value.kind()
+                                "cannot encode {} at {}",
+                                value.kind(),
+                                self.path()
                             )));
                         }
                     }
                 }
-                Emit::Children(value, index, depth, path) => {
+                Emit::Children(value, index, depth) => {
+                    self.path.truncate(depth - 1);
                     // Keep only one child and its continuation, regardless of container width.
                     let child = match value {
-                        Value::List(items) => items
-                            .as_slice()
-                            .get(index)
-                            .map(|child| (*child, format!("{path}[{index}]"))),
+                        Value::List(items) => items.as_slice().get(index).copied(),
                         Value::Record(fields) => {
                             if let Some((name, child)) = fields.get_index(index) {
                                 if index != 0 {
@@ -338,22 +340,20 @@ impl<'gc> Encoder<'gc> {
                                 }
                                 scalar(&mut self.output, name)?;
                                 self.punctuation(b":")?;
-                                let key = serde_json::to_string(name)
-                                    .map_err(|error| decode_error(&error))?;
-                                Some((*child, format!("{path}[{key}]")))
+                                Some(*child)
                             } else {
                                 None
                             }
                         }
                         _ => unreachable!("JSON container cursor"),
                     };
-                    if let Some((child, child_path)) = child {
+                    if let Some(child) = child {
                         if index != 0 && matches!(value, Value::List(_)) {
                             self.punctuation(b",")?;
                         }
-                        self.tasks
-                            .push(Emit::Children(value, index + 1, depth, path));
-                        self.tasks.push(Emit::Value(child, depth + 1, child_path));
+                        self.path.push((value, index));
+                        self.tasks.push(Emit::Children(value, index + 1, depth));
+                        self.tasks.push(Emit::Value(child, depth + 1));
                     } else {
                         self.punctuation(if matches!(value, Value::List(_)) {
                             b"]"
@@ -365,6 +365,22 @@ impl<'gc> Encoder<'gc> {
             }
         }
         Ok(None)
+    }
+    fn path(&self) -> String {
+        use std::fmt::Write;
+        let mut path = String::from("$");
+        for &(container, index) in &self.path {
+            match container {
+                Value::List(_) => write!(path, "[{index}]").expect("String write"),
+                Value::Record(fields) => {
+                    let (name, _) = fields.get_index(index).expect("JSON field cursor");
+                    let key = serde_json::to_string(name).expect("String serialization");
+                    write!(path, "[{key}]").expect("String write");
+                }
+                _ => unreachable!("JSON path container"),
+            }
+        }
+        path
     }
     fn punctuation(&mut self, bytes: &[u8]) -> Result<(), Error> {
         self.output

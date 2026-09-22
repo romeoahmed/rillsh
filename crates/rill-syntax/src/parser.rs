@@ -546,7 +546,8 @@ fn functions(expression: P<'_, ExprId>) -> P<'_, Statement> {
         .then_ignore(token(Kind::Assign))
         .then_ignore(nl())
         .then(expression)
-        .map(|((name, parameters), body)| Function {
+        .map_with(|((name, parameters), body), extra| Function {
+            span: extra.span().into_range(),
             name,
             parameters,
             body,
@@ -625,7 +626,7 @@ fn grammar<'a>() -> P<'a, Vec<Statement>> {
         let expr = recursive(|expression| {
             let expr = expression.boxed();
             let statements = block.clone().boxed();
-            let plan = token(Kind::Job)
+            let plan = token(Kind::Plan)
                 .ignore_then(token(Kind::OpenBrace))
                 .then(nl())
                 .ignore_then(pipeline(expr.clone()))

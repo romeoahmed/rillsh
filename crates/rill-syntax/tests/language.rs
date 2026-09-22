@@ -45,7 +45,7 @@ fn complete_forms() {
         "let {a, ..rest} = {a: 1, b: 2}",
         "fn f a b = a + b",
         "match x of { [head, ..tail] => head, _ => 0 }",
-        "job { ^printf '%s' --flag /tmp a-b if | ^cat }",
+        "plan { ^printf '%s' --flag /tmp a-b if | ^cat }",
         "^printf '%s' $(f (g x)) ...$args",
         "^echo foo#bar # comment",
         "do { let f = { a b => a + b }; f 1 2 }",
@@ -56,6 +56,16 @@ fn complete_forms() {
             parse("test", source).err()
         );
     }
+}
+
+#[test]
+fn plan_is_an_expression_keyword_but_command_words_remain_literal() {
+    let module = parse("test", "plan { ^plan plan }").unwrap();
+    let Statement::Expression(id) = module.statements[0] else {
+        panic!("expected expression")
+    };
+    assert!(matches!(module.expression(id).kind, ExprKind::Plan(_)));
+    assert!(parse("test", "let plan = 1").is_err());
 }
 
 #[test]
@@ -111,7 +121,7 @@ fn command_words_remain_distinct_and_redirections_are_ordered() {
         "^echo 2>&1 >file",
         "^echo >file 2>&1",
         "^echo --flag /tmp a-b if foo#bar",
-        "^echo $(job { ^cat })",
+        "^echo $(plan { ^cat })",
     ] {
         assert!(
             parse("test", source).is_ok(),
@@ -157,7 +167,7 @@ fn incomplete_entries_can_be_extended() {
         "{x y",
         "[1,",
         "^cat |",
-        "job { ^cat",
+        "plan { ^cat",
         "rec { loop n =>",
         "if true then 1 else",
         "\"unterminated",

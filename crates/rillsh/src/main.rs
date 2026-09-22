@@ -7,7 +7,7 @@ use clap::{Parser, ValueEnum};
 use rill_editor::profile::ColorChoice;
 use std::{
     ffi::OsString,
-    io::{self, IsTerminal, Read},
+    io::{self, IsTerminal},
     os::unix::ffi::OsStrExt,
     path::PathBuf,
     process::ExitCode,
@@ -34,6 +34,8 @@ struct Options {
     /// Evaluate source instead of reading a file or standard input.
     #[arg(short = 'c', conflicts_with_all = ["file", "interactive"])]
     command: Option<String>,
+    #[command(flatten)]
+    inspection: Inspection,
     /// Read interactive entries from the controlling terminal.
     #[arg(short = 'i', conflicts_with = "file")]
     interactive: bool,
@@ -50,6 +52,16 @@ struct Options {
     file: Option<PathBuf>,
     #[arg(trailing_var_arg = true, requires = "file", allow_hyphen_values = true)]
     arguments: Vec<OsString>,
+}
+/// Source-only operations never create a runtime or session.
+#[derive(clap::Args)]
+struct Inspection {
+    /// Validate syntax without evaluating code or loading imports.
+    #[arg(long, conflicts_with_all = ["interactive", "config", "format", "arguments"])]
+    check: bool,
+    /// Print normalized source without evaluating it.
+    #[arg(long, conflicts_with_all = ["interactive", "config", "arguments"])]
+    format: bool,
 }
 mod completion;
 fn main() -> ExitCode {
@@ -91,6 +103,9 @@ fn main() -> ExitCode {
         _ => {}
     }
     let options = Options::parse();
+    if options.inspection.check || options.inspection.format {
+        return ExitCode::from(inspect_source(&options));
+    }
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -208,6 +223,46 @@ async fn run(options: Options) -> u8 {
     }
     code
 }
+fn inspect_source(options: &Options) -> u8 {
+    let (name, source) = match source(options) {
+        Ok(input) => input,
+        Err(error) => {
+            diagnostic::message(error);
+            return 1;
+        }
+    };
+    let result = if options.inspection.format {
+        rill_syntax::format::format(&source).map(Some)
+    } else {
+        rill_syntax::parse(&name, &source).map(|_| None)
+    };
+    match result {
+        Ok(Some(text)) => {
+            use std::io::Write;
+            match io::stdout().lock().write_all(text.as_bytes()) {
+                Ok(()) => 0,
+                Err(error) => {
+                    diagnostic::message(error);
+                    1
+                }
+            }
+        }
+        Ok(None) => 0,
+        Err(errors) => {
+            for error in errors {
+                diagnostic(
+                    &name,
+                    &source,
+                    error.span,
+                    "ParseError",
+                    &error.message,
+                    rill_editor::profile::ColorDepth::Plain,
+                );
+            }
+            2
+        }
+    }
+}
 fn source(options: &Options) -> io::Result<(String, String)> {
     if let Some(source) = &options.command {
         return Ok(("<command>".into(), source.clone()));
@@ -215,17 +270,8 @@ fn source(options: &Options) -> io::Result<(String, String)> {
     if let Some(path) = &options.file {
         return Ok((path.to_string_lossy().into_owned(), read_source_file(path)?));
     }
-    let mut source = String::new();
-    io::stdin()
-        .take(16 * 1024 * 1024 + 1)
-        .read_to_string(&mut source)?;
-    if source.len() > 16 * 1024 * 1024 {
-        return Err(io::Error::new(
-            io::ErrorKind::FileTooLarge,
-            "script exceeds the source byte limit",
-        ));
-    }
-    Ok(("<stdin>".into(), source))
+    rill_system::source::read_utf8(io::stdin(), 16 * 1024 * 1024)
+        .map(|source| ("<stdin>".into(), source))
 }
 fn read_source_file(path: &std::path::Path) -> io::Result<String> {
     rill_system::source::Directory::open(std::path::Path::new("."))?
@@ -253,6 +299,7 @@ async fn interactive(session: &mut session::Session, options: &Options) -> u8 {
                     options.color,
                     false,
                     path.parent(),
+                    None,
                 )
                 .await;
             }
@@ -268,12 +315,27 @@ async fn interactive(session: &mut session::Session, options: &Options) -> u8 {
         let signal = input.read(session, options.color).await;
         match signal {
             Ok(rill_editor::Signal::Success(source)) => {
-                submit(session, "<input>", &source, options.color, true, None).await;
+                let parsed = input.take_module(&source);
+                let (status, syntax_error) = submit(
+                    session,
+                    "<input>",
+                    &source,
+                    options.color,
+                    true,
+                    None,
+                    parsed,
+                )
+                .await;
+                input.status = status;
+                if syntax_error {
+                    input.restore(source);
+                }
             }
             Ok(rill_editor::Signal::CtrlD) => match session.can_exit() {
                 Ok(()) => return 0,
                 Err(error) => diagnostic::message(error),
             },
+            Ok(rill_editor::Signal::CtrlC) => input.status = 130,
             Ok(_) => {}
             Err(error)
                 if matches!(
@@ -301,8 +363,9 @@ async fn submit(
     color: Color,
     display: bool,
     directory: Option<&std::path::Path>,
-) {
-    let module = match rill_syntax::parse(name, source) {
+    parsed: Option<rill_syntax::ast::Module>,
+) -> (u8, bool) {
+    let module = match parsed.map_or_else(|| rill_syntax::parse(name, source), Ok) {
         Ok(module) => module,
         Err(errors) => {
             for error in errors {
@@ -315,7 +378,7 @@ async fn submit(
                     session.color(color, io::stderr().is_terminal()),
                 );
             }
-            return;
+            return (2, true);
         }
     };
     match session.evaluate(&module, directory, display).await {
@@ -325,11 +388,20 @@ async fn submit(
             }) {
                 eprintln!("{value}");
             }
+            (0, false)
         }
-        Ok(()) => {}
-        Err(error) if error.is_cancelled() && error.notes.is_empty() => {}
+        Ok(()) => (0, false),
+        Err(error) if error.is_cancelled() && error.notes.is_empty() => (130, false),
         Err(error) => {
             report_error(&error, session.color(color, io::stderr().is_terminal()));
+            (
+                if error.is_cancelled() {
+                    130
+                } else {
+                    error.exit_status.unwrap_or(1)
+                },
+                false,
+            )
         }
     }
 }

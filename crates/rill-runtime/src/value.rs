@@ -90,8 +90,117 @@ pub struct Closure<'gc> {
     pub(crate) parameter: usize,
     pub(crate) constants: crate::code::Constants<'gc>,
     pub(crate) environment: Gc<'gc, RefLock<crate::scope::Scope<'gc>>>,
+    pub(crate) arguments: Option<Gc<'gc, Arguments<'gc>>>,
 }
 
+/// Partial applications share captures and earlier bindings instead of copying frame slots.
+#[derive(Collect)]
+#[collect(no_drop)]
+pub(crate) struct Arguments<'gc> {
+    pub previous: Option<Gc<'gc, Self>>,
+    pub bindings: Bindings<'gc>,
+}
+#[derive(Collect)]
+#[collect(no_drop)]
+pub(crate) enum Bindings<'gc> {
+    One((usize, Value<'gc>)),
+    Many(Vec<(usize, Value<'gc>)>),
+}
+impl<'gc> Bindings<'gc> {
+    pub fn as_slice(&self) -> &[(usize, Value<'gc>)] {
+        match self {
+            Self::One(value) => std::slice::from_ref(value),
+            Self::Many(values) => values,
+        }
+    }
+    pub const fn capacity(&self) -> usize {
+        match self {
+            Self::One(_) => 0,
+            Self::Many(values) => values.capacity(),
+        }
+    }
+    pub fn iter(&self) -> std::slice::Iter<'_, (usize, Value<'gc>)> {
+        self.as_slice().iter()
+    }
+}
+impl<'gc> Closure<'gc> {
+    pub(crate) fn bind(
+        &self,
+        mc: &Mutation<'gc>,
+        argument: Value<'gc>,
+    ) -> Result<Bindings<'gc>, Error> {
+        use rill_syntax::ast::Pattern;
+        let environment = self.environment.borrow();
+        let slot = |name: &str| {
+            environment
+                .layout
+                .get_index_of(name)
+                .expect("parameter slot")
+        };
+        match &self.code.parameters[self.parameter] {
+            Pattern::Bind(name) => return Ok(Bindings::One((slot(name), argument))),
+            Pattern::Ignore => return Ok(Bindings::Many(Vec::new())),
+            _ => {}
+        }
+        let resolve = |name: &str| {
+            let slot = environment.layout.get_index_of(name);
+            let mut arguments = self.arguments;
+            while let Some(bound) = arguments {
+                if let Some((_, value)) = bound
+                    .bindings
+                    .iter()
+                    .find(|(index, _)| Some(*index) == slot)
+                {
+                    return Ok(*value);
+                }
+                arguments = bound.previous;
+            }
+            environment
+                .get(name)
+                .copied()
+                .ok_or_else(|| Error::new("NameError", format!("unknown constructor '{name}'")))
+        };
+        let bindings = crate::pattern::bind(
+            mc,
+            &self.code.parameters[self.parameter],
+            argument,
+            &resolve,
+        )?;
+        Ok(Bindings::Many(
+            bindings
+                .into_iter()
+                .map(|(name, value)| (slot(name), value))
+                .collect(),
+        ))
+    }
+    pub(crate) fn frame(&self, bindings: &Bindings<'gc>) -> crate::scope::Scope<'gc> {
+        let mut environment = self.environment.borrow().clone();
+        if let Some(last) = self.arguments {
+            if last.previous.is_none() {
+                for &(slot, value) in last.bindings.as_slice() {
+                    environment.slots[slot] = Some(value);
+                }
+            } else {
+                let mut ordered = Vec::with_capacity(self.parameter);
+                let mut arguments = Some(last);
+                while let Some(bound) = arguments {
+                    ordered.push(bound);
+                    arguments = bound.previous;
+                }
+                // Later parameters may shadow earlier ones; replay in application order.
+                for bound in ordered.into_iter().rev() {
+                    for &(slot, value) in bound.bindings.as_slice() {
+                        environment.slots[slot] = Some(value);
+                    }
+                }
+            }
+        }
+        for &(slot, value) in bindings.as_slice() {
+            environment.slots[slot] = Some(value);
+        }
+        environment
+    }
+}
 /// Nominal constructor identity is its unique traced descriptor, never its spelling.
 #[derive(Collect)]
 #[collect(require_static)]
@@ -108,6 +217,29 @@ pub struct Adt<'gc> {
 }
 
 impl<'gc> Value<'gc> {
+    /// Documentation follows a function through aliases and partial application.
+    #[must_use]
+    pub fn documentation(self) -> Option<&'gc str> {
+        if let Self::Function(function) = self {
+            Gc::as_ref(function).code.documentation.as_deref()
+        } else {
+            None
+        }
+    }
+    /// Describe a value without invoking it or consuming a resource.
+    #[must_use]
+    pub fn help(self) -> String {
+        let signature = self.signature().map_or_else(
+            || self.kind().into(),
+            |parameters| format!("Function: {parameters}"),
+        );
+        if let Some(documentation) = self.documentation() {
+            format!("{signature}\n{documentation}")
+        } else {
+            signature
+        }
+    }
+
     /// Describe remaining parameters without calling a function or retaining its environment.
     #[must_use]
     pub fn signature(self) -> Option<String> {
@@ -246,14 +378,23 @@ impl<'gc> Value<'gc> {
         self.within_scope(None)
     }
     pub(crate) fn within_scope(self, owner: Option<u64>) -> Result<(), Error> {
-        let mut pending = vec![self];
+        Self::check_scope([self], owner)
+    }
+    pub(crate) fn persistent_all(values: impl IntoIterator<Item = Self>) -> Result<(), Error> {
+        Self::check_scope(values, None)
+    }
+    fn check_scope(
+        values: impl IntoIterator<Item = Self>,
+        owner: Option<u64>,
+    ) -> Result<(), Error> {
+        let mut pending: Vec<_> = values.into_iter().collect();
         let mut seen = std::collections::HashSet::new();
         while let Some(value) = pending.pop() {
             match value {
                 Self::Stream(token) if Some(token.borrow().owner) != owner => {
                     return Err(Error::new(
                         "ResourceEscape",
-                        "a scoped stream cannot escape its statement",
+                        "a scoped stream cannot escape its statement; consume it inside do, collect its data, or retain a source function",
                     ));
                 }
                 Self::List(values) => {
@@ -267,8 +408,18 @@ impl<'gc> Value<'gc> {
                     }
                 }
                 Self::Adt(value) => pending.push(Self::Record(value.fields)),
-                Self::Function(closure) if seen.insert(Gc::as_ptr(closure.environment).addr()) => {
-                    pending.extend(closure.environment.borrow().values().copied());
+                Self::Function(closure) => {
+                    if seen.insert(Gc::as_ptr(closure.environment).addr()) {
+                        pending.extend(closure.environment.borrow().values().copied());
+                    }
+                    let mut arguments = closure.arguments;
+                    while let Some(bound) = arguments {
+                        if !seen.insert(Gc::as_ptr(bound).addr()) {
+                            break;
+                        }
+                        pending.extend(bound.bindings.iter().map(|(_, value)| *value));
+                        arguments = bound.previous;
+                    }
                 }
                 _ => {}
             }
@@ -315,11 +466,8 @@ pub fn summary(value: Value<'_>) -> Option<String> {
         Value::Float(value) => value.to_string(),
         Value::String(value) => crate::presentation::preview(format_args!("{:?}", value.as_str())),
         Value::Path(value) => crate::presentation::preview(format_args!("{:?}", value.0)),
-        Value::Bytes(value) => format!("<Bytes: {} bytes>", value.0.len()),
-        Value::List(value) => format!("<List: {} items>", value.as_slice().len()),
-        Value::Record(value) => format!("<Record: {} fields>", value.len()),
-        Value::Adt(value) => {
-            crate::presentation::preview(format_args!("<{}>", value.descriptor.name))
+        Value::Bytes(_) | Value::List(_) | Value::Record(_) | Value::Adt(_) => {
+            crate::presentation::compact(value)
         }
         _ => format!("<{}>", value.kind()),
     })

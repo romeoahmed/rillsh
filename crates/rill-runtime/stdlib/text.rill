@@ -1,3 +1,11 @@
+fn contains needle value = __pure ["contains", needle, value]
+
+## Replace every literal String occurrence; no regular-expression interpretation.
+fn replace pattern replacement value = __pure ["replace", pattern, replacement, value]
+
+## Return the exact native bytes of a Path.
+fn path_bytes value = __pure ["path_bytes", value]
+
 fn byte_length value = __pure ["byte_length", value]
 
 fn scalars value = __pure ["scalars", value]
@@ -16,6 +24,11 @@ fn display_path value = __data ["display_path", value]
 
 let lines = lines_with {}
 
+## Split Bytes chunks on NUL without UTF-8 decoding; bound each record.
+fn split_nul_with options input = __stream ["split_nul", options, input]
+
+let split_nul = split_nul_with {}
+
 fn split delimiter value = __pure ["split", delimiter, value]
 
 fn join separator values = __pure ["join", separator, values]
@@ -27,6 +40,9 @@ fn parse_int value = __pure ["parse_int", value]
 fn parse_float value = __pure ["parse_float", value]
 
 export {
+  contains,
+  replace,
+  path_bytes,
   byte_length,
   scalars,
   encode_utf8,
@@ -35,6 +51,8 @@ export {
   ends_with,
   lines,
   lines_with,
+  split_nul,
+  split_nul_with,
   display_path,
   split,
   join,

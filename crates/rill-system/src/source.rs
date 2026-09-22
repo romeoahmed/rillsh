@@ -86,7 +86,7 @@ impl Directory {
         let name = path.file_name().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "module path must name a regular file",
+                "source path must name a regular file",
             )
         })?;
         let parent = path
@@ -105,7 +105,7 @@ impl Directory {
         if !metadata.is_file() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "module source must be a regular file",
+                "source must be a regular file",
             ));
         }
         Ok(SourceFile {
@@ -139,20 +139,27 @@ impl SourceFile {
     /// # Errors
     /// Reports invalid UTF-8, I/O failure, or a source exceeding `limit` bytes.
     pub fn read(&mut self, limit: usize) -> io::Result<String> {
-        // Check the byte limit before UTF-8: the bounded read may end inside a scalar.
-        let mut bytes = Vec::new();
-        self.file
-            .by_ref()
-            .take((limit as u64).saturating_add(1))
-            .read_to_end(&mut bytes)?;
-        if bytes.len() > limit {
-            return Err(io::Error::new(
-                io::ErrorKind::FileTooLarge,
-                "module exceeds the source byte limit",
-            ));
-        }
-        String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+        read_utf8(&mut self.file, limit)
     }
+}
+
+/// Read bounded UTF-8 input, checking the byte limit before decoding.
+///
+/// # Errors
+/// Reports I/O failure, oversized input or invalid UTF-8. An oversized input is always
+/// `FileTooLarge`, even when the bounded read ends inside a multibyte scalar.
+pub fn read_utf8(input: impl Read, limit: usize) -> io::Result<String> {
+    let mut bytes = Vec::new();
+    input
+        .take((limit as u64).saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        return Err(io::Error::new(
+            io::ErrorKind::FileTooLarge,
+            format!("input exceeds the {limit}-byte limit"),
+        ));
+    }
+    String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 /// Resolve a physical directory name without changing process-global cwd.
@@ -178,4 +185,25 @@ pub fn directory_path(fd: impl AsFd) -> io::Result<PathBuf> {
         )?
     };
     Ok(PathBuf::from(OsString::from_vec(path.into_bytes())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn byte_limits_precede_utf8_validation_without_rejecting_exact_limits() {
+        assert_eq!(read_utf8(b"".as_slice(), 0).unwrap(), "");
+        assert_eq!(read_utf8("\u{e9}".as_bytes(), 2).unwrap(), "\u{e9}");
+        for (bytes, limit) in [(b"x".as_slice(), 0), ("\u{e9}\u{e9}".as_bytes(), 2)] {
+            assert_eq!(
+                read_utf8(bytes, limit).unwrap_err().kind(),
+                io::ErrorKind::FileTooLarge
+            );
+        }
+        assert_eq!(
+            read_utf8(b"\xff".as_slice(), 1).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
 }

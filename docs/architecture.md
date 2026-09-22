@@ -38,7 +38,9 @@ owned descriptors. Downstream layers do not repeat that validation.
 Lexing fixes command/expression contexts before parser backtracking. Lowering resolves
 local reads to scope/slot indices, records constants and selects closure captures.
 Dispatch borrows immutable code; retained operands acquire ownership. Partial
-applications share layouts, every callable uses the unary protocol, and tail calls
+applications share captured environments and persistent argument bindings; complete
+application allocates the execution slots once. Simple bindings remain inline. Pattern
+validation still occurs at each unary application, and tail calls
 replace frames rather than growing the Rust stack.
 
 `gc-arena` traces values, environments and active or parked VM state. Derived tracing
@@ -56,10 +58,10 @@ work state batches edges and scalar buffers; union-find avoids repeatedly unfold
 shared graphs.
 
 JSON conversion, collection construction and stable sorting also retain traced state
-and spend VM fuel. JSON keeps offsets into input across collection and one encoding
-cursor per nesting level. Sorting uses the standard sorter for short runs and checkpoints
-stable merges. Scalar primitives and retained-value accounting remain synchronous;
-instruction fuel does not bound hashing, allocation or wall time.
+and spend VM fuel. JSON keeps input offsets and traced encoding cursors across collection,
+formatting error paths only on failure. Sorting uses the standard sorter for short runs
+and checkpoints stable merges. Scalar primitives and retained-value accounting remain
+synchronous; instruction fuel does not bound hashing, allocation or wall time.
 
 Entry bindings publish transactionally; prior external effects are not rolled back.
 Parked VMs retain lexical snapshots. Publication merges new declarations into current
@@ -107,14 +109,18 @@ only after reaching the inherited descriptor; partial IPC progress survives susp
 Cancellation kills and reaps the helper. This avoids changing shared descriptor flags
 or trapping a blocking thread behind pipe backpressure. Writers move with parked
 evaluations and close before their owner finishes. Relayed terminal stderr uses the
-same protocol. Explicit output remains byte-exact.
+same protocol. Explicit output remains byte-exact. Regular-file sinks use joined blocking workers;
+started writes finish before suspension or closure. Byte sinks do not promise atomic
+replacement or a hard cancellation deadline for filesystem I/O.
 
 ## Streams, cleanup and suspension
 
 Lazy nodes retain transforms, source state and demand. Consumers keep explicit actions
 across callbacks and host replies. Producer callbacks run in traced child scopes;
 cleanup continues after failure and attaches release errors to the original error.
-GC never releases OS resources or invokes language cleanup.
+GC never releases OS resources or invokes language cleanup. Sequential `flat_map`
+registers each dynamic inner graph, retires its callbacks and resources before advancing,
+and keeps cutoff nodes reachable until cleanup finishes.
 
 `zip` holds one tuple and pulls left to right. `merge` polls external readiness
 round-robin while preserving per-input order. Each language callback retains a VM stack
@@ -138,7 +144,13 @@ ordinary process job.
 Reedline owns editing and repainting; the execution parser owns completeness. Completion
 never evaluates code. Filesystem completion uses one supervised helper with bounded
 results and a deadline; replies are tied to buffer/cursor origins and discarded when
-superseded. Insertion denotes exactly one Rill value or command argument.
+superseded. Completed insertion denotes exactly one Rill value or command argument;
+a directory can instead leave an editable quoted prefix. Successful validation transfers
+the parsed AST to submission when the source matches exactly, avoiding a second parse.
+Partial lexical tokens retain highlighting before an unfinished or invalid token.
+Local completion reuses its lexical query and resolves AST scope at a placeholder
+expression; delimiter repair is only a fallback for unfinished input. Descriptions
+leave the runtime as bounded, escaped display text.
 
 Plain input uses a cancellable reader and the same parser. Cancellation ends the display
 line before a fresh prompt; editing suspension restores modes and retains the buffer.

@@ -3,7 +3,7 @@
 A functional shell with structured data pipelines and reusable job plans
 
 ```rill
-stream job { ^printf "%s\n" "3" "1" "2" }
+stream plan { ^printf "%s\n" "3" "1" "2" }
   |> lines
   |> map parse_int
   |> sort_by identity
@@ -45,6 +45,8 @@ Run a command or script from your existing shell:
 ```sh
 target/release/rillsh -c '^printf "%s\n" "hello"'
 target/release/rillsh example.rill argument
+target/release/rillsh --check example.rill
+target/release/rillsh --format example.rill
 target/release/rillsh --help
 ```
 
@@ -66,31 +68,39 @@ Function calls use whitespace. Put configuration first to reuse a partial applic
 ```rill
 fn larger_than limit value = value > limit
 let total = [128, 1024, 4096] |> filter (larger_than 1000) |> sum
-print (text total + " bytes")
+print (string total + " bytes")
 ```
 
 This prints `5120 bytes`. Anonymous functions use `{ value => expression }`; patterns
 work in function parameters, `let` and `match`.
 
-A `job` describes work without launching it. Every launch gets a fresh job and a snapshot
+A `plan` describes work without launching it. Every launch gets a fresh job and a snapshot
 of the current environment:
 
 ```rill
-let greeting = job { ^printf "%s\n" "hello" }
+let greeting = plan { ^printf "%s\n" "hello" }
 run greeting
 let output = capture greeting
 write_bytes output.stdout
 check output.report
 ```
 
-Use `execute plan` for foreground I/O with a returned report. Use `start plan` and
+Use `execute pipeline` for foreground I/O with a returned report. Use `start pipeline` and
 `wait handle` for background work; `fg`, `bg` and `cancel` control jobs. Scripts must
 wait for, foreground or cancel their background jobs before ending.
 
-At the prompt, incomplete input continues on the next line. Leave `|` or `|>` at the
-end of a line to request continuation. Ctrl+C cancels an entry or foreground execution;
-Ctrl+D on empty input exits after active work has finished or been cancelled. See
-[interaction](docs/interaction.md) for shortcuts, startup configuration and history.
+At the prompt, leave `|` or `|>` at line end to continue a pipeline. Enter submits
+complete input; Alt+Enter inserts a newline. Ctrl+C cancels input or foreground work.
+Ctrl+D on empty input requests exit and refuses while jobs remain live or stopped.
+Ctrl+O opens the buffer in VISUAL or EDITOR; `help map` describes a function without
+calling it. See [interaction](docs/interaction.md) for shortcuts, startup and history.
+
+`read_file` and `write_file` connect byte pipelines to files; `flat_map` composes
+sequential value streams.
+
+Common operations are available directly. Module namespaces expose specialized helpers,
+such as `seq.collect_with {max_items: 100}` and `text.byte_length`. `string` converts
+scalars to String; `split_nul` decodes byte streams with NUL-delimited records.
 
 ## Develop and contribute
 

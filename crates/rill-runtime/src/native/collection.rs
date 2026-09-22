@@ -5,6 +5,7 @@ use crate::{
     value::{Record, Value},
 };
 use gc_arena::{Collect, Mutation};
+use indexmap::map::raw_entry_v1::{RawEntryApiV1, RawEntryMut};
 
 #[derive(Collect)]
 #[collect(no_drop)]
@@ -16,6 +17,7 @@ pub struct Work<'gc> {
     values: Vec<Value<'gc>>,
     fields: Record<'gc>,
     text: String,
+    groups: indexmap::IndexMap<String, Vec<Value<'gc>>>,
 }
 #[derive(Collect, Clone, Copy)]
 #[collect(require_static)]
@@ -29,12 +31,24 @@ enum Kind {
     Scalars,
     Join,
     Split,
+    Group,
+    Count,
+    Unique,
 }
 impl<'gc> Work<'gc> {
     pub fn new(argument: Value<'gc>) -> Result<Option<Self>, Error> {
         let args = super::items(argument)?;
         let (kind, input, other) = match args.as_slice() {
             [Value::String(name), args @ ..] => match (name.as_str(), args) {
+                ("group" | "count_by" | "unique", [input @ Value::List(_)]) => (
+                    match name.as_str() {
+                        "group" => Kind::Group,
+                        "count_by" => Kind::Count,
+                        _ => Kind::Unique,
+                    },
+                    *input,
+                    None,
+                ),
                 ("reverse", [input @ Value::List(_)]) => (Kind::Reverse, *input, None),
                 ("concat", [a @ Value::List(_), b @ Value::List(_)]) => {
                     (Kind::Concat, *a, Some(*b))
@@ -72,6 +86,7 @@ impl<'gc> Work<'gc> {
             values: Vec::new(),
             fields: Record::new(),
             text: String::new(),
+            groups: indexmap::IndexMap::new(),
         }))
     }
     pub fn advance(
@@ -94,6 +109,7 @@ impl<'gc> Work<'gc> {
                         _ => return Err(Error::type_error("invalid list accumulation chain")),
                     }
                 }
+                Kind::Group | Kind::Count | Kind::Unique => self.aggregate_item(mc)?,
                 Kind::Scalars | Kind::Split => self.string_item(mc),
                 Kind::Entries => {
                     let Value::Record(fields) = self.input else {
@@ -112,7 +128,7 @@ impl<'gc> Work<'gc> {
             };
             if done {
                 let value = match self.kind {
-                    Kind::Record => {
+                    Kind::Record | Kind::Group | Kind::Count => {
                         Value::Record(crate::heap::record(mc, std::mem::take(&mut self.fields)))
                     }
                     Kind::Join => Value::string(mc, std::mem::take(&mut self.text)),
@@ -130,6 +146,58 @@ impl<'gc> Work<'gc> {
             }
         }
         Ok(None)
+    }
+    fn aggregate_item(&mut self, mc: &Mutation<'gc>) -> Result<bool, Error> {
+        let Value::List(input) = self.input else {
+            unreachable!("group input")
+        };
+        if let Some(pair) = input.as_slice().get(self.index) {
+            let pair = super::items(*pair)?;
+            let [Value::String(key), value] = pair.as_slice() else {
+                return Err(Error::type_error("aggregation key requires String"));
+            };
+            match self.kind {
+                Kind::Group => self
+                    .groups
+                    .raw_entry_mut_v1()
+                    .from_key(key.as_str())
+                    .or_insert_with(|| (key.as_str().into(), Vec::new()))
+                    .1
+                    .push(*value),
+                Kind::Unique => {
+                    if let RawEntryMut::Vacant(entry) =
+                        self.fields.raw_entry_mut_v1().from_key(key.as_str())
+                    {
+                        entry.insert(key.as_str().into(), Value::Unit);
+                        self.values.push(*value);
+                    }
+                }
+                Kind::Count => {
+                    let (_, count) = self
+                        .fields
+                        .raw_entry_mut_v1()
+                        .from_key(key.as_str())
+                        .or_insert_with(|| (key.as_str().into(), Value::Int(0)));
+                    let Value::Int(count) = count else {
+                        unreachable!("count accumulator")
+                    };
+                    *count = count.checked_add(1).ok_or_else(Error::arithmetic)?;
+                }
+                _ => unreachable!("aggregation"),
+            }
+            self.index += 1;
+            Ok(false)
+        } else if let Some((key, values)) = self
+            .groups
+            .get_index_mut(self.index - input.as_slice().len())
+        {
+            self.fields
+                .insert(key.clone(), list(mc, std::mem::take(values)));
+            self.index += 1;
+            Ok(false)
+        } else {
+            Ok(true)
+        }
     }
     fn list_item(&mut self) -> Result<bool, Error> {
         let Value::List(items) = self.input else {

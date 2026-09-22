@@ -12,7 +12,14 @@ pub struct Error {
     pub origin: Option<Rc<Source>>,
     pub exit_status: Option<u8>,
     pub notes: Vec<String>,
+    pub details: Box<std::collections::BTreeMap<String, Detail>>,
     control: Option<Control>,
+}
+/// Structured failure facts; text is descriptive, integers retain their numeric meaning.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Detail {
+    Text(String),
+    Int(i64),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Control {
@@ -30,6 +37,7 @@ impl Error {
             origin: None,
             exit_status: None,
             notes: Vec::new(),
+            details: Box::default(),
             control: None,
         }
     }
@@ -83,6 +91,10 @@ impl From<rill_system::resources::SourceError> for Error {
                     format!("stage {stage} failed with status {code}"),
                 );
                 error.exit_status = Some(code);
+                error.details.insert(
+                    "stage".into(),
+                    Detail::Int(i64::try_from(stage).unwrap_or(i64::MAX)),
+                );
                 error
             }
             SourceError::Stopped => Self::new(
@@ -107,6 +119,16 @@ impl Error {
             std::io::ErrorKind::ResourceBusy => "ResourceBusy",
             _ => "IOError",
         };
-        Self::new(kind, error.to_string())
+        let mut result = Self::new(kind, error.to_string());
+        result.details.insert(
+            "io_kind".into(),
+            Detail::Text(format!("{:?}", error.kind())),
+        );
+        if let Some(code) = error.raw_os_error() {
+            result
+                .details
+                .insert("os_code".into(), Detail::Int(i64::from(code)));
+        }
+        result
     }
 }

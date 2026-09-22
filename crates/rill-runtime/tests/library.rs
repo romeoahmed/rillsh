@@ -5,6 +5,29 @@ use rill_runtime::{Engine, Progress, value::Value};
 use support::run;
 
 #[test]
+fn invalid_environment_names_fail_before_host_effects() {
+    let mut engine = Engine::standard().unwrap();
+    for name in [r#""""#, r#""a=b""#, r#""a\u{0}b""#, "bytes [65]", "42"] {
+        for source in [
+            format!("get_env ({name})"),
+            format!("set_env ({name}) \"value\""),
+            format!("unset_env ({name})"),
+            format!("without_env [{name}] (plan {{ ^true }})"),
+        ] {
+            assert_eq!(
+                run(&mut engine, &source).unwrap_err().kind,
+                "TypeError",
+                "{source}"
+            );
+        }
+    }
+    for name in [r#""""#, r#""a=b""#, r#""a\u{0}b""#] {
+        let source = format!("with_env {{{name}: \"value\"}} (plan {{ ^true }})");
+        assert_eq!(run(&mut engine, &source).unwrap_err().kind, "TypeError");
+    }
+}
+
+#[test]
 fn bundled_composition_and_list_callbacks_use_the_shared_call_protocol() {
     let mut engine = Engine::standard().unwrap();
     run(
@@ -41,6 +64,80 @@ fn option_and_result_modules_share_nominal_descriptors() {
     let mut engine = Engine::standard().unwrap();
     run(&mut engine, "import \"std:option\" as option; import \"std:result\" as result; let a = some 20 |> option.map (add 1) |> option.unwrap_or 0; let b = ok 20 |> result.map (add 1) |> result.unwrap_or 0; a + b").unwrap();
     assert!(engine.inspect(|v| matches!(v, Value::Int(42))));
+}
+
+#[test]
+fn bind_preserves_container_identity_and_skips_absence_or_failure() {
+    let mut engine = Engine::standard().unwrap();
+    run(
+        &mut engine,
+        r#"
+      import "std:option" as option
+      import "std:result" as result
+      fn unused _ = raise (error "Unexpected" "callback must be skipped")
+      let failure = err "original"
+      ((option.bind unused Option.None == Option.None)
+        and (result.bind unused failure == failure)
+        and (option.bind { x => some (x + 1) } (some 2) == some 3)
+        and (result.bind { x => ok (x + 1) } (ok 2) == ok 3)
+        and (option.bind { _ => Option.None } (some 2) == Option.None)
+        and (result.bind { _ => failure } (ok 2) == failure))
+    "#,
+    )
+    .unwrap();
+    assert!(engine.inspect(|value| matches!(value, Value::Bool(true))));
+    for source in [
+        "option.bind identity (some 1)",
+        "result.bind identity (ok 1)",
+        "option.bind ok (some 1)",
+        "result.bind some (ok 1)",
+        "option.bind { x => {value: x} } (some 1)",
+        "enum Other {Some {value}}; option.bind { x => Other.Some {value: x} } (some 1)",
+    ] {
+        assert_eq!(
+            run(&mut engine, source).unwrap_err().kind,
+            "TypeError",
+            "{source}"
+        );
+    }
+    run(&mut engine, "option.map some (some 1) == some (some 1)").unwrap();
+    assert!(engine.inspect(|value| matches!(value, Value::Bool(true))));
+}
+
+#[test]
+fn prelude_namespaces_share_exports_and_keep_specialized_operations_qualified() {
+    let mut engine = Engine::standard().unwrap();
+    run(
+        &mut engine,
+        r#"
+      import "std:seq" as sequence
+      import "std:text" as strings
+      let data = items [1, 2] |> seq.collect_with {max_items: 2}
+      ((sequence.CloseReason.Closed == seq.CloseReason.Closed)
+        and (data == [1, 2])
+        and (string 42 == "42")
+        and (core.string true == "true")
+        and (strings.byte_length "abc" == text.byte_length "abc")
+        and (fs.basename "dir/file" == path "file")
+        and (json.from_json "42" == 42))
+    "#,
+    )
+    .unwrap();
+    assert!(engine.inspect(|value| matches!(value, Value::Bool(true))));
+    for name in [
+        "collect_with",
+        "produce",
+        "CloseReason",
+        "byte_length",
+        "scalars",
+        "path_bytes",
+    ] {
+        assert_eq!(
+            run(&mut engine, name).unwrap_err().kind,
+            "NameError",
+            "{name}"
+        );
+    }
 }
 
 #[test]
@@ -141,10 +238,10 @@ fn json_preserves_numeric_kinds_and_treats_library_marker_keys_as_data() {
 fn json_limits_do_not_publish_truncated_success() {
     let mut engine = Engine::standard().unwrap();
     for source in [
-        r#"from_json_with {max_bytes: 1} "[]""#,
-        "to_json_with {max_bytes: 1} []",
-        r#"from_json_with {max_depth: 1} "[0]""#,
-        "to_json_with {max_depth: 1} [0]",
+        r#"json.from_json_with {max_bytes: 1} "[]""#,
+        "json.to_json_with {max_bytes: 1} []",
+        r#"json.from_json_with {max_depth: 1} "[0]""#,
+        "json.to_json_with {max_depth: 1} [0]",
     ] {
         assert_eq!(run(&mut engine, source).unwrap_err().kind, "LimitExceeded");
     }
@@ -154,10 +251,45 @@ fn json_limits_do_not_publish_truncated_success() {
     let nested = format!("{}0{}", "[".repeat(300), "]".repeat(300));
     run(
         &mut engine,
-        &format!("from_json_with {{max_depth: 301}} '{nested}'"),
+        &format!("json.from_json_with {{max_depth: 301}} '{nested}'"),
     )
     .unwrap();
     assert!(engine.inspect(|v| matches!(v, Value::List(_))));
+}
+
+#[test]
+fn json_error_paths_follow_nested_values_after_completed_siblings() {
+    let mut engine = Engine::standard().unwrap();
+    for (source, kind, path) in [
+        ("to_json identity", "TypeError", "$"),
+        (
+            r#"to_json [{done: [1, 2]}, {"a\"\n": [0, some 1]}]"#,
+            "TypeError",
+            r#"$[1]["a\"\n"][1]"#,
+        ),
+        (
+            "json.to_json_with {max_depth: 3} {done: [1], later: [[0]]}",
+            "LimitExceeded",
+            r#"$["later"][0][0]"#,
+        ),
+    ] {
+        engine
+            .begin(&rill_syntax::parse("json-path", source).unwrap())
+            .unwrap();
+        let error = loop {
+            match engine.step(1) {
+                Err(error) => break error,
+                Ok(Progress::Yielded) => engine.collect(),
+                progress => panic!("expected encoding failure, got {progress:?}"),
+            }
+        };
+        assert_eq!(error.kind, kind);
+        assert!(
+            error.message.ends_with(&format!("at {path}")),
+            "{}",
+            error.message
+        );
+    }
 }
 
 #[test]
@@ -168,7 +300,7 @@ fn sorting_is_stable_and_checks_input_before_callbacks() {
     assert_eq!(
         run(
             &mut engine,
-            "sort_by_with {max_items: 0} { _ => raise (error \"Called\" \"bad\") } [1]"
+            "seq.sort_by_with {max_items: 0} { _ => raise (error \"Called\" \"bad\") } [1]"
         )
         .unwrap_err()
         .kind,
@@ -181,14 +313,14 @@ fn sorting_is_stable_and_checks_input_before_callbacks() {
         "TypeError"
     );
     assert_eq!(
-        run(&mut engine, "sort_by_with {max_bytes: 0} identity [1]")
+        run(&mut engine, "seq.sort_by_with {max_bytes: 0} identity [1]")
             .unwrap_err()
             .kind,
         "LimitExceeded"
     );
     run(
         &mut engine,
-        "sort_by_with {max_bytes: 0, max_items: 0} identity [] == []",
+        "seq.sort_by_with {max_bytes: 0, max_items: 0} identity [] == []",
     )
     .unwrap();
     assert!(engine.inspect(|v| matches!(v, Value::Bool(true))));
@@ -204,7 +336,7 @@ fn lexical_paths_do_not_normalize_components_or_byte_identity() {
 #[test]
 fn plans_are_evaluated_once_and_keep_argument_and_redirect_order() {
     let mut engine = Engine::standard().unwrap();
-    run(&mut engine, r#"let name = "hello world"; job { ^printf "%s" $name ...$(["", "tail"]) 2>&1 > "output" | ^cat }"#).unwrap();
+    run(&mut engine, r#"let name = "hello world"; plan { ^printf "%s" $name ...$(["", "tail"]) 2>&1 > "output" | ^cat }"#).unwrap();
     engine.inspect(|value| {
         let Value::Plan(plan) = value else {
             panic!("expected JobPlan")
@@ -222,7 +354,7 @@ fn plans_are_evaluated_once_and_keep_argument_and_redirect_order() {
     });
     let error = run(
         &mut engine,
-        r#"job { ^echo $(42) $(raise (error "Late" "must not execute")) }"#,
+        r#"plan { ^echo $(42) $(raise (error "Late" "must not execute")) }"#,
     )
     .unwrap_err();
     assert_eq!(error.kind, "TypeError");
@@ -234,7 +366,7 @@ fn plans_are_evaluated_once_and_keep_argument_and_redirect_order() {
 #[test]
 fn failed_nested_plan_construction_does_not_corrupt_outer_builder() {
     let mut engine = Engine::standard().unwrap();
-    run(&mut engine, r#"job { ^echo $(match attempt { () => job { ^cat $(false) } } of { Result.Err {error: _} => "recovered", _ => "wrong" }) }"#).unwrap();
+    run(&mut engine, r#"plan { ^echo $(match attempt { () => plan { ^cat $(false) } } of { Result.Err {error: _} => "recovered", _ => "wrong" }) }"#).unwrap();
     assert!(engine.inspect(|value| matches!(value, Value::Plan(plan) if plan.0.stages[0].argv[1].to_bytes() == b"recovered")));
 }
 
@@ -301,7 +433,10 @@ fn local_nested_streams_do_not_gain_a_persistent_lifetime() {
 fn consumer_errors_are_caught_without_publishing_partial_data() {
     let mut engine = Engine::standard().unwrap();
     for (source, expected) in [
-        ("collect_with {max_items: 2} (range 0 3)", "LimitExceeded"),
+        (
+            "seq.collect_with {max_items: 2} (range 0 3)",
+            "LimitExceeded",
+        ),
         ("collect (filter { _ => 1 } (items [1]))", "TypeError"),
         ("collect_bytes (items [1])", "TypeError"),
     ] {
@@ -330,7 +465,7 @@ fn lines_decode_across_chunks_without_losing_empty_or_unterminated_lines() {
             "DecodeError",
         ),
         (
-            r#"chunks (encode_utf8 "abc\n") |> lines_with {max_line_bytes: 2} |> collect"#,
+            r#"chunks (encode_utf8 "abc\n") |> text.lines_with {max_line_bytes: 2} |> collect"#,
             "LimitExceeded",
         ),
         ("items [42] |> lines |> collect", "TypeError"),
@@ -412,6 +547,53 @@ proptest::proptest! {
         ..proptest::test_runner::Config::default()
     })]
     #[test]
+    fn list_flat_map_matches_ordered_concatenation(
+        lists in proptest::collection::vec(proptest::collection::vec(-100_i64..100, 0..8), 0..12),
+    ) {
+        let mut engine = Engine::standard().unwrap();
+        run(&mut engine, &format!("{lists:?} |> flat_map identity")).unwrap();
+        let expected: Vec<_> = lists.into_iter().flatten().collect();
+        engine.inspect(|value| {
+            let Value::List(actual) = value else { panic!("expected List") };
+            assert_eq!(actual.as_slice().len(), expected.len());
+            for (actual, expected) in actual.as_slice().iter().zip(expected) {
+                assert!(matches!(actual, Value::Int(n) if *n == expected));
+            }
+        });
+    }
+
+    #[test]
+    fn aggregation_preserves_first_keys_and_items(
+        values in proptest::collection::vec(-20_i64..20, 0..40),
+    ) {
+        // A small linear model keeps the oracle independent of the runtime's hash tables.
+        let mut groups: Vec<(String, Vec<i64>)> = Vec::new();
+        for &value in &values {
+            let key = (value % 5).to_string();
+            if let Some((_, group)) = groups.iter_mut().find(|(name, _)| name == &key) {
+                group.push(value);
+            } else {
+                groups.push((key, vec![value]));
+            }
+        }
+        let counts: Vec<_> = groups.iter().map(|(key, items)| (key, items.len())).collect();
+        let unique: Vec<_> = groups.iter().map(|(_, items)| items[0]).collect();
+        let expected = serde_json::to_string(&(&groups, counts, unique)).unwrap();
+        let source = format!(r"
+let values = {values:?}
+let key = {{ value => string (rem value 5) }}
+[
+  entries (group_by key values),
+  entries (count_by key (items values)),
+  unique_by key values
+] == {expected}
+");
+        let mut engine = Engine::standard().unwrap();
+        run(&mut engine, &source).unwrap();
+        proptest::prop_assert!(engine.inspect(|value| matches!(value, Value::Bool(true))));
+    }
+
+    #[test]
     fn line_decoding_is_independent_of_chunk_boundaries(
         data in proptest::prop_oneof![
             proptest::collection::vec(proptest::prelude::any::<u8>(), 0..128),
@@ -450,7 +632,7 @@ fn native_conversions_keep_their_inputs_and_partial_outputs_alive_across_gc() {
     let mut engine = Engine::standard().unwrap();
     for source in [
         r#"join ":" (split ":" "a::b:") == "a::b:""#,
-        r#"join "" (scalars "a\u{1f30a}\u{301}") == "a\u{1f30a}\u{301}""#,
+        r#"join "" (text.scalars "a\u{1f30a}\u{301}") == "a\u{1f30a}\u{301}""#,
         "(concat [1, 2] [3, 4] |> reverse |> take 3) == [4, 3, 2]",
         "record (entries {a: 1, b: [2, 3]}) == {a: 1, b: [2, 3]}",
         r#"from_json (to_json {a: [null, true, 1, 2.0], b: "\u{1f30a}"}) == {a: [null, true, 1, 2.0], b: "\u{1f30a}"}"#,
@@ -476,7 +658,10 @@ fn native_conversions_keep_their_inputs_and_partial_outputs_alive_across_gc() {
 fn allocation_heavy_native_work_yields_and_survives_collection() {
     let text = "x".repeat(10_000);
     let json = serde_json::to_string(&vec!["x"; 10_000]).unwrap();
-    for source in [format!("scalars '{text}'"), format!("from_json '{json}'")] {
+    for source in [
+        format!("text.scalars '{text}'"),
+        format!("from_json '{json}'"),
+    ] {
         let mut engine = Engine::standard().unwrap();
         engine.collect();
         engine
@@ -507,7 +692,7 @@ fn materialization_accounts_for_constructor_descriptions() {
     let mut engine = Engine::standard().unwrap();
     let name = "x".repeat(8192);
     let source =
-        format!("struct Long {{{name}}}; items [Long] |> collect_with {{max_bytes: 1024}}");
+        format!("struct Long {{{name}}}; items [Long] |> seq.collect_with {{max_bytes: 1024}}");
     assert_eq!(run(&mut engine, &source).unwrap_err().kind, "LimitExceeded");
 }
 
@@ -555,4 +740,170 @@ proptest::proptest! {
             assert_eq!(actual, expected);
         });
     }
+}
+
+#[test]
+fn flat_map_preserves_order_for_lists_and_lazy_nested_streams() {
+    let mut engine = Engine::standard().unwrap();
+    for source in [
+        "[1, 2, 3] |> flat_map { n => [n, n + 10] }",
+        "items [1, 2, 3] |> flat_map { n => items [n, n + 10] } |> collect",
+        "items [1, 2, 3] |> flat_map { n => [n, n + 10] } |> collect",
+        "range 1 4 |> flat_map { n => range n (n + 1) |> flat_map { x => [x, x + 10] } } |> collect",
+    ] {
+        run(&mut engine, &format!("({source}) == [1, 11, 2, 12, 3, 13]")).unwrap();
+        assert!(
+            engine.inspect(|value| matches!(value, Value::Bool(true))),
+            "{source}"
+        );
+    }
+    run(&mut engine, "range 0 100 |> flat_map { n => if n == 1 then raise (error \"Unwanted\" \"overread\") else range 0 100 } |> take 2 |> collect").unwrap();
+    run(
+        &mut engine,
+        "items [1, 2] |> flat_map { _ => [] } |> collect",
+    )
+    .unwrap();
+    assert!(
+        engine
+            .inspect(|value| matches!(value, Value::List(values) if values.as_slice().is_empty()))
+    );
+}
+
+#[test]
+fn nul_records_preserve_bytes_across_chunks_and_enforce_limits() {
+    let mut engine = Engine::standard().unwrap();
+    run(&mut engine, "(items [bytes [255], bytes [0, 0, 13], bytes [0, 120]] |> split_nul |> collect) == [bytes [255], bytes [], bytes [13], bytes [120]]").unwrap();
+    assert!(engine.inspect(|value| matches!(value, Value::Bool(true))));
+    assert_eq!(
+        run(
+            &mut engine,
+            "chunks (bytes [1, 2, 0]) |> text.split_nul_with {max_record_bytes: 1} |> collect"
+        )
+        .unwrap_err()
+        .kind,
+        "LimitExceeded"
+    );
+}
+
+#[test]
+fn rethrow_preserves_original_span_and_structured_details() {
+    let mut engine = Engine::standard().unwrap();
+    let error = run(
+        &mut engine,
+        r"match attempt { () => 1 + true } of {
+      Result.Err {error} => raise error,
+      Result.Ok {value} => value
+    }",
+    )
+    .unwrap_err();
+    let source = error.origin.unwrap();
+    assert_eq!(&source.text[error.span.unwrap()], "1 + true");
+    run(&mut engine, r#"let original = error "Example" "message" with {details: {stage: 2}, exit_status: 7}; match attempt { () => raise original } of { Result.Err {error} => error == original, _ => false }"#).unwrap();
+    assert!(engine.inspect(|value| matches!(value, Value::Bool(true))));
+}
+
+#[test]
+fn raising_malformed_errors_does_not_hide_invalid_fields() {
+    let mut engine = Engine::standard().unwrap();
+    for fields in [
+        "{notes: [1]}",
+        "{span: false}",
+        "{span: {source: 'file', text: 'abc', offset: -1, length: 1}}",
+        "{span: {source: 'file', text: 'abc', offset: 2, length: 2}}",
+        r#"{span: {source: 'file', text: "\u{e9}", offset: 1, length: 1}}"#,
+        "{details: {stage: true}}",
+        "{exit_status: 0}",
+        "{exit_status: 256}",
+    ] {
+        let source = format!("raise (error 'Original' 'message' with {fields})");
+        assert_eq!(
+            run(&mut engine, &source).unwrap_err().kind,
+            "TypeError",
+            "{source}"
+        );
+    }
+    run(&mut engine, "match attempt { () => raise (error 'Valid' 'message' with {notes: ['first', 'second']}) } of { Result.Err {error} => error.notes == ['first', 'second'], _ => false }").unwrap();
+    assert!(engine.inspect(|value| matches!(value, Value::Bool(true))));
+}
+
+#[test]
+fn finite_aggregations_preserve_key_and_item_order() {
+    let mut engine = Engine::standard().unwrap();
+    for source in [
+        r#"let rows = [{k: "b", n: 1}, {k: "a", n: 2}, {k: "b", n: 3}]; let key = { row => row.k }; group_by key rows == {b: [rows[0], rows[2]], a: [rows[1]]}"#,
+        r#"entries (count_by identity (items ["b", "a", "b"])) == [["b", 2], ["a", 1]]"#,
+        r#"unique_by { row => row.k } (items [{k: "b", n: 1}, {k: "b", n: 2}, {k: "a", n: 3}]) == [{k: "b", n: 1}, {k: "a", n: 3}]"#,
+        "([1, 2] |> flat_map { n => [n, n + 10] } |> sum) == 26",
+        "(range 1 3 |> flat_map { n => range n (n + 2) } |> collect) == [1, 2, 2, 3]",
+        r#"contains "." "a.b" and replace "." "-" "a.b.c" == "a-b-c""#,
+        "text.path_bytes (path (bytes [255, 47, 120])) == bytes [255, 47, 120]",
+    ] {
+        run(&mut engine, source).unwrap();
+        assert!(
+            engine.inspect(|value| matches!(value, Value::Bool(true))),
+            "{source}"
+        );
+    }
+    assert_eq!(
+        run(&mut engine, "group_by identity [1]").unwrap_err().kind,
+        "TypeError"
+    );
+}
+
+#[test]
+fn documentation_survives_aliases_and_partial_application() {
+    let mut engine = Engine::standard().unwrap();
+    run(&mut engine, "## Add two values.\nfn documented first second = first + second\nlet alias = documented 1\nhelp alias").unwrap();
+    assert!(engine.inspect(|value| matches!(value, Value::String(text) if text.contains("Add two values.") && text.contains("second"))));
+    run(&mut engine, r#"import "std:test" as test; test.assert_equal 42 (add 40 2); test.assert_error "TypeError" { () => 1 + true }; test.assert true"#).unwrap();
+    assert_eq!(
+        run(
+            &mut engine,
+            r#"import "std:test" as test; test.assert false"#
+        )
+        .unwrap_err()
+        .kind,
+        "AssertionError"
+    );
+}
+
+#[test]
+fn library_failures_identify_the_user_application() {
+    let mut engine = Engine::standard().unwrap();
+    let error = run(&mut engine, "parse_int 'not a number'").unwrap_err();
+    let source = error.origin.unwrap();
+    assert_eq!(source.name, "test");
+    assert_eq!(
+        &source.text[error.span.unwrap()],
+        "parse_int 'not a number'"
+    );
+}
+
+#[test]
+fn dynamically_created_merges_preserve_each_inner_before_the_next() {
+    let mut engine = Engine::standard().unwrap();
+    run(
+        &mut engine,
+        "range 0 20 |> flat_map { n => merge [items [n], items [n + 100]] } |> collect",
+    )
+    .unwrap();
+    engine.inspect(|value| {
+        let Value::List(list) = value else {
+            panic!("expected List")
+        };
+        assert_eq!(list.as_slice().len(), 40);
+        for (index, pair) in list.as_slice().as_chunks::<2>().0.iter().enumerate() {
+            let mut actual: Vec<_> = pair
+                .iter()
+                .map(|value| match value {
+                    Value::Int(n) => *n,
+                    _ => panic!("expected Int"),
+                })
+                .collect();
+            actual.sort_unstable();
+            let index = i64::try_from(index).unwrap();
+            assert_eq!(actual, [index, index + 100]);
+        }
+    });
+    run(&mut engine, "range 0 3 |> flat_map { n => merge [range n (n + 2), range n (n + 3)] } |> take 1 |> collect").unwrap();
 }

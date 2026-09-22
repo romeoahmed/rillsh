@@ -672,7 +672,12 @@ fn environment(snapshot: &Snapshot, stage: &crate::plan::Stage) -> io::Result<Ve
         .environment
         .iter()
         .filter(|(key, _)| !stage.environment.contains_key(*key))
-        .chain(&stage.environment)
+        .chain(
+            stage
+                .environment
+                .iter()
+                .filter_map(|(key, value)| value.as_ref().map(|value| (key, value))),
+        )
         .map(|(key, value)| {
             let mut bytes = Vec::with_capacity(key.as_bytes().len() + value.as_bytes().len() + 1);
             bytes.extend_from_slice(key.as_bytes());

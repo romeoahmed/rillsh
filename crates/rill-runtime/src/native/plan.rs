@@ -75,17 +75,41 @@ pub fn apply<'gc>(mc: &Mutation<'gc>, request: Value<'gc>) -> Result<Value<'gc>,
         ("with_env", [Value::Record(fields), Value::Plan(original)]) => {
             let mut environment = std::collections::BTreeMap::new();
             for (name, value) in fields.iter() {
-                let name = CString::new(name.as_bytes())
-                    .map_err(|_| Error::type_error("environment name contains NUL"))?;
-                if name.as_bytes().is_empty() || name.as_bytes().contains(&b'=') {
-                    return Err(Error::type_error("invalid environment name"));
-                }
-                environment.insert(name, super::service::native_string(*value)?);
+                let name = super::service::environment_key(name)?;
+                environment.insert(name, Some(super::service::native_string(*value)?));
             }
             let mut plan = original.0.clone();
             for stage in &mut plan.stages {
                 stage.environment.extend(environment.clone());
             }
+            plan
+        }
+        ("without_env", [Value::List(names), Value::Plan(original)]) => {
+            let names = names
+                .as_slice()
+                .iter()
+                .map(|value| super::service::environment_name(*value))
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut plan = original.0.clone();
+            for stage in &mut plan.stages {
+                stage
+                    .environment
+                    .extend(names.iter().cloned().map(|name| (name, None)));
+            }
+            plan
+        }
+        ("redirect", [Value::String(kind), path, Value::Plan(original)]) => {
+            use rill_syntax::token::Redirect as Kind;
+            let kind = redirect_kind(kind)?;
+            let redirect = redirect(kind, Some(*path))?;
+            let mut plan = original.0.clone();
+            let stage = if kind == Kind::Input {
+                plan.stages.first_mut()
+            } else {
+                plan.stages.last_mut()
+            }
+            .ok_or_else(|| Error::type_error("plan has no stages"))?;
+            stage.redirects.push(redirect);
             plan
         }
         ("accept_exit", [Value::List(codes), Value::Plan(original)]) => {
@@ -117,4 +141,17 @@ pub fn apply<'gc>(mc: &Mutation<'gc>, request: Value<'gc>) -> Result<Value<'gc>,
         }
     };
     Ok(Value::Plan(Gc::new(mc, JobPlan(plan))))
+}
+
+fn redirect_kind(kind: &str) -> Result<rill_syntax::token::Redirect, Error> {
+    use rill_syntax::token::Redirect as Kind;
+    Ok(match kind {
+        "stdin" => Kind::Input,
+        "stdout" => Kind::Output,
+        "append_stdout" => Kind::Append,
+        "stderr" => Kind::ErrorOutput,
+        "append_stderr" => Kind::ErrorAppend,
+        "stderr_to_stdout" => Kind::ErrorToOutput,
+        _ => return Err(Error::type_error("unknown redirect operation")),
+    })
 }

@@ -39,6 +39,7 @@ impl Code {
 }
 
 pub struct FunctionCode {
+    pub documentation: Option<String>,
     pub name: Option<String>,
     pub parameters: Vec<Pattern>,
     pub captures: Vec<Capture>,

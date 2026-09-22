@@ -423,3 +423,14 @@ proptest::proptest! {
         proptest::prop_assert_eq!(actual, expected);
     }
 }
+
+#[test]
+fn partial_application_preserves_shadowing_between_parameters() {
+    let mut engine = Engine::default();
+    support::run(
+        &mut engine,
+        "fn choose value value other = value; let partial = choose 1 42; partial 0",
+    )
+    .unwrap();
+    assert!(engine.inspect(|value| matches!(value, Value::Int(42))));
+}

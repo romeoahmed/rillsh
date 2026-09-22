@@ -13,11 +13,11 @@ fn main() {
             "Exhausted"
         };
         let source = format!(
-            r#"produce {{
+            r#"seq.produce {{
   acquire: {{ () => if {demand} == 0 then raise (error "EagerAcquire" "no demand") else 0 }},
   step: {{ n => if n < {count} then some [n * n, n + 1] else Option.None }},
   release: {{ state reason =>
-    if state == {consumed} and (match reason of {{ CloseReason.{reason} => true, _ => false }})
+    if state == {consumed} and (match reason of {{ seq.CloseReason.{reason} => true, _ => false }})
     then () else raise (error "InvalidRelease" "state or reason differs")
   }}
 }} |> take {demand} |> sum"#,

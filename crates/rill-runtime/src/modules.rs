@@ -119,6 +119,7 @@ pub fn needs_directory(module: &Module) -> bool {
 /// The bundle owns the sources; imports share the ordinary module cache and VM frames.
 pub fn bundle(name: &str) -> Option<(&'static str, &'static str)> {
     match name {
+        "std:test" => Some(("std:test", include_str!("../stdlib/test.rill"))),
         "std:core" => Some(("std:core", include_str!("../stdlib/core.rill"))),
         "std:option" => Some(("std:option", include_str!("../stdlib/option.rill"))),
         "std:result" => Some(("std:result", include_str!("../stdlib/result.rill"))),

@@ -16,10 +16,7 @@ pub fn bindings() -> Emacs {
     keys.add_binding(
         KeyModifiers::SHIFT,
         KeyCode::BackTab,
-        ReedlineEvent::UntilFound(vec![
-            ReedlineEvent::MenuPrevious,
-            ReedlineEvent::Edit(vec![EditCommand::InsertNewline]),
-        ]),
+        ReedlineEvent::MenuPrevious,
     );
     keys.add_binding(
         KeyModifiers::CONTROL,
@@ -29,12 +26,7 @@ pub fn bindings() -> Emacs {
     keys.add_binding(
         KeyModifiers::ALT,
         KeyCode::Enter,
-        ReedlineEvent::Multiple(vec![ReedlineEvent::Esc, ReedlineEvent::Submit]),
-    );
-    keys.add_binding(
-        KeyModifiers::NONE,
-        KeyCode::Enter,
-        ReedlineEvent::SubmitOrNewline,
+        ReedlineEvent::Edit(vec![EditCommand::InsertNewline]),
     );
     keys.add_binding(
         KeyModifiers::CONTROL,
@@ -55,6 +47,11 @@ pub fn bindings() -> Emacs {
         KeyModifiers::NONE,
         KeyCode::F(1),
         ReedlineEvent::ExecuteHostCommand("help".into()),
+    );
+    keys.add_binding(
+        KeyModifiers::CONTROL,
+        KeyCode::Char('o'),
+        ReedlineEvent::ExecuteHostCommand("edit".into()),
     );
     Emacs::new(keys)
 }

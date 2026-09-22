@@ -25,7 +25,8 @@ discover startup code in ancestor directories or execute code during completion.
 
 Interactive expressions display their results. Unit and declarations display nothing.
 Functions display their remaining parameters without invocation. Records and
-materialized Lists use bounded tables; nested values use concise summaries. A JobPlan is
+materialized Lists use bounded tables; nested values and streamed rows use bounded
+structural previews, including fields and payloads rather than only type names. A JobPlan is
 described without launching it. The REPL parses the complete submitted entry before
 executing any prefix. Runtime effects completed before a later failure remain real.
 
@@ -35,17 +36,24 @@ The parser classifies the entire buffer as Complete, Incomplete, or Invalid with
 spans. The editor consumes this service; it does not duplicate the grammar with brace
 counts. Bare functions and partial applications are Complete; their signatures never
 trigger continuation or invocation. Closure headers and bodies remain Incomplete until
-closed. Enter at the end submits Complete/Invalid input and inserts a newline for
-Incomplete input. Enter inside the buffer inserts a newline. Invalid input is submitted
-for a diagnostic instead of collecting lines indefinitely.
+closed. Enter submits Complete/Invalid input and inserts a newline for Incomplete
+input, regardless of cursor position. Invalid input receives a diagnostic and returns
+to the rich editor for correction; it is never executed automatically. Runtime failures
+do not restore or retry an entry whose earlier effects may already have occurred.
 
-Alt-Enter explicitly submits the entire buffer, including incomplete input for a syntax
-diagnostic. Ctrl-J inserts a newline; Shift-Tab does so outside the completion menu.
-The Alt binding uses the ordinary ESC-prefixed sequence. Help lists these actions and
-aliases; no backslash continuation rewrites source text.
+Alt-Enter and Ctrl-J insert a newline explicitly. Shift-Tab only selects a previous
+completion. The Alt binding uses the ordinary ESC-prefixed sequence. Help lists these
+actions; no backslash continuation rewrites source text.
 
 Newlines use Reedline's native editing behavior and do not rewrite indentation or string
 contents. One complete submitted entry is one history item and one execution boundary.
+
+`--check` parses and structurally validates a file, `-c` source or stdin without
+creating a session, evaluating code or resolving imports. It is not static type checking.
+`--format` prints conservative two-space structural indentation and removes exterior
+horizontal whitespace; it preserves comments, tokens and multiline literal contents.
+It writes stdout, never the input file. Both commands reject invalid syntax, and neither
+accepts interactive configuration or script arguments.
 
 ## Familiar terminal controls
 
@@ -58,9 +66,9 @@ editing modes or configurable keymaps.
 | Move one grapheme; delete before/after cursor | Left/Right; Backspace/Delete                     |
 | Move within multiline input                   | Up/Down; at the first/last row, navigate history |
 | Move to logical line boundaries               | Home/End; Ctrl-A/Ctrl-E aliases                  |
-| Insert newline without submission             | Ctrl-J or Shift-Tab                              |
-| Submit according to parser state              | Enter at buffer end                              |
-| Submit the whole buffer explicitly            | Alt-Enter                                        |
+| Insert newline without submission             | Alt-Enter or Ctrl-J                              |
+| Submit according to parser state              | Enter at any cursor position                     |
+| Edit the buffer in an external editor         | Ctrl-O                                           |
 | Complete; navigate candidates                 | Tab; Tab/Shift-Tab in the menu                   |
 | Search previous input incrementally           | Ctrl-R                                           |
 | Undo; redo                                    | Ctrl-_; Alt-r                                    |
@@ -83,6 +91,22 @@ state and suspends the shell, retaining the buffer for resume. During evaluation
 interrupt/stop behavior follows [execution](execution.md). Ctrl-Z retains its Unix
 suspend meaning; undo has a separate binding.
 
+## Prompt and external editing
+
+The rich prompt shows escaped session PWD, the last unsuccessful entry's status and
+a stopped-job count, followed by `rill>`. Metadata is snapshotted before reading;
+prompt rendering performs no evaluation or filesystem traversal. PWD display is bounded
+to 160 scalars. Ctrl-C records status 130; a successful entry clears the failure marker.
+
+Ctrl-O opens a private temporary `.rill` file with VISUAL, then EDITOR, then `vi`.
+Each variable denotes one executable name or path, not a command line to interpret;
+use an executable wrapper when arguments are needed. The editor runs in the foreground
+with ordinary terminal ownership. A successful exit reads the saved regular UTF-8 file,
+including atomic replacement, into the buffer without submitting it. Failure retains
+the original buffer. Stop/resume suspends and resumes this modal editing transaction together with
+the shell. The saved entry has the same 1 MiB submission limit. Temporary files and the
+child process are owned until editing finishes.
+
 ## Paste and input limits
 
 On the rich terminal profile, bracketed paste is one insertion transaction. Its contents
@@ -97,12 +121,12 @@ Reedline and Crossterm own paste buffering, decoding, undo and key-sequence reco
 Rill uses their native APIs without patches. Large input can consume memory before
 submission validation; there is no incremental paste limit or bounded undo guarantee.
 
-| Resource                        | Policy                                                     |
-| ------------------------------- | ---------------------------------------------------------- |
-| Submitted source                | Reject entries exceeding 1 MiB before parsing or execution |
-| Editable buffer, paste and undo | Reedline's native behavior; no Rill memory ceiling         |
-| History                         | At most 10,000 entries; no aggregate byte ceiling          |
-| Completion results              | At most 200 candidates and 1 MiB of retained text          |
+| Resource                        | Policy                                                                    |
+| ------------------------------- | ------------------------------------------------------------------------- |
+| Submitted source                | Reject entries exceeding 1 MiB before parsing or execution                |
+| Editable buffer, paste and undo | Reedline's native behavior; no Rill memory ceiling                        |
+| History                         | At most 10,000 entries; no aggregate byte ceiling                         |
+| Completion results              | At most 200 candidates; 1 MiB total insertion, label and description text |
 
 Oversized submissions do not execute a prefix and do not enter persistent history.
 Reedline may retain its latest leading-space exclusion for in-memory recall even when
@@ -113,8 +137,13 @@ There is no time-based inference that rapidly typed characters are pasted text.
 ## Completion, highlighting, and responsiveness
 
 Highlighting uses lexer spans without filesystem access or evaluation. Completion uses
-published names, value kinds and remaining function parameters. Field completion
-inspects materialized Records and nominal payloads; it never calls a function.
+published names, value kinds, remaining function parameters and the first documentation
+line, escaped and bounded for display. Local names come from AST scope and binding
+patterns, including command substitutions and unfinished buffers whose delimiters can
+be completed. Later declarations outside a recursive group are not visible. Local bindings hide global signatures and
+field metadata. Initializers are never run, so unpublished local values have no field
+suggestions. Field completion inspects materialized Records and nominal payloads;
+it never calls a function.
 
 Filesystem completion begins on explicit Tab. A short-lived helper process receives a
 bounded query and returns bounded candidates. A result expires after 200 ms; the
@@ -124,7 +153,13 @@ owns menu generations; Rill binds each reply to its complete buffer/cursor origi
 discards superseded replies and replaces the completer between entries. Stale results
 must not open a menu, replace newer text or move its cursor.
 
-Insertion must round-trip to the intended value or exactly one command argument,
+A single candidate is accepted immediately. Completed arguments receive a trailing
+space at buffer end. Directory candidates keep the quoted prefix open so the next
+component remains in the same argument; complete a file or close the quote explicitly.
+Native non-UTF-8 paths use complete Bytes/Path expressions instead. Candidate labels show
+escaped paths independently of the source inserted into the buffer.
+
+Completed insertion must round-trip to the intended value or exactly one command argument,
 including spaces, quotes, `$`, wildcard characters, and non-UTF-8 paths. Use this
 language's quoting or explicit Bytes/Path expression syntax, not a POSIX-shell quoting
 routine. Do not accept arbitrary code suggested by filesystem contents.
@@ -154,15 +189,17 @@ signatures describe remaining parameters, not a static type or effect system. Th
 language and execution references own accepted arguments and materialization rules.
 
 Messages use concise English and public type/function names, with an actionable
-correction when known. Summaries name their units: items, fields or stages.
+correction when known. Structural previews show up to eight elements or fields, four
+levels of nesting, and sixteen bytes; ellipses mark abbreviation.
 
 A Record displays as field/value rows. A nonempty List displays at most 100 rows; record
-rows use up to eight field names from the first row when all displayed records contain
-them. Other Lists use index/value rows. Tables fit the terminal width, capped at 240
-cells, and mark omitted rows or fields; long cells are abbreviated.
+rows use up to eight field names from the first row when all displayed records have
+the same field count and contain those names. Heterogeneous shapes use structural cells;
+other Lists use index/value rows. Tables fit the terminal width, capped at 240 cells,
+and mark omitted rows or fields; long cells are abbreviated.
 
-A returned Stream displays each non-Unit item as a summary as it arrives, then finishes
-cleanup before publication. It does not sample or materialize rows to build a table.
+A returned Stream displays each non-Unit item as a structural preview as it arrives,
+then finishes cleanup before publication. It does not materialize rows to build a table.
 Display is not serialization; explicit output functions preserve their data.
 
 Shell-owned job notifications and relayed output use a coordinated clear/write/redraw

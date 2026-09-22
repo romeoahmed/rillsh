@@ -33,7 +33,7 @@ pub enum Kind {
     Struct,
     Enum,
     With,
-    Job,
+    Plan,
     Import,
     As,
     Export,
@@ -221,7 +221,7 @@ fn keyword(text: &str) -> Kind {
         "struct" => Kind::Struct,
         "enum" => Kind::Enum,
         "with" => Kind::With,
-        "job" => Kind::Job,
+        "plan" => Kind::Plan,
         "import" => Kind::Import,
         "as" => Kind::As,
         "export" => Kind::Export,
@@ -457,6 +457,17 @@ fn command_token(source: &str, start: usize) -> Result<(Option<Kind>, usize), Le
 /// Reports invalid characters, malformed escapes, or unfinished substitutions.
 pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
     let mut tokens = Vec::new();
+    lex_into(source, &mut tokens)?;
+    Ok(tokens)
+}
+/// Preserve the valid prefix for highlighting unfinished or invalid input.
+#[must_use]
+pub fn highlight_tokens(source: &str) -> Vec<Token> {
+    let mut tokens = Vec::new();
+    let _ = lex_into(source, &mut tokens);
+    tokens
+}
+fn lex_into(source: &str, tokens: &mut Vec<Token>) -> Result<(), LexError> {
     let mut position = 0;
     let mut mode = Mode::Expression;
     let mut contexts: Vec<(Kind, Mode)> = Vec::new();
@@ -533,7 +544,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
     if substitution {
         return Err(incomplete(position..position, "unfinished substitution"));
     }
-    Ok(tokens)
+    Ok(())
 }
 
 impl Kind {
@@ -554,7 +565,7 @@ impl Kind {
             Self::Struct => Some("struct"),
             Self::Enum => Some("enum"),
             Self::With => Some("with"),
-            Self::Job => Some("job"),
+            Self::Plan => Some("plan"),
             Self::Import => Some("import"),
             Self::As => Some("as"),
             Self::Export => Some("export"),

@@ -27,7 +27,7 @@ pub(super) fn convert<'gc>(mc: &Mutation<'gc>, value: Value<'gc>) -> Result<Valu
         Value::Float(value) => value.to_string(),
         _ => {
             return Err(Error::type_error(
-                "text requires String, Bool, Int, or Float",
+                "string requires String, Bool, Int, or Float",
             ));
         }
     };
@@ -54,6 +54,15 @@ pub(super) fn apply<'gc>(
         }
         ("ends_with", [Value::String(suffix), Value::String(text)]) => {
             Ok(Value::Bool(text.ends_with(suffix.as_str())))
+        }
+        ("contains", [Value::String(needle), Value::String(text)]) => {
+            Ok(Value::Bool(text.contains(needle.as_str())))
+        }
+        ("replace", [Value::String(from), Value::String(to), Value::String(text)]) => {
+            Ok(Value::string(mc, text.replace(from.as_str(), to.as_str())))
+        }
+        ("path_bytes", [Value::Path(path)]) => {
+            Ok(Value::bytes(mc, path.0.as_os_str().as_bytes().to_vec()))
         }
         ("trim", [Value::String(text)]) => Ok(Value::string(
             mc,

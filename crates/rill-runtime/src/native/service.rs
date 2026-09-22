@@ -79,8 +79,16 @@ pub fn data(value: Value<'_>) -> Result<Option<Request>, Error> {
         _ => None,
     })
 }
-fn environment_name(value: Value<'_>) -> Result<CString, Error> {
-    let bytes = native_string(value)?;
+pub(super) fn environment_name(value: Value<'_>) -> Result<CString, Error> {
+    let Value::String(name) = value else {
+        return Err(Error::type_error("environment name requires String"));
+    };
+    environment_key(&name)
+}
+
+pub(super) fn environment_key(name: &str) -> Result<CString, Error> {
+    let bytes = CString::new(name.as_bytes())
+        .map_err(|_| Error::type_error("environment name contains NUL"))?;
     if bytes.as_bytes().is_empty() || bytes.as_bytes().contains(&b'=') {
         return Err(Error::type_error(
             "environment name must be nonempty and contain neither '=' nor NUL",

@@ -112,6 +112,7 @@ pub enum Statement {
 
 #[derive(Clone, Debug)]
 pub struct Function {
+    pub span: Span,
     pub name: String,
     pub parameters: Vec<Pattern>,
     pub body: ExprId,
@@ -196,7 +197,7 @@ impl ExprKind {
 }
 
 impl Statement {
-    fn children(&self, visit: &mut impl FnMut(ExprId)) {
+    pub(crate) fn children(&self, visit: &mut impl FnMut(ExprId)) {
         match self {
             Self::Expression(id) | Self::Let(_, id) => visit(*id),
             Self::Functions(functions) => functions.iter().for_each(|f| visit(f.body)),

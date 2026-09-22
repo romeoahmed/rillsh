@@ -40,6 +40,10 @@ pub enum Request {
     },
     Stdin,
     Files(PathBuf),
+    OpenFile {
+        path: PathBuf,
+        append: Option<bool>,
+    },
     Stream(Plan),
     Through(Plan),
     Send {
@@ -57,6 +61,7 @@ pub enum Request {
         max_bytes: usize,
     },
     Write(bytes::Bytes),
+    WriteError(bytes::Bytes),
     Display(String),
     ReadText {
         path: PathBuf,

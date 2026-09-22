@@ -38,6 +38,7 @@ struct Terminal {
     parser: vt100::Parser<Replies>,
     home: tempfile::TempDir,
     output: Vec<u8>,
+    initial_prompt_row: Option<u16>,
 }
 impl Terminal {
     fn new() -> io::Result<Self> {
@@ -98,6 +99,7 @@ impl Terminal {
             parser: vt100::Parser::new_with_callbacks(24, 80, 0, Replies::default()),
             home,
             output: Vec::new(),
+            initial_prompt_row: None,
         })
     }
     fn send(&self, bytes: &[u8]) -> io::Result<()> {
@@ -141,6 +143,16 @@ impl Terminal {
             for reply in std::mem::take(&mut self.parser.callbacks_mut().0) {
                 self.send(&reply)?;
             }
+        }
+        if self.initial_prompt_row.is_none()
+            && self
+                .parser
+                .screen()
+                .contents()
+                .trim_end()
+                .ends_with("rill>")
+        {
+            self.initial_prompt_row = Some(self.parser.screen().cursor_position().0);
         }
         Ok(())
     }
@@ -266,7 +278,7 @@ fn startup_selects_the_default_explicit_file_or_no_file() -> io::Result<()> {
 fn editor_suspension_restores_modes_and_retains_the_unsubmitted_entry() -> io::Result<()> {
     use rustix::process::{Pid, Signal, WaitOptions, kill_process, waitpid};
     let mut terminal = Terminal::new()?;
-    terminal.until(|screen| screen.contents().trim_end() == "rill>")?;
+    terminal.until(|screen| screen.contents().trim_end().ends_with("rill>"))?;
     terminal.send(b"print \"after resume\"")?;
     terminal.until(|screen| screen.contents().contains("after resume"))?;
     let pid = Pid::from_raw(i32::try_from(terminal.child.id()).unwrap()).unwrap();
@@ -306,7 +318,7 @@ fn filesystem_completion_inserts_quoted_source_without_executing_it() -> io::Res
         std::fs::write(home.join("completion $(ignored)"), b"")?;
         std::fs::write(home.join("completion second"), b"")
     })?;
-    terminal.until(|screen| screen.contents().trim_end() == "rill>")?;
+    terminal.until(|screen| screen.contents().trim_end().ends_with("rill>"))?;
     terminal.send(b"^printf \"%s\\n\" comp\t")?;
     terminal.until(|screen| {
         screen.contents().contains("completion second") && screen.contents().contains("Path")
@@ -364,7 +376,7 @@ fn unavailable_history_keeps_editing_execution_and_recall_usable() -> io::Result
 fn cancellation_starts_one_fresh_prompt_and_discards_the_entry() -> io::Result<()> {
     let mut terminal = Terminal::new()?;
     terminal.until(|screen| {
-        screen.contents().trim_end() == "rill>" && screen.cursor_position().1 == 6
+        screen.contents().trim_end().ends_with("rill>") && screen.cursor_position().1 == 6
     })?;
     let mut row = terminal.parser.screen().cursor_position().0;
     for input in [
@@ -395,7 +407,7 @@ fn cancellation_starts_one_fresh_prompt_and_discards_the_entry() -> io::Result<(
 #[test]
 fn foreground_interrupt_finishes_cleanup_before_the_next_prompt() -> io::Result<()> {
     let mut terminal = Terminal::new()?;
-    terminal.until(|screen| screen.contents().trim_end() == "rill>")?;
+    terminal.until(|screen| screen.contents().trim_end().ends_with("rill>"))?;
     terminal.send(
         b"attempt { () => do { ^sh -c 'printf running; exec sleep 30'; print \"continued\" } }\r",
     )?;
@@ -419,11 +431,11 @@ fn foreground_interrupt_finishes_cleanup_before_the_next_prompt() -> io::Result<
 #[test]
 fn background_completion_repaints_without_losing_partial_input() -> io::Result<()> {
     let mut terminal = Terminal::new()?;
-    terminal.until(|screen| screen.contents().trim_end() == "rill>")?;
+    terminal.until(|screen| screen.contents().trim_end().ends_with("rill>"))?;
     let gate = terminal.home.path().join("notification-gate");
     assert!(Command::new("mkfifo").arg(&gate).status()?.success());
     let source = format!(
-        "let worker = start (job {{ ^sh -c 'read value < \"$1\"' sh {:?} }})\r",
+        "let worker = start (plan {{ ^sh -c 'read value < \"$1\"' sh {:?} }})\r",
         gate.to_str().unwrap()
     );
     let row = terminal.parser.screen().cursor_position().0;
@@ -448,11 +460,11 @@ fn background_completion_repaints_without_losing_partial_input() -> io::Result<(
 #[test]
 fn returned_stream_displays_before_eof_and_then_publishes() -> io::Result<()> {
     let mut terminal = Terminal::new()?;
-    terminal.until(|screen| screen.contents().trim_end() == "rill>")?;
+    terminal.until(|screen| screen.contents().trim_end().ends_with("rill>"))?;
     let gate = terminal.home.path().join("display-gate");
     assert!(Command::new("mkfifo").arg(&gate).status()?.success());
     let source = format!(
-        "let saved = 42; stream (job {{ ^sh -c 'printf \"first\\n\"; read token < \"$1\"; printf \"last\\n\"' display {:?} }}) |> lines\r",
+        "let saved = 42; stream (plan {{ ^sh -c 'printf \"first\\n\"; read token < \"$1\"; printf \"last\\n\"' display {:?} }}) |> lines\r",
         gate.to_str().unwrap()
     );
     terminal.send(source.as_bytes())?;
@@ -487,7 +499,7 @@ fn returned_stream_displays_before_eof_and_then_publishes() -> io::Result<()> {
 #[test]
 fn bracketed_paste_inserts_multiline_source_without_executing_it() -> io::Result<()> {
     let mut terminal = Terminal::new()?;
-    terminal.until(|screen| screen.contents().trim_end() == "rill>")?;
+    terminal.until(|screen| screen.contents().trim_end().ends_with("rill>"))?;
     terminal.send(b"\x1b[200~print \"paste-one\"\nprint \"paste-two\"\x1b[201~")?;
     terminal.until(|screen| screen.contents().contains("print \"paste-two\""))?;
     assert!(
@@ -514,8 +526,8 @@ fn bracketed_paste_inserts_multiline_source_without_executing_it() -> io::Result
 #[test]
 fn producer_cancellation_finishes_release_and_owned_io_before_the_next_prompt() -> io::Result<()> {
     let mut terminal = Terminal::new()?;
-    terminal.until(|screen| screen.contents().trim_end() == "rill>")?;
-    terminal.send(br#"attempt { () => produce { acquire: { () => stream (job { ^sleep 30 }) }, step: { source => do { print "waiting"; collect_bytes source; Option.None } }, release: { state reason => print "released" } } |> collect }; print "continued""#)?;
+    terminal.until(|screen| screen.contents().trim_end().ends_with("rill>"))?;
+    terminal.send(br#"attempt { () => seq.produce { acquire: { () => stream (plan { ^sleep 30 }) }, step: { source => do { print "waiting"; collect_bytes source; Option.None } }, release: { state reason => print "released" } } |> collect }; print "continued""#)?;
     terminal.send(b"\r")?;
     terminal.until(|screen| {
         screen
@@ -549,8 +561,8 @@ fn producer_cancellation_finishes_release_and_owned_io_before_the_next_prompt() 
 #[test]
 fn cancellation_reports_release_failure_without_hiding_the_next_prompt() -> io::Result<()> {
     let mut terminal = Terminal::new()?;
-    terminal.until(|screen| screen.contents().trim_end() == "rill>")?;
-    terminal.send(br#"produce { acquire: { () => 0 }, step: { state => do { print "waiting"; let spin = rec { spin () => spin () }; spin () } }, release: { state reason => raise (error "ReleaseFailure" "cleanup diagnostic") } } |> collect"#)?;
+    terminal.until(|screen| screen.contents().trim_end().ends_with("rill>"))?;
+    terminal.send(br#"seq.produce { acquire: { () => 0 }, step: { state => do { print "waiting"; let spin = rec { spin () => spin () }; spin () } }, release: { state reason => raise (error "ReleaseFailure" "cleanup diagnostic") } } |> collect"#)?;
     terminal.send(b"\r")?;
     terminal.until(|screen| {
         screen
@@ -574,11 +586,11 @@ fn cancellation_reports_release_failure_without_hiding_the_next_prompt() -> io::
 #[test]
 fn interrupts_during_release_do_not_cancel_the_next_entry() -> io::Result<()> {
     let mut terminal = Terminal::new()?;
-    terminal.until(|screen| screen.contents().trim_end() == "rill>")?;
+    terminal.until(|screen| screen.contents().trim_end().ends_with("rill>"))?;
     let gate = terminal.home.path().join("release-gate");
     assert!(Command::new("mkfifo").arg(&gate).status()?.success());
     let source = format!(
-        r#"produce {{ acquire: {{ () => 0 }}, step: {{ state => do {{ print "waiting"; let spin = rec {{ spin () => spin () }}; spin () }} }}, release: {{ state reason => do {{ ^sh -c 'printf "releasing\n"; read token < "$1"' release {:?}; print "released" }} }} }} |> collect"#,
+        r#"seq.produce {{ acquire: {{ () => 0 }}, step: {{ state => do {{ print "waiting"; let spin = rec {{ spin () => spin () }}; spin () }} }}, release: {{ state reason => do {{ ^sh -c 'printf "releasing\n"; read token < "$1"' release {:?}; print "released" }} }} }} |> collect"#,
         gate.to_str().unwrap()
     );
     terminal.send(source.as_bytes())?;
@@ -624,7 +636,7 @@ fn interrupts_during_release_do_not_cancel_the_next_entry() -> io::Result<()> {
     assert_eq!(
         contents
             .lines()
-            .filter(|line| line.trim_end() == "rill>")
+            .filter(|line| line.trim_end().ends_with("rill>"))
             .count(),
         1,
         "{contents}"
@@ -636,19 +648,19 @@ fn interrupts_during_release_do_not_cancel_the_next_entry() -> io::Result<()> {
 fn blocked_launch_opens_are_cancellable_in_every_execution_mode() -> io::Result<()> {
     for mode in ["run", "capture", "stream", "start", "through"] {
         let mut terminal = Terminal::new()?;
-        terminal.until(|screen| screen.contents().trim_end() == "rill>")?;
+        terminal.until(|screen| screen.contents().trim_end().ends_with("rill>"))?;
         let gate = terminal.home.path().join("launch-gate");
         let marker = terminal.home.path().join("setup-started");
         assert!(Command::new("mkfifo").arg(&gate).status()?.success());
         let job = if mode == "through" {
             format!(
-                "job {{ ^cat | ^cat 2> {:?} > {:?} | ^cat }}",
+                "plan {{ ^cat | ^cat 2> {:?} > {:?} | ^cat }}",
                 marker.to_str().unwrap(),
                 gate.to_str().unwrap()
             )
         } else {
             format!(
-                "job {{ ^printf never > {:?} < {:?} }}",
+                "plan {{ ^printf never > {:?} < {:?} }}",
                 marker.to_str().unwrap(),
                 gate.to_str().unwrap()
             )
@@ -745,10 +757,10 @@ fn plain_or_unusable_terminals_use_canonical_input_without_escape_sequences() ->
             }
             Ok(())
         })?;
-        terminal.until(|screen| screen.contents().trim_end() == "rill>")?;
+        terminal.until(|screen| screen.contents().trim_end().ends_with("rill>"))?;
         terminal.send(b"40 + 2\r")?;
         terminal.until(|screen| screen.contents().lines().any(|line| line == "42"))?;
-        terminal.prompt_after(0)?;
+        terminal.prompt_after(terminal.initial_prompt_row.unwrap_or(0))?;
         terminal.send(b"\x04")?;
         terminal.wait_for_exit()?;
         assert!(!terminal.output.contains(&0x1b), "{term:?}");
@@ -768,9 +780,9 @@ fn explicit_interaction_uses_controlling_terminal_with_all_standard_streams_redi
             .stderr(output);
         Ok(())
     })?;
-    terminal.until(|screen| screen.contents().trim_end() == "rill>")?;
+    terminal.until(|screen| screen.contents().trim_end().ends_with("rill>"))?;
     terminal.send(b"^cat; print \"redirected output\"; 42\r")?;
-    terminal.prompt_after(0)?;
+    terminal.prompt_after(terminal.initial_prompt_row.unwrap_or(0))?;
     terminal.send(b"\x04")?;
     terminal.wait_for_exit()?;
     let output = std::fs::read_to_string(terminal.home.path().join("output"))?;
@@ -790,7 +802,7 @@ fn canonical_input_cancels_whole_entries_and_diagnoses_incomplete_eof() -> io::R
         command.env("TERM", "dumb");
         Ok(())
     })?;
-    terminal.until(|screen| screen.contents().trim_end() == "rill>")?;
+    terminal.until(|screen| screen.contents().trim_end().ends_with("rill>"))?;
     terminal.send(b"do {\r")?;
     terminal.until(|screen| screen.contents().trim_end().ends_with("..."))?;
     terminal.send(b"40 + 2\r")?;
@@ -799,7 +811,7 @@ fn canonical_input_cancels_whole_entries_and_diagnoses_incomplete_eof() -> io::R
     })?;
     terminal.send(b"}\r")?;
     terminal.until(|screen| screen.contents().lines().any(|line| line == "42"))?;
-    let mut row = terminal.prompt_after(0)?;
+    let mut row = terminal.prompt_after(terminal.initial_prompt_row.unwrap_or(0))?;
     terminal.send(b"do {\r")?;
     terminal.until(|screen| screen.contents().trim_end().ends_with("..."))?;
     terminal.send(b"print \"must not execute\"\r")?;
@@ -848,7 +860,7 @@ fn session_hints_change_color_depth_at_the_next_prompt() -> io::Result<()> {
             command.env("TERM", term).env("COLORTERM", colorterm);
             Ok(())
         })?;
-        terminal.until(|screen| screen.contents().trim_end() == "rill>")?;
+        terminal.until(|screen| screen.contents().trim_end().ends_with("rill>"))?;
         terminal.send(b"'color probe'")?;
         terminal.until(|screen| screen.contents().contains("'color probe'"))?;
         assert!(matches!(
@@ -861,7 +873,7 @@ fn session_hints_change_color_depth_at_the_next_prompt() -> io::Result<()> {
                 | (ColorDepth::TrueColor, vt100::Color::Rgb(..))
         ));
         terminal.send(b"\x03")?;
-        let row = terminal.prompt_after(0)?;
+        let row = terminal.prompt_after(terminal.initial_prompt_row.unwrap_or(0))?;
         terminal.send(b"set_env \"NO_COLOR\" \"1\"\r")?;
         let row = terminal.prompt_after(row)?;
         terminal.send(b"'plain probe'")?;
@@ -890,11 +902,11 @@ fn canonical_interrupt_discards_multiline_input_and_releases_foreground_io() -> 
         command.env("TERM", "dumb");
         Ok(())
     })?;
-    terminal.until(|screen| screen.contents().trim_end() == "rill>")?;
+    terminal.until(|screen| screen.contents().trim_end().ends_with("rill>"))?;
     terminal.send(b"do {\r")?;
     terminal.until(|screen| screen.contents().trim_end().ends_with("..."))?;
     terminal.send(b"let abandoned = 99\x03")?;
-    let row = terminal.prompt_after(0)?;
+    let row = terminal.prompt_after(terminal.initial_prompt_row.unwrap_or(0))?;
     assert!(!terminal.parser.screen().contents().contains("^Crill>"));
     terminal.send(b"^sh -c 'printf running; exec sleep 30'\r")?;
     terminal.until(|screen| screen.contents().lines().any(|line| line == "running"))?;
@@ -919,10 +931,10 @@ fn canonical_interrupt_discards_multiline_input_and_releases_foreground_io() -> 
 #[test]
 fn completion_acceptance_only_edits_and_metadata_refreshes_after_publication() -> io::Result<()> {
     let mut terminal = Terminal::new()?;
-    terminal.until(|screen| screen.contents().trim_end() == "rill>")?;
+    terminal.until(|screen| screen.contents().trim_end().ends_with("rill>"))?;
     terminal
         .send(b"let completion_alpha = { () => print \"invoked\" }; let completion_beta = 2\r")?;
-    let row = terminal.prompt_after(0)?;
+    let row = terminal.prompt_after(terminal.initial_prompt_row.unwrap_or(0))?;
     terminal.send(b"completion_\t")?;
     terminal.until(|screen| {
         screen.contents().contains("completion_alpha")
@@ -952,10 +964,6 @@ fn completion_acceptance_only_edits_and_metadata_refreshes_after_publication() -
     let row = terminal.prompt_after(row)?;
     terminal.send(b"completion_alpha.nested.an\t")?;
     terminal.until(|screen| {
-        screen.contents().contains("answer") && screen.contents().contains("Int")
-    })?;
-    terminal.send(b"\r")?;
-    terminal.until(|screen| {
         screen
             .contents()
             .trim_end()
@@ -970,15 +978,22 @@ fn completion_acceptance_only_edits_and_metadata_refreshes_after_publication() -
 #[test]
 fn completion_escape_and_cursor_replacement_preserve_the_unsubmitted_entry() -> io::Result<()> {
     let mut terminal = Terminal::new()?;
-    terminal.until(|screen| screen.contents().trim_end() == "rill>")?;
+    terminal.until(|screen| screen.contents().trim_end().ends_with("rill>"))?;
     terminal.send(b"let completion_alpha = 40; let completion_beta = 99\r")?;
-    let row = terminal.prompt_after(0)?;
+    let row = terminal.prompt_after(terminal.initial_prompt_row.unwrap_or(0))?;
     terminal.send(b"completion_\t")?;
     terminal.until(|screen| {
         screen.contents().contains("completion_beta") && screen.contents().contains("Int")
     })?;
     terminal.send(b"\x1b")?;
-    terminal.until(|screen| screen.contents().trim_end().ends_with("rill> completion_"))?;
+    terminal.until(|screen| {
+        screen
+            .contents()
+            .lines()
+            .last()
+            .is_some_and(|line| line.starts_with("rill> completion_"))
+            && screen.cursor_position().1 == 17
+    })?;
     terminal.send(b"alpha + 2\x01")?;
     terminal.until(|screen| screen.cursor_position() == (row, 6))?;
     terminal.send(b"\x1b[C\x1b[C\x1b[C\x1b[C\t")?;
@@ -999,7 +1014,16 @@ fn completion_escape_and_cursor_replacement_preserve_the_unsubmitted_entry() -> 
     terminal.until(|screen| {
         screen.contents().contains("completion_beta") && screen.contents().contains("Int")
     })?;
-    terminal.send(b"\x1b\r")?;
+    terminal.send(b"\x1b")?;
+    terminal.until(|screen| {
+        screen
+            .contents()
+            .lines()
+            .last()
+            .is_some_and(|line| line.starts_with("rill> completion_"))
+            && screen.cursor_position().1 == 17
+    })?;
+    terminal.send(b"\r")?;
     terminal.until(|screen| screen.contents().contains("NameError"))?;
     terminal.prompt_after(row)?;
     Ok(())
@@ -1007,17 +1031,24 @@ fn completion_escape_and_cursor_replacement_preserve_the_unsubmitted_entry() -> 
 
 #[test]
 fn explicit_newline_and_submit_keys_preserve_whole_entry_validation() -> io::Result<()> {
-    for newline in [b"\n".as_slice(), b"\x1b[Z"] {
+    for newline in [b"\n".as_slice(), b"\x1b\r"] {
         let mut terminal = Terminal::new()?;
-        terminal.until(|screen| screen.contents().trim_end() == "rill>")?;
+        terminal.until(|screen| screen.contents().trim_end().ends_with("rill>"))?;
         terminal.send(b"let answer = 42")?;
         terminal.send(newline)?;
         terminal.until(|screen| screen.contents().trim_end().ends_with("..."))?;
-        terminal.send(b"answer\x1b\r")?;
+        terminal.send(b"answer\r")?;
         terminal.until(|screen| screen.contents().lines().any(|line| line == "42"))?;
-        let row = terminal.prompt_after(0)?;
-        terminal.send(b"print \"must not execute\"; do {\x1b\r")?;
-        terminal.until(|screen| screen.contents().contains("ParseError"))?;
+        let row = terminal.prompt_after(terminal.initial_prompt_row.unwrap_or(0))?;
+        terminal.send(b"print \"must not execute\"; 1 + )\r")?;
+        terminal.until(|screen| {
+            screen.contents().contains("ParseError")
+                && screen
+                    .contents()
+                    .trim_end()
+                    .ends_with("rill> print \"must not execute\"; 1 + )")
+        })?;
+        terminal.send(b"\x03")?;
         terminal.prompt_after(row)?;
         assert!(
             !terminal
@@ -1034,9 +1065,9 @@ fn explicit_newline_and_submit_keys_preserve_whole_entry_validation() -> io::Res
 #[test]
 fn leading_space_history_is_recallable_but_not_persisted() -> io::Result<()> {
     let mut terminal = Terminal::new()?;
-    terminal.until(|screen| screen.contents().trim_end() == "rill>")?;
+    terminal.until(|screen| screen.contents().trim_end().ends_with("rill>"))?;
     terminal.send(b" let private_entry = 42\r")?;
-    let row = terminal.prompt_after(0)?;
+    let row = terminal.prompt_after(terminal.initial_prompt_row.unwrap_or(0))?;
     terminal.send(b"\x1b[A")?;
     terminal.until(|screen| {
         screen
@@ -1056,9 +1087,9 @@ fn leading_space_history_is_recallable_but_not_persisted() -> io::Result<()> {
 #[test]
 fn foreground_stop_retains_lexical_state_and_publishes_on_fg() -> io::Result<()> {
     let mut terminal = Terminal::new()?;
-    terminal.until(|s| s.contents().trim_end() == "rill>")?;
+    terminal.until(|s| s.contents().trim_end().ends_with("rill>"))?;
     terminal.send(b"let captured = 40\r")?;
-    terminal.prompt_after(0)?;
+    terminal.prompt_after(terminal.initial_prompt_row.unwrap_or(0))?;
     terminal.send(br"let saved = captured + 2; ^sh -c 'kill -STOP $$'; saved")?;
     terminal.send(b"\r")?;
     terminal.until(|s| {
@@ -1082,8 +1113,8 @@ fn foreground_stop_retains_lexical_state_and_publishes_on_fg() -> io::Result<()>
 #[test]
 fn capture_resumes_without_relaunching_or_losing_partial_output() -> io::Result<()> {
     let mut terminal = Terminal::new()?;
-    terminal.until(|s| s.contents().trim_end() == "rill>")?;
-    terminal.send(br"let captured = capture (job { ^sh -c 'printf before; printf error >&2; kill -STOP $$; printf after' }); print (decode_utf8 captured.stdout)")?;
+    terminal.until(|s| s.contents().trim_end().ends_with("rill>"))?;
+    terminal.send(br"let captured = capture (plan { ^sh -c 'printf before; printf error >&2; kill -STOP $$; printf after' }); print (decode_utf8 captured.stdout)")?;
     terminal.send(b"\r")?;
     terminal.until(|s| {
         s.contents().contains("] stopped") && s.contents().trim_end().ends_with("rill>")
@@ -1101,8 +1132,8 @@ fn capture_resumes_without_relaunching_or_losing_partial_output() -> io::Result<
 #[test]
 fn stopped_producer_owns_its_scope_until_cancel_and_releases_exactly_once() -> io::Result<()> {
     let mut terminal = Terminal::new()?;
-    terminal.until(|s| s.contents().trim_end() == "rill>")?;
-    terminal.send(br#"produce { acquire: { () => stream (job { ^sh -c 'kill -STOP $$; printf done' }) }, step: { source => do { collect_bytes source; Option.None } }, release: { state reason => print "released-once" } } |> collect"#)?;
+    terminal.until(|s| s.contents().trim_end().ends_with("rill>"))?;
+    terminal.send(br#"seq.produce { acquire: { () => stream (plan { ^sh -c 'kill -STOP $$; printf done' }) }, step: { source => do { collect_bytes source; Option.None } }, release: { state reason => print "released-once" } } |> collect"#)?;
     terminal.send(b"\r")?;
     terminal.until(|s| {
         s.contents().contains("] stopped") && s.contents().trim_end().ends_with("rill>")
@@ -1142,7 +1173,7 @@ fn stopped_producer_owns_its_scope_until_cancel_and_releases_exactly_once() -> i
 #[test]
 fn pure_evaluation_can_stop_and_cancel_without_publishing_or_running_its_tail() -> io::Result<()> {
     let mut terminal = Terminal::new()?;
-    terminal.until(|s| s.contents().trim_end() == "rill>")?;
+    terminal.until(|s| s.contents().trim_end().ends_with("rill>"))?;
     terminal.send(br#"let hidden = 42; print "spinning"; let spin = rec { spin () => spin () }; spin (); print "unreachable-tail""#)?;
     terminal.send(b"\r")?;
     terminal.until(|s| s.contents().lines().any(|line| line == "spinning"))?;
@@ -1170,7 +1201,7 @@ fn pure_evaluation_can_stop_and_cancel_without_publishing_or_running_its_tail() 
 #[test]
 fn repeated_stop_preserves_the_foreground_callers_remaining_expression() -> io::Result<()> {
     let mut terminal = Terminal::new()?;
-    terminal.until(|s| s.contents().trim_end() == "rill>")?;
+    terminal.until(|s| s.contents().trim_end().ends_with("rill>"))?;
     terminal.send(br"^sh -c 'kill -STOP $$; kill -STOP $$'; 40")?;
     terminal.send(b"\r")?;
     terminal.until(|s| {
@@ -1205,7 +1236,7 @@ fn repeated_stop_preserves_the_foreground_callers_remaining_expression() -> io::
 #[test]
 fn suspended_stdin_cannot_consume_editor_input_or_grant_another_lease() -> io::Result<()> {
     let mut terminal = Terminal::new()?;
-    terminal.until(|s| s.contents().trim_end() == "rill>")?;
+    terminal.until(|s| s.contents().trim_end().ends_with("rill>"))?;
     terminal.send(
         br#"print "begin-stdin"; stdin () |> lines |> map { line => do { print "input-consumed"; line } } |> collect"#,
     )?;
@@ -1233,8 +1264,8 @@ fn suspended_stdin_cannot_consume_editor_input_or_grant_another_lease() -> io::R
 fn resumed_stream_callbacks_read_current_environment_and_release_after_completion() -> io::Result<()>
 {
     let mut terminal = Terminal::new()?;
-    terminal.until(|s| s.contents().trim_end() == "rill>")?;
-    terminal.send(br#"produce { acquire: { () => stream (job { ^sh -c 'kill -STOP $$; printf done' }) }, step: { source => do { collect_bytes source; print (text (get_env "RILL_RESUMED")); Option.None } }, release: { state reason => print "release-completed" } } |> collect"#)?;
+    terminal.until(|s| s.contents().trim_end().ends_with("rill>"))?;
+    terminal.send(br#"seq.produce { acquire: { () => stream (plan { ^sh -c 'kill -STOP $$; printf done' }) }, step: { source => do { collect_bytes source; print (string (get_env "RILL_RESUMED")); Option.None } }, release: { state reason => print "release-completed" } } |> collect"#)?;
     terminal.send(b"\r")?;
     terminal.until(|s| {
         s.contents().contains("] stopped") && s.contents().trim_end().ends_with("rill>")
@@ -1252,8 +1283,8 @@ fn resumed_stream_callbacks_read_current_environment_and_release_after_completio
 #[test]
 fn foregrounding_an_external_handle_attaches_its_stopped_continuation() -> io::Result<()> {
     let mut terminal = Terminal::new()?;
-    terminal.until(|s| s.contents().trim_end() == "rill>")?;
-    terminal.send(br#"let worker = start (job { ^sh -c 'kill -STOP $$; kill -STOP $$; printf "child-finished\n"' })"#)?;
+    terminal.until(|s| s.contents().trim_end().ends_with("rill>"))?;
+    terminal.send(br#"let worker = start (plan { ^sh -c 'kill -STOP $$; kill -STOP $$; printf "child-finished\n"' })"#)?;
     terminal.send(b"\r")?;
     terminal.until(|s| {
         s.contents().contains("] stopped") && s.contents().trim_end().ends_with("rill>")
@@ -1280,7 +1311,7 @@ fn foregrounding_an_external_handle_attaches_its_stopped_continuation() -> io::R
 #[test]
 fn stopped_foreground_modes_are_saved_and_restored_separately_from_the_shell() -> io::Result<()> {
     let mut terminal = Terminal::new()?;
-    terminal.until(|s| s.contents().trim_end() == "rill>")?;
+    terminal.until(|s| s.contents().trim_end().ends_with("rill>"))?;
     terminal.send(br#"^sh -c 'stty -echo; kill -STOP $$; case " $(stty -a) " in *" -echo "*) printf "retained-modes\n";; *) exit 3;; esac'"#)?;
     terminal.send(b"\r")?;
     terminal.until(|s| {
@@ -1299,8 +1330,8 @@ fn stopped_foreground_modes_are_saved_and_restored_separately_from_the_shell() -
 #[test]
 fn force_exit_runs_parked_producer_release_before_terminating() -> io::Result<()> {
     let mut terminal = Terminal::new()?;
-    terminal.until(|s| s.contents().trim_end() == "rill>")?;
-    terminal.send(br#"produce { acquire: { () => stream (job { ^sh -c 'kill -STOP $$' }) }, step: { source => do { collect_bytes source; Option.None } }, release: { state reason => print "shutdown-release" } } |> collect"#)?;
+    terminal.until(|s| s.contents().trim_end().ends_with("rill>"))?;
+    terminal.send(br#"seq.produce { acquire: { () => stream (plan { ^sh -c 'kill -STOP $$' }) }, step: { source => do { collect_bytes source; Option.None } }, release: { state reason => print "shutdown-release" } } |> collect"#)?;
     terminal.send(b"\r")?;
     terminal.until(|s| {
         s.contents().contains("] stopped") && s.contents().trim_end().ends_with("rill>")
@@ -1322,19 +1353,19 @@ fn force_exit_runs_parked_producer_release_before_terminating() -> io::Result<()
 fn blocked_launch_setup_can_stop_and_cancel_without_releasing_targets() -> io::Result<()> {
     for mode in ["run", "capture", "stream", "start", "through"] {
         let mut terminal = Terminal::new()?;
-        terminal.until(|s| s.contents().trim_end() == "rill>")?;
+        terminal.until(|s| s.contents().trim_end().ends_with("rill>"))?;
         let gate = terminal.home.path().join("stopped-launch-gate");
         let marker = terminal.home.path().join("stopped-launch-marker");
         assert!(Command::new("mkfifo").arg(&gate).status()?.success());
         let plan = if mode == "through" {
             format!(
-                "job {{ ^cat | ^cat 2> {:?} > {:?} | ^cat }}",
+                "plan {{ ^cat | ^cat 2> {:?} > {:?} | ^cat }}",
                 marker.to_str().unwrap(),
                 gate.to_str().unwrap()
             )
         } else {
             format!(
-                "job {{ ^printf never > {:?} < {:?} }}",
+                "plan {{ ^printf never > {:?} < {:?} }}",
                 marker.to_str().unwrap(),
                 gate.to_str().unwrap()
             )
@@ -1378,7 +1409,7 @@ fn blocked_launch_setup_can_stop_and_cancel_without_releasing_targets() -> io::R
 #[test]
 fn foreground_resume_continues_the_original_blocked_launch_barrier() -> io::Result<()> {
     let mut terminal = Terminal::new()?;
-    terminal.until(|s| s.contents().trim_end() == "rill>")?;
+    terminal.until(|s| s.contents().trim_end().ends_with("rill>"))?;
     let gate = terminal.home.path().join("resume-launch-gate");
     let marker = terminal.home.path().join("resume-launch-marker");
     assert!(Command::new("mkfifo").arg(&gate).status()?.success());
@@ -1431,8 +1462,8 @@ fn foreground_resume_continues_the_original_blocked_launch_barrier() -> io::Resu
 #[test]
 fn explicit_cancel_reports_release_failure_without_cancelling_its_caller() -> io::Result<()> {
     let mut terminal = Terminal::new()?;
-    terminal.until(|s| s.contents().trim_end() == "rill>")?;
-    terminal.send(br#"produce { acquire: { () => stream (job { ^sh -c 'kill -STOP $$' }) }, step: { source => do { collect_bytes source; Option.None } }, release: { state reason => raise (error "ReleaseFailed" "release diagnostic") } } |> collect"#)?;
+    terminal.until(|s| s.contents().trim_end().ends_with("rill>"))?;
+    terminal.send(br#"seq.produce { acquire: { () => stream (plan { ^sh -c 'kill -STOP $$' }) }, step: { source => do { collect_bytes source; Option.None } }, release: { state reason => raise (error "ReleaseFailed" "release diagnostic") } } |> collect"#)?;
     terminal.send(b"\r")?;
     terminal.until(|s| {
         s.contents().contains("] stopped") && s.contents().trim_end().ends_with("rill>")
@@ -1464,7 +1495,7 @@ fn suspended_output_resumes_without_replaying_its_written_prefix() -> io::Result
         command.stdout(Stdio::from(writer));
         Ok(())
     })?;
-    terminal.until(|s| s.contents().trim_end() == "rill>")?;
+    terminal.until(|s| s.contents().trim_end().ends_with("rill>"))?;
     terminal.send(
         format!(
             "write_bytes (encode_utf8 (read_text {:?}))\r",
@@ -1504,17 +1535,17 @@ fn suspended_output_resumes_without_replaying_its_written_prefix() -> io::Result
 
 #[test]
 fn merged_foreground_calls_share_one_terminal_lease() -> io::Result<()> {
-    read_two_foreground_calls(br#"do { let first = items [()] |> map { () => run job { ^sh -c "printf 'first-ready\\n'; IFS= read -r reply; test \"$reply\" = answer" } }; let second = items [()] |> map { () => run job { ^sh -c "printf 'second-ready\\n'; IFS= read -r reply; test \"$reply\" = answer" } }; collect (merge [first, second]); 42 }"#)
+    read_two_foreground_calls(br#"do { let first = items [()] |> map { () => run plan { ^sh -c "printf 'first-ready\\n'; IFS= read -r reply; test \"$reply\" = answer" } }; let second = items [()] |> map { () => run plan { ^sh -c "printf 'second-ready\\n'; IFS= read -r reply; test \"$reply\" = answer" } }; collect (merge [first, second]); 42 }"#)
 }
 
 #[test]
 fn merged_foreground_handles_share_one_terminal_lease() -> io::Result<()> {
-    read_two_foreground_calls(br#"do { let first = start job { ^sh -c "kill -STOP $$; printf 'first-ready\\n'; IFS= read -r reply; test \"$reply\" = answer" < /dev/tty }; let second = start job { ^sh -c "kill -STOP $$; printf 'second-ready\\n'; IFS= read -r reply; test \"$reply\" = answer" < /dev/tty }; attempt { () => wait first }; attempt { () => wait second }; collect (merge [items [first] |> map fg, items [second] |> map fg]); 42 }"#)
+    read_two_foreground_calls(br#"do { let first = start plan { ^sh -c "kill -STOP $$; printf 'first-ready\\n'; IFS= read -r reply; test \"$reply\" = answer" < /dev/tty }; let second = start plan { ^sh -c "kill -STOP $$; printf 'second-ready\\n'; IFS= read -r reply; test \"$reply\" = answer" < /dev/tty }; attempt { () => wait first }; attempt { () => wait second }; collect (merge [items [first] |> map fg, items [second] |> map fg]); 42 }"#)
 }
 
 fn read_two_foreground_calls(source: &[u8]) -> io::Result<()> {
     let mut terminal = Terminal::new()?;
-    terminal.until(|s| s.contents().trim_end() == "rill>")?;
+    terminal.until(|s| s.contents().trim_end().ends_with("rill>"))?;
     terminal.send(source)?;
     terminal.send(b"\r")?;
     terminal.until(|s| {
@@ -1552,15 +1583,121 @@ fn process_streams_relay_terminal_errors_with_tostop_enabled() -> io::Result<()>
         rustix::termios::tcsetattr(slave, rustix::termios::OptionalActions::Now, &modes)?;
         Ok(())
     })?;
-    terminal.until(|screen| screen.contents().trim_end() == "rill>")?;
+    terminal.until(|screen| screen.contents().trim_end().ends_with("rill>"))?;
     terminal.send(
-        b"stream (job { ^sh -c 'printf warning >&2; printf value' }) |> collect; print \"done\"\r",
+        b"stream (plan { ^sh -c 'printf warning >&2; printf value' }) |> collect; print \"done\"\r",
     )?;
     terminal.until(|screen| {
-        screen.contents().contains("warning") && screen.contents().contains("done\nrill>")
+        screen.contents().contains("warning")
+            && screen.contents().contains("done")
+            && screen.contents().trim_end().ends_with("rill>")
     })?;
-    terminal.send(b"stream (job { ^true }) |> collect; print \"quiet\"\r")?;
-    terminal.until(|screen| screen.contents().contains("quiet\nrill>"))?;
+    terminal.send(b"stream (plan { ^true }) |> collect; print \"quiet\"\r")?;
+    terminal.until(|screen| {
+        screen.contents().lines().any(|line| line == "quiet")
+            && screen.contents().trim_end().ends_with("rill>")
+    })?;
     terminal.send(b"\x04")?;
     terminal.wait_for_exit()
+}
+
+#[test]
+fn external_editor_returns_atomic_replacements_to_editing_without_execution() -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut terminal = Terminal::configured(|home, command, _| {
+        let editor = home.join("editor");
+        std::fs::write(
+            &editor,
+            "#!/bin/sh\nprintf '40 + 2' > \"$1.new\"\nmv \"$1.new\" \"$1\"\n",
+        )?;
+        std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o700))?;
+        command.env("VISUAL", editor);
+        Ok(())
+    })?;
+    terminal.until(|screen| screen.contents().trim_end().ends_with("rill>"))?;
+    terminal.send(b"original input\x0f")?;
+    terminal.until(|screen| screen.contents().trim_end().ends_with("rill> 40 + 2"))?;
+    assert!(
+        !terminal
+            .parser
+            .screen()
+            .contents()
+            .lines()
+            .any(|line| line == "42")
+    );
+    // Enter submits a complete buffer even when the cursor is at the start.
+    terminal.send(b"\x01\r")?;
+    terminal.until(|screen| {
+        screen.contents().lines().any(|line| line == "42")
+            && screen.contents().trim_end().ends_with("rill>")
+    })?;
+    terminal.send(b"\x04")?;
+    terminal.wait_for_exit()
+}
+
+#[test]
+fn quick_directory_completion_keeps_one_argument_open_for_the_next_component() -> io::Result<()> {
+    let mut terminal = Terminal::configured(|home, command, _| {
+        std::fs::create_dir(home.join("space dir"))?;
+        std::fs::write(home.join("space dir/data"), b"completed")?;
+        command.current_dir(home);
+        Ok(())
+    })?;
+    terminal.until(|screen| screen.contents().trim_end().ends_with("rill>"))?;
+    terminal.send(b"read_text \"sp\t")?;
+    terminal.until(|screen| {
+        screen
+            .contents()
+            .trim_end()
+            .ends_with("rill> read_text \"space dir/")
+    })?;
+    terminal.send(b"da\t")?;
+    terminal.until(|screen| {
+        screen
+            .contents()
+            .trim_end()
+            .ends_with("rill> read_text \"space dir/data\"")
+    })?;
+    terminal.send(b"\r")?;
+    terminal.until(|screen| {
+        screen
+            .contents()
+            .lines()
+            .any(|line| line == "\"completed\"")
+            && screen.contents().trim_end().ends_with("rill>")
+    })?;
+    Ok(())
+}
+
+#[test]
+fn failed_external_edits_keep_the_original_buffer() -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    for (script, error) in [
+        ("printf 'discarded' > \"$1\"; exit 7", "EditorError"),
+        ("rm \"$1\"; mkfifo \"$1\"", "IOError"),
+        ("rm \"$1\"; mkdir \"$1\"", "IOError"),
+        ("printf '\\377' > \"$1\"", "DecodeError"),
+    ] {
+        let mut terminal = Terminal::configured(|home, command, _| {
+            let editor = home.join("editor");
+            std::fs::write(&editor, format!("#!/bin/sh\n{script}\n"))?;
+            std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o700))?;
+            command.env("VISUAL", editor);
+            Ok(())
+        })?;
+        terminal.until(|screen| screen.contents().trim_end().ends_with("rill>"))?;
+        terminal.send(b"40 + 2\x0f")?;
+        terminal.until(|screen| {
+            screen.contents().contains(error)
+                && screen.contents().trim_end().ends_with("rill> 40 + 2")
+        })?;
+        terminal.send(b"\r")?;
+        terminal.until(|screen| {
+            screen.contents().lines().any(|line| line == "42")
+                && screen.contents().trim_end().ends_with("rill>")
+        })?;
+        terminal.send(b"\x04")?;
+        terminal.wait_for_exit()?;
+    }
+    Ok(())
 }

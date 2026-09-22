@@ -24,13 +24,15 @@ pub fn render(value: Value<'_>, width: usize) -> Option<String> {
         )),
         Value::List(values) if !values.as_slice().is_empty() => {
             let values = values.as_slice();
-            let names = match &values[0] {
-                Value::Record(first) => first.keys().take(COLUMNS).collect::<Vec<_>>(),
-                _ => Vec::new(),
+            let (names, field_count) = match &values[0] {
+                Value::Record(first) => {
+                    (first.keys().take(COLUMNS).collect::<Vec<_>>(), first.len())
+                }
+                _ => (Vec::new(), 0),
             };
             if !names.is_empty()
                 && values.iter().take(ROWS).all(|value| {
-                    matches!(value, Value::Record(fields) if names.iter().all(|name| fields.contains_key(*name)))
+                    matches!(value, Value::Record(fields) if fields.len() == field_count && names.iter().all(|name| fields.contains_key(*name)))
                 })
             {
                 let rows = values.iter().take(ROWS).map(|value| {
@@ -45,9 +47,7 @@ pub fn render(value: Value<'_>, width: usize) -> Option<String> {
                     width,
                     values.len().saturating_sub(ROWS),
                 );
-                if values.iter().take(ROWS).any(|value| {
-                    matches!(value, Value::Record(fields) if fields.len() > names.len())
-                }) {
+                if field_count > names.len() {
                     output.push('\n');
                     output.push_str(&fit("… additional fields omitted", width));
                 }
@@ -67,10 +67,80 @@ pub fn render(value: Value<'_>, width: usize) -> Option<String> {
     }
 }
 
+/// A bounded structural preview for streamed rows and nested table cells.
+/// It neither drains resources nor evaluates functions.
+#[must_use]
+pub fn compact(value: Value<'_>) -> String {
+    preview(format_args!("{}", Brief(value, 0)))
+}
+struct Brief<'gc>(Value<'gc>, usize);
+impl fmt::Display for Brief<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.1 == 4 {
+            return f.write_str("…");
+        }
+        match self.0 {
+            Value::List(list) => {
+                f.write_str("[")?;
+                for (index, value) in list.as_slice().iter().take(8).enumerate() {
+                    if index != 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{}", Brief(*value, self.1 + 1))?;
+                }
+                if list.as_slice().len() > 8 {
+                    f.write_str(", …")?;
+                }
+                f.write_str("]")
+            }
+            Value::Record(fields) => fields_preview(f, &fields, self.1),
+            Value::Adt(value) => {
+                write!(f, "{}", value.descriptor.name)?;
+                if !value.fields.is_empty() {
+                    f.write_str(" ")?;
+                    fields_preview(f, &value.fields, self.1)?;
+                }
+                Ok(())
+            }
+            Value::Bytes(bytes) => {
+                f.write_str("bytes [")?;
+                for (index, byte) in bytes.0.iter().take(16).enumerate() {
+                    if index != 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{byte}")?;
+                }
+                if bytes.0.len() > 16 {
+                    write!(f, ", …; {} bytes", bytes.0.len())?;
+                }
+                f.write_str("]")
+            }
+            value => f.write_str(&summary(value).unwrap_or_else(|| "()".into())),
+        }
+    }
+}
+fn fields_preview(
+    f: &mut fmt::Formatter<'_>,
+    fields: &indexmap::IndexMap<String, Value<'_>>,
+    depth: usize,
+) -> fmt::Result {
+    f.write_str("{")?;
+    for (index, (name, value)) in fields.iter().take(8).enumerate() {
+        if index != 0 {
+            f.write_str(", ")?;
+        }
+        write!(f, "{}: {}", name.escape_debug(), Brief(*value, depth + 1))?;
+    }
+    if fields.len() > 8 {
+        f.write_str(", …")?;
+    }
+    f.write_str("}")
+}
+
 fn cell(value: Value<'_>) -> String {
     match value {
         Value::String(text) => escaped(&text),
-        _ => summary(value).unwrap_or_else(|| "()".into()),
+        _ => compact(value),
     }
 }
 

@@ -71,6 +71,7 @@ enum Operation {
 enum Product {
     Reply(Response),
     Directory(rill_system::resources::DirectorySource),
+    File(std::os::fd::OwnedFd, bool),
 }
 impl Operation {
     async fn ready(
@@ -445,12 +446,7 @@ impl Session {
                         Ok(response)
                     }
                 }
-                Operation::Ready(result) => match result? {
-                    Product::Reply(response) => Ok(response),
-                    Product::Directory(directory) => {
-                        Ok(Response::Source(self.sources.register_directory(directory)))
-                    }
-                },
+                Operation::Ready(result) => self.publish_product(result?),
                 Operation::Launch(launch) => Ok(self.publish_launch(*launch)),
                 Operation::Write { writer, stderr } => {
                     self.writers.reuse(stderr, *writer).await?;
@@ -473,6 +469,19 @@ impl Session {
             });
         }
         result
+    }
+    fn publish_product(&mut self, product: Product) -> Result<Response, SourceError> {
+        match product {
+            Product::Reply(response) => Ok(response),
+            Product::File(fd, write) => self
+                .sources
+                .register_file(fd, write)
+                .map(Response::Source)
+                .map_err(SourceError::from),
+            Product::Directory(directory) => {
+                Ok(Response::Source(self.sources.register_directory(directory)))
+            }
+        }
     }
     pub(super) fn retain_operation(
         &mut self,
@@ -524,6 +533,7 @@ impl Session {
                 return self.defer_write(text.into_bytes().into(), true).await;
             }
             Request::Write(bytes) => return self.defer_write(bytes, false).await,
+            Request::WriteError(bytes) => return self.defer_write(bytes, true).await,
             request => request,
         };
         let operation = match request {
@@ -555,6 +565,13 @@ impl Session {
                 mode,
                 max_bytes,
             } => Operation::Run(Box::new(self.prepare_run(plan, mode, max_bytes).await?)),
+            Request::OpenFile { path, append } => {
+                let cwd = self.snapshot.cwd.try_clone()?;
+                Operation::File(tokio::task::spawn_blocking(move || {
+                    rill_system::resources::open_file(&cwd, &path, append)
+                        .map(|fd| Product::File(fd, append.is_some()))
+                }))
+            }
             Request::Files(path) => {
                 let cwd = self.snapshot.cwd.try_clone()?;
                 Operation::File(tokio::task::spawn_blocking(move || {

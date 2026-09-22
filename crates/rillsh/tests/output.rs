@@ -69,7 +69,7 @@ fn interrupt_reaps_a_writer_without_draining_its_output() -> io::Result<()> {
 #[test]
 fn many_acknowledged_writes_preserve_exact_bytes_and_external_order() -> io::Result<()> {
     let output = Command::new(env!("CARGO_BIN_EXE_rillsh"))
-        .args(["-c", r#"each { n => do { write_bytes (encode_utf8 (text n)); write_bytes (encode_utf8 "\u{0}") } } [0, 1, 2, 3]; ^printf end"#])
+        .args(["-c", r#"each { n => do { write_bytes (encode_utf8 (string n)); write_bytes (encode_utf8 "\u{0}") } } [0, 1, 2, 3]; ^printf end"#])
         .output()?;
     assert!(
         output.status.success(),

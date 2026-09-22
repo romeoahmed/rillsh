@@ -12,7 +12,7 @@ pub struct Stage {
     pub argv: Vec<CString>,
     pub redirects: Vec<Redirect>,
     pub cwd: Option<PathBuf>,
-    pub environment: BTreeMap<CString, CString>,
+    pub environment: BTreeMap<CString, Option<CString>>,
     pub accepted_codes: Vec<u8>,
 }
 impl Default for Stage {

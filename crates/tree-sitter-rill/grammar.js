@@ -37,7 +37,7 @@ const expressionRules = (soft) => {
         $.recursive_closure,
         $.group,
         $.block,
-        $.job,
+        $.plan,
       ),
     ["call_expression" + suffix]: ($) =>
       prec.left(
@@ -370,7 +370,7 @@ export default grammar({
         "}",
       ),
     block: ($) => seq("do", "{", repeat($._separator), optional($._body), "}"),
-    job: ($) => seq("job", "{", repeat($._newline), $.command_pipeline, repeat($._newline), "}"),
+    plan: ($) => seq("plan", "{", repeat($._newline), $.command_pipeline, repeat($._newline), "}"),
     command_pipeline: ($) =>
       prec.left(
         seq($.command, repeat(seq(optional($._pipeline_gap), "|", repeat($._newline), $.command))),
@@ -414,7 +414,7 @@ export default grammar({
         "struct",
         "enum",
         "with",
-        "job",
+        "plan",
         "import",
         "as",
         "export",

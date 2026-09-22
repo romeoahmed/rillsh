@@ -13,6 +13,17 @@ fn syntax(c: &mut Criterion) {
     c.bench_function("completion/multiline-context", |b| {
         b.iter(|| rill_syntax::completion::query(black_box(&entry), entry.len()).unwrap());
     });
+    for (name, source) in [
+        ("complete", "do { let local = 1; local }"),
+        ("unfinished", "^echo $(do { let local = 1; loc"),
+    ] {
+        let cursor = source.rfind("loc").unwrap() + 3;
+        let query = rill_syntax::completion::query(source, cursor).unwrap();
+        assert_eq!(query.local_names(source), ["local"]);
+        c.bench_function(&format!("completion/lexical-scope/{name}"), |b| {
+            b.iter(|| query.local_names(black_box(source)));
+        });
+    }
     c.bench_function("parse/sequence-library", |b| {
         b.iter(|| parse("seq", black_box(source)).unwrap());
     });

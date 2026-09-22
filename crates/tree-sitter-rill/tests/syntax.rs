@@ -67,7 +67,7 @@ fn application_and_newlines_keep_their_execution_meaning() {
         "^echo\"x\"",
         "x [0].",
         "fn f x =",
-        "job { ^cat |",
+        "plan { ^cat |",
     ] {
         assert!(
             parser.parse(source, None).unwrap().root_node().has_error(),
@@ -85,7 +85,7 @@ fn bare_command_arguments_keep_expression_punctuation_as_data() {
         "^printf %s a(b)[c]",
         "^printf %s a\u{000b}b",
         "^#executable argument#suffix",
-        "job { ^printf %s [value] | ^cat }",
+        "plan { ^printf %s [value] | ^cat }",
     ] {
         valid(&mut parser, source);
     }
@@ -107,7 +107,7 @@ fn incremental_edits_match_fresh_parse_including_ranges() {
     for (before, start, old_end, replacement) in [
         ("f x", 1, 2, "\n"),
         ("(f x)", 2, 3, "\n"),
-        ("job { ^printf hi }", 14, 16, "$name"),
+        ("plan { ^printf hi }", 15, 17, "$name"),
         ("{x => x}", 6, 7, "x\n x"),
         ("let value = [1, 2]", 16, 17, ""),
     ] {

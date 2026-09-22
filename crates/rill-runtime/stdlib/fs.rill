@@ -1,3 +1,19 @@
+import "std:seq" as seq
+
+## Open a regular file as a scoped stream of Bytes; paths resolve at opening.
+fn read_file file = __stream ["read_file", file]
+
+fn read_bytes_with options file = read_file file |> seq.collect_bytes_with options
+
+let read_bytes = read_bytes_with {}
+
+## Truncate a regular file and consume Bytes chunks into it; writes are not atomic.
+fn write_file file input = __stream ["write_file", file, input]
+
+## Append Bytes chunks to a regular file; close it before returning.
+fn append_file file input = __stream ["append_file", file, input]
+
+## Stream directory metadata without following entry symlinks.
 fn files directory = __stream ["files", directory]
 
 fn glob pattern = __data ["glob", pattern]
@@ -13,6 +29,11 @@ fn basename value = __pure ["basename", value]
 fn dirname value = __pure ["dirname", value]
 
 export {
+  read_file,
+  read_bytes,
+  read_bytes_with,
+  write_file,
+  append_file,
   files,
   glob,
   read_text,

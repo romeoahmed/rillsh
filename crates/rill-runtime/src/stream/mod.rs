@@ -43,6 +43,12 @@ pub enum Source<'gc> {
         input: Node<'gc>,
         transform: Value<'gc>,
     },
+    FlatMap {
+        input: Node<'gc>,
+        transform: Value<'gc>,
+        inner: Option<Node<'gc>>,
+        owner: u64,
+    },
     Filter {
         input: Node<'gc>,
         predicate: Value<'gc>,
@@ -76,6 +82,7 @@ pub enum Source<'gc> {
 pub struct Zip<'gc> {
     inputs: Vec<Node<'gc>>,
     tuple: Vec<Value<'gc>>,
+    ended: bool,
 }
 pub enum Outcome<'gc> {
     Host(crate::host::Request),
@@ -129,21 +136,15 @@ pub fn apply<'gc>(
     let [Value::String(name), args @ ..] = request.as_slice() else {
         return Err(Error::type_error("invalid stream request"));
     };
+    if let Some(request) = host(name, args)? {
+        return Ok(Outcome::Host(request));
+    }
     let source = match (name.as_str(), args) {
         ("produce", [protocol]) => {
             return Ok(Outcome::Producer(producer::Protocol::new(*protocol)?));
         }
-        ("stdin", []) => return Ok(Outcome::Host(crate::host::Request::Stdin)),
         ("through", [Value::Plan(plan), input]) => {
             return feed::connect(mc, &plan.0, *input, owner);
-        }
-        ("stream", [Value::Plan(plan)]) => {
-            return Ok(Outcome::Host(crate::host::Request::Stream(plan.0.clone())));
-        }
-        ("files", [path]) => {
-            return Ok(Outcome::Host(crate::host::Request::Files(
-                native::native_path(*path)?.to_path_buf(),
-            )));
         }
         ("merge", [Value::List(values)]) => Source::Merge(Gc::new(
             mc,
@@ -163,6 +164,7 @@ pub fn apply<'gc>(
                     RefLock::new(Zip {
                         inputs,
                         tuple: Vec::new(),
+                        ended: false,
                     }),
                 ))
             }
@@ -174,6 +176,15 @@ pub fn apply<'gc>(
             Source::Unfold {
                 step: *step,
                 state: *state,
+            }
+        }
+        ("flat_map", [transform, stream]) => {
+            callable(*transform)?;
+            Source::FlatMap {
+                input: consume(mc, *stream, owner)?,
+                transform: *transform,
+                inner: None,
+                owner,
             }
         }
         ("map" | "filter", [callback, stream]) => {
@@ -191,8 +202,8 @@ pub fn apply<'gc>(
                 }
             }
         }
-        ("lines", [options, stream]) => {
-            let buffer = lines::Lines::new(*options)?;
+        ("lines" | "split_nul", [options, stream]) => {
+            let buffer = lines::Lines::new(*options, name.as_str() == "split_nul")?;
             let input = consume(mc, *stream, owner)?;
             Source::Lines {
                 input,
@@ -218,6 +229,19 @@ pub fn apply<'gc>(
         _ => return consumer(mc, name, args, owner),
     };
     Ok(Outcome::Value(token(mc, owner, source)))
+}
+fn host(name: &str, args: &[Value<'_>]) -> Result<Option<crate::host::Request>, Error> {
+    use crate::host::Request;
+    Ok(match (name, args) {
+        ("stdin", []) => Some(Request::Stdin),
+        ("stream", [Value::Plan(plan)]) => Some(Request::Stream(plan.0.clone())),
+        ("read_file", [path]) => Some(Request::OpenFile {
+            path: native::native_path(*path)?.to_path_buf(),
+            append: None,
+        }),
+        ("files", [path]) => Some(Request::Files(native::native_path(*path)?.to_path_buf())),
+        _ => None,
+    })
 }
 fn consumer<'gc>(
     mc: &Mutation<'gc>,
@@ -245,7 +269,20 @@ fn consumer<'gc>(
                 limit: native::service::byte_limit(*options)?,
             },
         ),
-        ("write", [stream]) => (*stream, Consumer::Write),
+        ("write_file" | "append_file", [path, stream]) => (
+            *stream,
+            Consumer::File {
+                path: Some(native::native_path(*path)?.to_path_buf()),
+                append: name == "append_file",
+                sink: None,
+            },
+        ),
+        ("write" | "write_stderr", [stream]) => (
+            *stream,
+            Consumer::Write {
+                stderr: name == "write_stderr",
+            },
+        ),
         ("fold" | "fold_until", [step, initial, stream]) => {
             callable(*step)?;
             (

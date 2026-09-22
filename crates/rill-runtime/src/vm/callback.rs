@@ -79,8 +79,10 @@ impl<'gc> Vm<'gc> {
                         | crate::host::Request::Glob(_)
                         | crate::host::Request::ReadText { .. }
                         | crate::host::Request::Write(_)
+                        | crate::host::Request::WriteError(_)
                         | crate::host::Request::Display(_)
                         | crate::host::Request::Files(_)
+                        | crate::host::Request::OpenFile { .. }
                         | crate::host::Request::Start(_)
                         | crate::host::Request::Stream(_)
                         | crate::host::Request::Through(_)

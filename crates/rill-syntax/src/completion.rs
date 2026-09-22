@@ -150,6 +150,183 @@ pub fn query(source: &str, cursor: usize) -> Option<Query> {
     })
 }
 
+impl Query {
+    /// Resolve lexical bindings at this query without evaluating initializers.
+    /// Field queries return only a shadowing local receiver root, if present.
+    #[must_use]
+    pub fn local_names(&self, source: &str) -> Vec<String> {
+        let (Some(before), Some(after)) =
+            (source.get(..self.span.start), source.get(self.span.end..))
+        else {
+            return Vec::new();
+        };
+        // Insert an expression even at an empty cursor, so later declarations cannot
+        // leak into its scope. Keep the suffix for mutually recursive function groups.
+        let prefix = format!("{before}rill_completion_marker");
+        let probe = format!("{prefix}{after}");
+        let module = crate::parse("<completion>", &probe).or_else(|_| {
+            let mut repaired = prefix;
+            let mut closers = Vec::new();
+            if let Ok(tokens) = lex(&repaired) {
+                for token in tokens {
+                    match token.kind {
+                        Kind::OpenBrace => closers.push('}'),
+                        Kind::OpenList => closers.push(']'),
+                        Kind::OpenParen => closers.push(')'),
+                        Kind::CloseBrace | Kind::CloseList | Kind::CloseParen => {
+                            closers.pop();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            repaired.extend(closers.into_iter().rev());
+            crate::parse("<completion>", &repaired)
+        });
+        let Ok(module) = module else {
+            return Vec::new();
+        };
+        let mut names = Vec::new();
+        local_statements(&module, &module.statements, self.span.start, &mut names);
+        names.retain(|name| {
+            name != "_"
+                && self
+                    .parents
+                    .first()
+                    .map_or_else(|| name.starts_with(&self.prefix), |root| name == root)
+        });
+        names.sort();
+        names.dedup();
+        names
+    }
+}
+fn pattern_names(pattern: &crate::ast::Pattern, names: &mut Vec<String>) {
+    use crate::ast::{Pattern, Rest};
+    let mut pending = vec![pattern];
+    while let Some(pattern) = pending.pop() {
+        match pattern {
+            Pattern::Bind(name) => names.push(name.clone()),
+            Pattern::List(items, rest) => {
+                pending.extend(items);
+                names.extend(rest.iter().cloned());
+            }
+            Pattern::Record(fields, rest) => {
+                pending.extend(fields.iter().map(|(_, pattern)| pattern));
+                if let Rest::Bind(name) = rest {
+                    names.push(name.clone());
+                }
+            }
+            Pattern::Constructor(_, Some(pattern)) => pending.push(pattern),
+            _ => {}
+        }
+    }
+}
+fn local_statements(
+    module: &crate::ast::Module,
+    statements: &[crate::ast::Statement],
+    cursor: usize,
+    names: &mut Vec<String>,
+) {
+    use crate::ast::Statement;
+    for statement in statements {
+        match statement {
+            Statement::Let(pattern, value) => {
+                if module.expression(*value).span.end <= cursor {
+                    pattern_names(pattern, names);
+                } else {
+                    local_expression(module, *value, cursor, names);
+                    break;
+                }
+            }
+            Statement::Expression(value) => {
+                if module.expression(*value).span.end > cursor {
+                    local_expression(module, *value, cursor, names);
+                    break;
+                }
+            }
+            Statement::Functions(functions) => {
+                if functions
+                    .first()
+                    .is_some_and(|function| function.span.start > cursor)
+                {
+                    break;
+                }
+                names.extend(functions.iter().map(|function| function.name.clone()));
+                if let Some(function) = functions
+                    .iter()
+                    .find(|function| module.expression(function.body).span.contains(&cursor))
+                {
+                    for parameter in &function.parameters {
+                        pattern_names(parameter, names);
+                    }
+                    local_expression(module, function.body, cursor, names);
+                    break;
+                }
+            }
+            Statement::Command(_) => {
+                let mut contains_cursor = false;
+                statement.children(&mut |id| {
+                    if module.expression(id).span.contains(&cursor) {
+                        local_expression(module, id, cursor, names);
+                        contains_cursor = true;
+                    }
+                });
+                if contains_cursor {
+                    break;
+                }
+            }
+            Statement::Struct(name, _)
+            | Statement::Enum(name, _)
+            | Statement::Import { name, .. } => names.push(name.clone()),
+            Statement::Export(_) => {}
+        }
+    }
+}
+fn local_expression(
+    module: &crate::ast::Module,
+    id: crate::ast::ExprId,
+    cursor: usize,
+    names: &mut Vec<String>,
+) {
+    use crate::ast::ExprKind;
+    let expression = module.expression(id);
+    if !expression.span.contains(&cursor) {
+        return;
+    }
+    match &expression.kind {
+        ExprKind::Block(statements) => local_statements(module, statements, cursor, names),
+        ExprKind::Closure {
+            name,
+            parameters,
+            body,
+        } => {
+            names.extend(name.iter().cloned());
+            for parameter in parameters {
+                pattern_names(parameter, names);
+            }
+            local_expression(module, *body, cursor, names);
+        }
+        ExprKind::Match { subject, arms } => {
+            local_expression(module, *subject, cursor, names);
+            for arm in arms {
+                if module.expression(arm.body).span.contains(&cursor)
+                    || arm
+                        .guard
+                        .is_some_and(|guard| module.expression(guard).span.contains(&cursor))
+                {
+                    pattern_names(&arm.pattern, names);
+                    if let Some(guard) = arm.guard {
+                        local_expression(module, guard, cursor, names);
+                    }
+                    local_expression(module, arm.body, cursor, names);
+                    break;
+                }
+            }
+        }
+        kind => kind.children(&mut |child| local_expression(module, child, cursor, names)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,6 +405,59 @@ mod tests {
         assert!(super::query(source, 2).is_none());
         assert!(super::query(source, source.len() + 1).is_none());
     }
+    #[test]
+    fn local_bindings_follow_lexical_scope_without_evaluation() {
+        for (source, expected) in [
+            ("do { let local = missing (); loc", vec!["local"]),
+            ("{ parameter => par", vec!["parameter"]),
+            ("rec { again value => aga", vec!["again"]),
+            (
+                "match value of { Option.Some {value: payload} => pay",
+                vec!["payload"],
+            ),
+            ("do { let local = loc", vec![]),
+            ("do { let hidden = 1 }; hid", vec![]),
+            ("let text = missing (); text.sc", vec!["text"]),
+            ("{ text => text.nested.sc", vec!["text"]),
+            ("let text = text.sc", vec![]),
+            ("do { let text = 1 }; text.sc", vec![]),
+        ] {
+            assert_eq!(
+                query(source, source.len()).unwrap().local_names(source),
+                expected,
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn cursor_scope_keeps_recursive_peers_but_excludes_future_declarations() {
+        for (marked, expected) in [
+            ("let earlier = 1; @\nstruct Later {}", vec!["earlier"]),
+            ("@\nimport 'std:text' as strings", vec![]),
+            (
+                "rec { fn first () = sec@; fn second () = first () }",
+                vec!["second"],
+            ),
+            ("^echo $(do { let local = 1; loc@ })", vec!["local"]),
+            (
+                "^echo $(do { let local = 1; loc@ }); struct local_later {}",
+                vec!["local"],
+            ),
+            ("^echo $({ argument => arg@ } 1)", vec!["argument"]),
+            ("let [head, .._] = missing; @", vec!["head"]),
+            ("let {field, .._} = missing; @", vec!["field"]),
+        ] {
+            let cursor = marked.find('@').unwrap();
+            let source = marked.replace('@', "");
+            assert_eq!(
+                query(&source, cursor).unwrap().local_names(&source),
+                expected,
+                "{marked}"
+            );
+        }
+    }
+
     proptest::proptest! {
         #[test]
         fn generated_path_literals_round_trip_arbitrary_unicode(

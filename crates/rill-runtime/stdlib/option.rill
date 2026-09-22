@@ -1,13 +1,22 @@
 import "std:core" as core
 let {Option, ..} = core
 
+## Transform a present payload, preserving absence.
 fn map transform input = match input of {
   Option.Some {value} => Option.Some {value: transform value},
   Option.None => input
 }
 
+## Chain an Option-returning callback; absence skips the callback.
 fn bind transform input = match input of {
-  Option.Some {value} => transform value,
+  Option.Some {value} => do {
+    let output = transform value
+    match output of {
+      Option.Some {value: _} => output,
+      Option.None => output,
+      _ => core.raise (core.error "TypeError" "option.bind callback must return Option")
+    }
+  },
   Option.None => input
 }
 

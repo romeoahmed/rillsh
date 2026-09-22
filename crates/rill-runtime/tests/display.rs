@@ -49,7 +49,7 @@ fn stream_items_display_under_gc_before_bindings_publish() {
             false
         )
         .unwrap(),
-        ["\"a\\u{1b}[2J\"", "<Bytes: 1 bytes>"]
+        ["\"a\\u{1b}[2J\"", "bytes [255]"]
     );
 }
 
@@ -85,4 +85,26 @@ fn failed_display_discards_publication_and_preserves_script_boundaries() {
             result => panic!("unexpected script result: {result:?}"),
         }
     }
+}
+
+#[test]
+fn structural_previews_expose_stream_payloads_and_heterogeneous_fields() {
+    let mut engine = Engine::standard().unwrap();
+    let rows = display(
+        &mut engine,
+        r#"items [{name: "first", payload: some [40, 2]}]"#,
+        false,
+    )
+    .unwrap();
+    assert!(rows[0].contains("name: \"first\""));
+    assert!(rows[0].contains("Option.Some"));
+    assert!(rows[0].contains("[40, 2]"));
+    display(
+        &mut engine,
+        r#"[{name: "first"}, {name: "second", size: 42}]"#,
+        false,
+    )
+    .unwrap();
+    let rendered = engine.inspect(|value| rill_runtime::presentation::render(value, 120).unwrap());
+    assert!(rendered.contains("size: 42"), "{rendered}");
 }

@@ -21,21 +21,28 @@ fn pipelines(c: &mut Criterion) {
     for index in 0..128 {
         std::fs::write(directory.path().join(format!("entry-{index}")), b"rill\n").unwrap();
     }
+    let small_writes = b"x\n".repeat(100);
     let mut group = c.benchmark_group("shell");
     for (name, source, expected) in [
+        ("startup", "()", b"".as_slice()),
+        (
+            "small-writes",
+            r#"range 0 100 |> each { _ => print "x" }"#,
+            &small_writes,
+        ),
         (
             "text",
-            r#"range 0 1000 |> map { n => encode_utf8 (text n + "\n") } |> lines |> map parse_int |> filter { n => rem n 2 == 0 } |> sum |> text |> print"#,
+            r#"range 0 1000 |> map { n => encode_utf8 (string n + "\n") } |> lines |> map parse_int |> filter { n => rem n 2 == 0 } |> sum |> string |> print"#,
             b"249500\n".as_slice(),
         ),
         (
             "filesystem",
-            r#"files "." |> filter { entry => entry.kind == "file" } |> map { entry => entry.size } |> sum |> text |> print"#,
+            r#"files "." |> filter { entry => entry.kind == "file" } |> map { entry => entry.size } |> sum |> string |> print"#,
             b"640\n",
         ),
         (
             "process",
-            r#"range 0 1000 |> map { n => encode_utf8 (text n + "\n") } |> through (job { ^cat }) |> lines |> map parse_int |> filter { n => rem n 2 == 0 } |> sum |> text |> print"#,
+            r#"range 0 1000 |> map { n => encode_utf8 (string n + "\n") } |> through (plan { ^cat }) |> lines |> map parse_int |> filter { n => rem n 2 == 0 } |> sum |> string |> print"#,
             b"249500\n",
         ),
     ] {

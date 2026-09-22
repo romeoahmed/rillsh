@@ -52,7 +52,18 @@ fn candidates<'a, 'gc: 'a>(
                 name,
                 value.signature().map_or_else(
                     || value.kind().into(),
-                    |parameters| format!("Function: {name} {parameters}"),
+                    |parameters| {
+                        let mut signature = format!("Function: {name} {parameters}");
+                        if let Some(doc) = value.documentation().and_then(|doc| doc.lines().next())
+                        {
+                            signature.push_str(" — ");
+                            signature.push_str(&crate::presentation::preview(format_args!(
+                                "{}",
+                                doc.escape_debug()
+                            )));
+                        }
+                        signature
+                    },
                 ),
             )
         })

@@ -56,8 +56,11 @@ boundary:
   parsing, initialization and destruction.
 - VM work includes quanta and GC pacing. Allocation workloads cover discarded cycles
   and scalar materialization. Large fixtures use `BatchSize::LargeInput`.
-- Completion measures lexical context or prepared metadata. CLI pipelines include
-  startup, embedded modules, I/O and cleanup; filesystem setup is untimed.
+- JSON encoding uses prepared records; source-to-result pipelines also include data
+  construction and decoding.
+- Completion measures lexical context, local scope recovery or prepared metadata.
+  CLI pipelines include startup, embedded modules, I/O and cleanup; filesystem setup
+  is untimed.
 
 For a short measurement:
 

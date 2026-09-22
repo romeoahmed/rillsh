@@ -1,13 +1,22 @@
 import "std:core" as core
 let {Result, ..} = core
 
+## Transform a successful payload, preserving failure.
 fn map transform input = match input of {
   Result.Ok {value} => Result.Ok {value: transform value},
   Result.Err {error: _} => input
 }
 
+## Chain a Result-returning callback; failure skips the callback.
 fn bind transform input = match input of {
-  Result.Ok {value} => transform value,
+  Result.Ok {value} => do {
+    let output = transform value
+    match output of {
+      Result.Ok {value: _} => output,
+      Result.Err {error: _} => output,
+      _ => core.raise (core.error "TypeError" "result.bind callback must return Result")
+    }
+  },
   Result.Err {error: _} => input
 }
 

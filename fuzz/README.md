@@ -7,7 +7,9 @@ targets use the smaller domains described below. Evaluation runs to completion;
 AFL++ detects hangs through its execution timeout, without a second instruction-count
 limit in the target:
 
-- `syntax`: UTF-8 decoding, contextual lexing, completion-span boundaries, quoted-path round trips, parsing, validation and bytecode lowering.
+- `syntax`: UTF-8 decoding, contextual lexing, partial highlighting spans, completion
+  boundaries, local scopes, quoted-path round trips, formatter idempotence and preservation
+  of tokens and interior newlines, parsing, validation and bytecode lowering.
   It never evaluates source or loads imports.
 - `json`: arbitrary byte decoding and round trips over JSON-representable values, with
   collection between VM quanta. Only the initial decode may reject input; encoding and
@@ -19,9 +21,10 @@ limit in the target:
 - `producer`: finite demand and state transitions, cutoff versus exhaustion, and lazy
   acquisition, with release invariants checked against an independent integer model
   under collection. It creates no OS resources and requests no host effects.
-- `lines`: chunked UTF-8 decoding against an independent byte-record model, including
-  CRLF, final fragments, invalid encoding and line-byte limits under collection. The
-  first two bytes select chunk size (1–17) and line limit (0–64); the remaining bytes
+- `lines`: chunked UTF-8 and NUL record decoding against an independent byte-record
+  model, including CRLF, final fragments, invalid encoding and line-byte limits under collection. The
+  first byte's high bit selects NUL decoding; the first two bytes select chunk size
+  (1–17) and record limit (0–64). The remaining bytes
   are payload. Inputs contain 2–4,096 bytes. No host effects are available.
 - `equality`: shared acyclic Lists/Records compared with independently expanded Rust
   trees under collection, including reordered fields, reflexivity, symmetry and `!=`.

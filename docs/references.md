@@ -32,6 +32,8 @@ selected mechanisms. Cargo manifests and lockfiles own dependency versions.
   [unicode-segmentation](https://docs.rs/unicode-segmentation/latest/unicode_segmentation/),
   [unicode-width](https://docs.rs/unicode-width/latest/unicode_width/) and
   [Ariadne](https://docs.rs/ariadne/latest/ariadne/): editing, display and diagnostics.
+- [tempfile](https://docs.rs/tempfile/latest/tempfile/): private temporary directories
+  for modal editing; reopen by name after an editor performs atomic replacement.
 - [Tree-sitter](https://tree-sitter.github.io/tree-sitter/): grammar packages, queries,
   generation and incremental edit protocols.
 

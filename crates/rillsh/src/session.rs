@@ -1,5 +1,6 @@
 //! One coordinator owns VM quanta, external requests, and explicit child cleanup.
 mod continuation;
+mod editor;
 mod execution;
 mod files;
 mod glob;
@@ -15,7 +16,7 @@ use rill_system::{
     job::{LaunchMode, Snapshot},
     plan::Plan,
 };
-use std::{io, path::PathBuf};
+use std::{fmt::Write as _, io, path::PathBuf};
 use tokio::signal::unix::{Signal, SignalKind, signal};
 
 pub struct Session {
@@ -45,6 +46,30 @@ pub enum InputEvent {
     Suspend,
 }
 impl Session {
+    pub fn prompt_context(&mut self, status: u8) -> String {
+        let directory = self
+            .snapshot
+            .environment
+            .get(c"PWD")
+            .map_or_else(String::new, |value| {
+                String::from_utf8_lossy(value.as_bytes())
+                    .chars()
+                    .take(160)
+                    .flat_map(char::escape_debug)
+                    .collect()
+            });
+        let mut context = directory;
+        if status != 0 {
+            write!(context, "  exit {status}").expect("String formatting is infallible");
+        }
+        if let Ok(jobs) = self.job_snapshots() {
+            let stopped = jobs.iter().filter(|job| job.state == "stopped").count();
+            if stopped != 0 {
+                write!(context, "  {stopped} stopped").expect("String formatting is infallible");
+            }
+        }
+        context
+    }
     pub fn completion_context(&self) -> io::Result<(PathBuf, Snapshot)> {
         Ok((
             self.launcher.clone(),
@@ -301,6 +326,12 @@ impl Session {
                     .map(Response::Source)
                     .map_err(Error::from)
             }
+            Request::OpenFile { path, append } => self
+                .sources
+                .file(self.snapshot.cwd.try_clone()?, path, append)
+                .await
+                .map(Response::Source)
+                .map_err(Error::from),
             Request::Files(path) => self
                 .sources
                 .directory(self.snapshot.cwd.try_clone()?, path)
@@ -322,6 +353,7 @@ impl Session {
                 max_bytes,
             } => self.run(plan, mode, max_bytes).await,
             Request::Write(bytes) => self.output(bytes, false).await,
+            Request::WriteError(bytes) => self.output(bytes, true).await,
             Request::Display(text) => self.display(text).await,
             Request::ReadText { path, max_bytes } => {
                 let cwd = self.snapshot.cwd.try_clone()?;

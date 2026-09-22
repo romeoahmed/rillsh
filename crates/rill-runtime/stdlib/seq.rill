@@ -3,6 +3,7 @@ let {Option, Control, some, ..} = core
 
 enum CloseReason {Exhausted, Closed, Cutoff, Failed {error}, Cancelled}
 
+## Create a scoped producer with acquire, step and release callbacks.
 fn produce protocol = __stream ["produce", protocol]
 
 fn length items = __pure ["length", items]
@@ -19,6 +20,7 @@ fn drop count items =
   if __pure ["is_stream", items] then __stream ["drop", count, items]
   else __pure ["drop", count, items]
 
+## Accumulate items from left to right.
 fn fold step initial items =
   if __pure ["is_stream", items] then
     __stream ["fold", { [acc, item] => step acc item }, initial, items]
@@ -37,6 +39,7 @@ fn each effect items =
     }
   }
 
+## Transform each item in order; Lists are eager and Streams are lazy.
 fn map transform items =
   if __pure ["is_stream", items] then __stream ["map", transform, items]
   else do {
@@ -47,6 +50,22 @@ fn map transform items =
     loop items []
   }
 
+## Flatten callback results in order: Lists require Lists; Streams accept either category.
+fn flat_map transform values =
+  if __pure ["is_stream", values] then __stream ["flat_map", transform, values]
+  else do {
+    fn prepend output rest = match rest of {
+      [] => output,
+      [head, ..tail] => prepend [head, output] tail,
+      _ => core.raise (core.error "TypeError" "List flat_map callback must return List")
+    }
+    let output = fold { acc item =>
+      prepend acc (transform item)
+    } [] values
+    __pure ["unroll", output]
+  }
+
+## Keep items whose predicate returns true, preserving their order.
 fn filter predicate items =
   if __pure ["is_stream", items] then __stream ["filter", predicate, items]
   else do {
@@ -97,6 +116,7 @@ let collect = collect_with {}
 
 let collect_bytes = collect_bytes_with {}
 
+## Accumulate until Control.Stop; close any unconsumed stream input.
 fn fold_until step initial items =
   if __pure ["is_stream", items] then
     __stream [
@@ -166,6 +186,21 @@ fn range start end = unfold { n =>
   if n < end then some [n, n + 1] else Option.None
 } (__pure ["range_start", start, end])
 
+fn aggregate operation key values = do {
+  let values = if __pure ["is_stream", values] then collect values else values
+  let pairs = map { value => [__pure ["aggregation_key", key value], value] } values
+  __pure [operation, pairs]
+}
+
+## Group a finite sequence by String keys, preserving first-key and item order.
+fn group_by key values = aggregate "group" key values
+
+## Count a finite sequence by String keys, preserving first-key order.
+fn count_by key values = aggregate "count_by" key values
+
+## Keep the first item for each String key in a finite sequence.
+fn unique_by key values = aggregate "unique" key values
+
 export {
   CloseReason,
   produce,
@@ -179,11 +214,15 @@ export {
   each,
   map,
   filter,
+  flat_map,
   filter_map,
   find,
   any,
   all,
   sum,
+  group_by,
+  count_by,
+  unique_by,
   sort_by,
   sort_by_with,
   merge,

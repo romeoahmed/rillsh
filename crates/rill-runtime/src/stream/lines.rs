@@ -1,4 +1,4 @@
-//! Strict UTF-8 line decoding retains only a partial line and the current shared chunk.
+//! Delimited Bytes decoding retains one partial record and the current shared chunk.
 use crate::{Error, value::Value};
 use gc_arena::{Collect, Mutation};
 
@@ -10,6 +10,7 @@ pub struct Lines<'gc> {
     cursor: usize,
     pending: Vec<u8>,
     limit: usize,
+    binary: bool,
 }
 pub enum Poll<'gc> {
     Item(Value<'gc>),
@@ -18,20 +19,28 @@ pub enum Poll<'gc> {
     Continue,
 }
 impl<'gc> Lines<'gc> {
-    pub fn new(options: Value<'_>) -> Result<Self, Error> {
+    pub fn new(options: Value<'_>, binary: bool) -> Result<Self, Error> {
         let Value::Record(options) = options else {
-            return Err(Error::type_error("line options require Record"));
+            return Err(Error::type_error("decoder options require Record"));
         };
         let mut limit = 8 * 1024 * 1024;
         for (name, value) in options.iter() {
-            if name != "max_line_bytes" {
-                return Err(Error::type_error(format!("unknown line option '{name}'")));
+            if name
+                != if binary {
+                    "max_record_bytes"
+                } else {
+                    "max_line_bytes"
+                }
+            {
+                return Err(Error::type_error(format!(
+                    "unknown decoder option '{name}'"
+                )));
             }
             let Value::Int(count) = value else {
-                return Err(Error::type_error("line limit requires Int"));
+                return Err(Error::type_error("record limit requires Int"));
             };
             limit = usize::try_from(*count)
-                .map_err(|_| Error::type_error("line limit must be nonnegative"))?;
+                .map_err(|_| Error::type_error("record limit must be nonnegative"))?;
         }
         Ok(Self {
             chunk: None,
@@ -39,16 +48,19 @@ impl<'gc> Lines<'gc> {
             cursor: 0,
             pending: Vec::new(),
             limit,
+            binary,
         })
     }
     pub fn poll(&mut self, mc: &Mutation<'gc>) -> Result<Poll<'gc>, Error> {
         if let Some(Value::Bytes(chunk)) = self.chunk {
             let available = &chunk.0[self.cursor..];
             let quantum = available.len().min(16 * 1024);
-            let newline = available[..quantum].iter().position(|byte| *byte == b'\n');
+            let newline = available[..quantum]
+                .iter()
+                .position(|byte| *byte == if self.binary { 0 } else { b'\n' });
             let count = newline.unwrap_or(quantum);
             if count > self.limit.saturating_sub(self.pending.len()) {
-                return Err(Error::new("LimitExceeded", "line exceeds the byte limit"));
+                return Err(Error::new("LimitExceeded", "record exceeds the byte limit"));
             }
             self.pending.extend_from_slice(&available[..count]);
             self.cursor += count + usize::from(newline.is_some());
@@ -57,7 +69,7 @@ impl<'gc> Lines<'gc> {
                 self.cursor = 0;
             }
             if newline.is_some() {
-                if self.pending.last() == Some(&b'\r') {
+                if !self.binary && self.pending.last() == Some(&b'\r') {
                     self.pending.pop();
                 }
                 return self.line(mc).map(Poll::Item);
@@ -75,6 +87,9 @@ impl<'gc> Lines<'gc> {
         }
     }
     fn line(&mut self, mc: &Mutation<'gc>) -> Result<Value<'gc>, Error> {
+        if self.binary {
+            return Ok(Value::bytes(mc, std::mem::take(&mut self.pending)));
+        }
         String::from_utf8(std::mem::take(&mut self.pending))
             .map(|text| Value::string(mc, text))
             .map_err(|error| Error::new("DecodeError", error.to_string()))

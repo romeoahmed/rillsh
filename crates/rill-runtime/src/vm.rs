@@ -327,10 +327,7 @@ impl<'gc> Vm<'gc> {
                 (self.instruction(mc, instruction, fuel), span.clone())
             };
             if let Err(mut error) = result {
-                if error.origin.is_none() {
-                    error.span = Some(span);
-                    error.origin = Some(Rc::clone(&code.source));
-                }
+                self.locate_error(&mut error, Rc::clone(&code.source), span);
                 self.fail(mc, error)?;
                 return Ok(Progress::Yielded);
             }
@@ -510,16 +507,17 @@ impl<'gc> Vm<'gc> {
                     "consume a stream before returning it from a statement",
                 ));
             }
-            result.persistent()?;
             let frame = self.frames.last().expect("statement frame");
-            for value in frame
-                .scopes
-                .iter()
-                .flat_map(Scope::values)
-                .chain(frame.exports.values())
-            {
-                value.persistent()?;
-            }
+            Value::persistent_all(
+                std::iter::once(result).chain(
+                    frame
+                        .scopes
+                        .iter()
+                        .flat_map(Scope::local_values)
+                        .chain(frame.exports.values())
+                        .copied(),
+                ),
+            )?;
             for stream in self.streams.drain(stream_base..) {
                 if let Value::Stream(stream) = stream {
                     stream.borrow_mut(mc).source.take();
@@ -704,6 +702,7 @@ impl<'gc> Vm<'gc> {
                 Value::Function(Gc::new(
                     mc,
                     Closure {
+                        arguments: None,
                         constants: code.body.cache(mc),
                         code: Rc::clone(code),
                         parameter: 0,
@@ -742,6 +741,7 @@ impl<'gc> Vm<'gc> {
         let function = Value::Function(Gc::new(
             mc,
             Closure {
+                arguments: None,
                 constants: code.body.cache(mc),
                 code,
                 parameter: 0,
@@ -851,10 +851,7 @@ impl<'gc> Vm<'gc> {
         match result {
             Ok(value) => self.stack.push(value),
             Err(mut error) => {
-                if error.origin.is_none() {
-                    error.origin = Some(source);
-                    error.span = Some(span);
-                }
+                self.locate_error(&mut error, source, span);
                 self.fail(mc, error)?;
             }
         }
@@ -1219,27 +1216,84 @@ impl<'gc> Vm<'gc> {
                 "Error fields require String kind/message and List[String] notes",
             ));
         };
-        if !matches!(argument.field("span")?, Value::Null | Value::Record(_))
-            || notes
-                .as_slice()
-                .iter()
-                .any(|note| !matches!(note, Value::String(_)))
-        {
-            return Err(Error::type_error("invalid Error span or notes"));
-        }
-        self.raised = Some(argument);
         let mut error = Error::new(kind.as_str(), message.as_str());
         error.notes = notes
             .as_slice()
             .iter()
-            .filter_map(|note| {
-                if let Value::String(note) = note {
-                    Some(note.as_str().to_owned())
-                } else {
-                    None
-                }
+            .map(|note| match note {
+                Value::String(note) => Ok(note.as_str().to_owned()),
+                _ => Err(Error::type_error("Error notes requires a List of Strings")),
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
+        error.exit_status = match argument.field("exit_status")? {
+            Value::Null => None,
+            Value::Int(code) => Some(
+                u8::try_from(code)
+                    .ok()
+                    .filter(|code| *code != 0)
+                    .ok_or_else(|| {
+                        Error::type_error("Error exit_status requires 1..255 or null")
+                    })?,
+            ),
+            _ => {
+                return Err(Error::type_error(
+                    "Error exit_status requires 1..255 or null",
+                ));
+            }
+        };
+        let Value::Record(details) = argument.field("details")? else {
+            return Err(Error::type_error(
+                "Error details requires String or Int fields",
+            ));
+        };
+        for (key, value) in details.iter() {
+            let value = match value {
+                Value::String(value) => crate::error::Detail::Text(value.as_str().into()),
+                Value::Int(value) => crate::error::Detail::Int(*value),
+                _ => {
+                    return Err(Error::type_error(
+                        "Error details requires String or Int fields",
+                    ));
+                }
+            };
+            error.details.insert(key.clone(), value);
+        }
+        let span = match argument.field("span")? {
+            Value::Null => None,
+            Value::Record(span) => Some(span),
+            _ => return Err(Error::type_error("Error span requires a Record or null")),
+        };
+        if let Some(span) = span {
+            let (
+                Some(Value::String(source)),
+                Some(Value::String(text)),
+                Some(Value::Int(offset)),
+                Some(Value::Int(length)),
+            ) = (
+                span.get("source"),
+                span.get("text"),
+                span.get("offset"),
+                span.get("length"),
+            )
+            else {
+                return Err(Error::type_error(
+                    "Error span requires source, text, offset and length",
+                ));
+            };
+            let start =
+                usize::try_from(*offset).map_err(|_| Error::type_error("invalid Error span"))?;
+            let end = usize::try_from(*length)
+                .ok()
+                .and_then(|length| start.checked_add(length))
+                .filter(|end| text.get(start..*end).is_some())
+                .ok_or_else(|| Error::type_error("invalid Error span"))?;
+            error.span = Some(start..end);
+            error.origin = Some(Rc::new(crate::code::Source {
+                name: source.as_str().into(),
+                text: text.as_str().into(),
+            }));
+        }
+        self.raised = Some(argument);
         Err(error)
     }
     fn start_stream(&mut self, task: Box<crate::stream::Task<'gc>>, tail: bool) {
@@ -1414,6 +1468,38 @@ impl<'gc> Vm<'gc> {
             .push(nominal(mc, attempt.err, [("error", value)]));
         true
     }
+    // Source wrappers should point to the visible application. Never replace an
+    // existing origin: rethrow and producer cleanup preserve the first failure.
+    fn locate_error(
+        &self,
+        error: &mut Error,
+        source: Rc<crate::Source>,
+        span: rill_syntax::token::Span,
+    ) {
+        if error.origin.is_some() {
+            return;
+        }
+        if source.name.starts_with("std:")
+            && let Some(frame) = self
+                .frames
+                .iter()
+                .rev()
+                .find(|frame| !frame.code.source.name.starts_with("std:"))
+            && let Some((_, caller_span)) = frame
+                .ip
+                .checked_sub(1)
+                .and_then(|ip| frame.code.instructions.get(ip))
+        {
+            error
+                .notes
+                .push(format!("in {} at byte {}", source.name, span.start));
+            error.origin = Some(Rc::clone(&frame.code.source));
+            error.span = Some(caller_span.clone());
+        } else {
+            error.origin = Some(source);
+            error.span = Some(span);
+        }
+    }
     fn call(&mut self, mc: &Mutation<'gc>, tail: bool) -> Result<(), Error> {
         let argument = self.pop();
         let function = self.pop();
@@ -1430,28 +1516,32 @@ impl<'gc> Vm<'gc> {
                 function.kind()
             )));
         };
-        let mut environment = closure.environment.borrow().clone();
-        match &closure.code.parameters[closure.parameter] {
-            rill_syntax::ast::Pattern::Bind(name) => environment.insert(name, argument),
-            rill_syntax::ast::Pattern::Ignore => {}
-            pattern => environment.extend(pattern::bind(mc, pattern, argument, &|name| {
-                environment
-                    .get(name)
-                    .copied()
-                    .ok_or_else(|| Error::new("NameError", format!("unknown constructor '{name}'")))
-            })?),
-        }
+        let bindings = closure.bind(mc, argument)?;
         if closure.parameter + 1 < closure.code.parameters.len() {
+            crate::heap::charge(
+                mc,
+                bindings
+                    .capacity()
+                    .saturating_mul(size_of::<(usize, Value<'gc>)>()),
+            );
             self.stack.push(Value::Function(Gc::new(
                 mc,
                 Closure {
                     constants: closure.constants,
                     code: Rc::clone(&closure.code),
                     parameter: closure.parameter + 1,
-                    environment: Gc::new(mc, RefLock::new(environment)),
+                    environment: closure.environment,
+                    arguments: Some(Gc::new(
+                        mc,
+                        crate::value::Arguments {
+                            previous: closure.arguments,
+                            bindings,
+                        },
+                    )),
                 },
             )));
         } else {
+            let environment = closure.frame(&bindings);
             let base = if tail {
                 let old = self.frames.pop().expect("active frame");
                 self.stack.truncate(old.stack_base);
@@ -1654,6 +1744,11 @@ fn error_value<'gc>(
                     mc,
                     [
                         ("source".into(), Value::string(mc, source.name.clone())),
+                        ("text".into(), Value::string(mc, source.text.clone())),
+                        (
+                            "length".into(),
+                            Value::Int(i64::try_from(span.len()).unwrap_or(i64::MAX)),
+                        ),
                         (
                             "offset".into(),
                             Value::Int(i64::try_from(span.start).unwrap_or(i64::MAX)),
@@ -1669,6 +1764,33 @@ fn error_value<'gc>(
         [
             ("kind", Value::string(mc, error.kind.clone())),
             ("message", Value::string(mc, error.message.clone())),
+            (
+                "exit_status",
+                error
+                    .exit_status
+                    .map_or(Value::Null, |code| Value::Int(i64::from(code))),
+            ),
+            (
+                "details",
+                Value::Record(crate::heap::record(
+                    mc,
+                    error
+                        .details
+                        .iter()
+                        .map(|(key, value)| {
+                            (
+                                key.clone(),
+                                match value {
+                                    crate::error::Detail::Text(text) => {
+                                        Value::string(mc, text.clone())
+                                    }
+                                    crate::error::Detail::Int(value) => Value::Int(*value),
+                                },
+                            )
+                        })
+                        .collect(),
+                )),
+            ),
             ("span", span),
             (
                 "notes",

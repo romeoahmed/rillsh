@@ -44,7 +44,7 @@ jobs:
         run: |
           cargo install --path crates/rillsh --locked --root "$RUNNER_TEMP/rill-install"
           cd "$RUNNER_TEMP"
-          test "$(rill-install/bin/rillsh -c 'import "std:seq" as seq; print (text (seq.sum [20, 22]))')" = 42
+          test "$(rill-install/bin/rillsh -c 'import "std:seq" as seq; print (string (seq.sum [20, 22]))')" = 42
 
   grammar:
     timeout-minutes: 15

@@ -7,15 +7,36 @@ enum Completion {Finished, Cutoff {reason}, Cancelled {reason}}
 
 struct JobReport {id, stages, completion, failure}
 
+## Build a reusable process plan from an executable and a List of arguments.
 fn command executable arguments = __process ["command", executable, arguments]
 
 fn pipe left right = __process ["pipe", left, right]
 
-fn with_cwd directory plan = __process ["with_cwd", directory, plan]
+fn with_cwd directory pipeline = __process ["with_cwd", directory, pipeline]
 
-fn with_env environment plan = __process ["with_env", environment, plan]
+## Overlay environment variables on every stage without changing session state.
+fn with_env environment pipeline = __process ["with_env", environment, pipeline]
 
-fn accept_exit codes plan = __process ["accept_exit", codes, plan]
+## Remove environment names from every stage without changing session state.
+fn without_env names pipeline = __process ["without_env", names, pipeline]
+
+## Append an input redirect to the first stage of a plan.
+fn with_stdin file pipeline = __process ["redirect", "stdin", file, pipeline]
+
+## Append a truncating stdout redirect to the final stage of a plan.
+fn with_stdout file pipeline = __process ["redirect", "stdout", file, pipeline]
+
+fn append_stdout file pipeline = __process ["redirect", "append_stdout", file, pipeline]
+
+## Append a truncating stderr redirect to the final stage of a plan.
+fn with_stderr file pipeline = __process ["redirect", "stderr", file, pipeline]
+
+fn append_stderr file pipeline = __process ["redirect", "append_stderr", file, pipeline]
+
+## Append stderr-to-current-stdout duplication to the final stage.
+fn stderr_to_stdout pipeline = __process ["redirect", "stderr_to_stdout", (), pipeline]
+
+fn accept_exit codes pipeline = __process ["accept_exit", codes, pipeline]
 
 fn set_env name value = __process ["set_env", name, value]
 
@@ -28,24 +49,27 @@ fn unset_env name = __process ["unset_env", name]
 
 fn args () = __process ["args"]
 
-fn capture_with options plan = __data ["capture", options, plan]
+fn capture_with options pipeline = __data ["capture", options, pipeline]
 
-fn stream plan = __stream ["stream", plan]
+fn stream pipeline = __stream ["stream", pipeline]
 
-fn through plan input = __stream ["through", plan, input]
+fn through pipeline input = __stream ["through", pipeline, input]
 
 fn stdin () = __stream ["stdin"]
 
 fn write_stdout input = __stream ["write", input]
 
+fn write_stderr input = __stream ["write_stderr", input]
+
+## Write one String followed by a newline to stderr.
+fn eprint value = write_stderr (__stream ["chunks", __pure ["encode_utf8", value + "\n"]])
+
 fn write_bytes value = write_stdout (__stream ["chunks", value])
 
 fn write_text value = write_bytes (__pure ["encode_utf8", value])
 
-fn print value = do {
-  write_text value
-  write_text "\n"
-}
+## Write one String followed by a newline to stdout.
+fn print value = write_text (value + "\n")
 
 let capture = capture_with {}
 
@@ -57,6 +81,13 @@ export {
   pipe,
   with_cwd,
   with_env,
+  without_env,
+  with_stdin,
+  with_stdout,
+  append_stdout,
+  with_stderr,
+  append_stderr,
+  stderr_to_stdout,
   accept_exit,
   run,
   execute,
@@ -83,5 +114,7 @@ export {
   capture_with,
   stream,
   through,
-  write_stdout
+  write_stdout,
+  write_stderr,
+  eprint
 }

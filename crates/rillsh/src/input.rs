@@ -11,8 +11,19 @@ pub struct Input {
     editor: Option<Editor>,
     plain: Plain,
     notifications: Notifications,
+    pub status: u8,
 }
 impl Input {
+    pub fn take_module(&mut self, source: &str) -> Option<rill_syntax::ast::Module> {
+        self.editor
+            .as_mut()
+            .and_then(|editor| editor.take_module(source))
+    }
+    pub fn restore(&mut self, source: String) {
+        if let Some(editor) = &mut self.editor {
+            editor.restore(source);
+        }
+    }
     #[expect(
         clippy::future_not_send,
         reason = "The session and traced VM stay on the coordinator thread"
@@ -38,6 +49,7 @@ impl Input {
             .take()
             .unwrap_or_else(|| Editor::new(depth, self.notifications.clone()));
         editor.set_color(depth);
+        editor.set_context(session.prompt_context(self.status));
         let (sender, mut requests) = tokio::sync::mpsc::channel(1);
         editor.complete_with(sender);
         let control = editor.control();
@@ -96,15 +108,41 @@ impl Input {
         let result = result.map_err(io::Error::other)?;
         self.editor = Some(result.0);
         if let Ok(Signal::HostCommand(command)) = &result.1 {
-            match command.as_str() {
-                "suspend" => session.terminal().suspend()?,
-                "help" => {
-                    session.terminal().write(b"\r\nEnter: submit or continue  Alt-Enter: submit whole entry\r\nTab: complete  Ctrl-R: search history  Ctrl-_: undo  Alt-r: redo\r\nCtrl-J/Shift-Tab: newline  Ctrl-C: cancel  Ctrl-D: EOF  Ctrl-Z: suspend\r\n")?;
-                }
-                _ => {}
-            }
+            self.host_command(command, session, color).await?;
         }
         result.1
+    }
+    #[expect(
+        clippy::future_not_send,
+        reason = "The editor shares the coordinator's session"
+    )]
+    async fn host_command(
+        &mut self,
+        command: &str,
+        session: &mut Session,
+        color: Color,
+    ) -> io::Result<()> {
+        match command {
+            "suspend" => session.terminal().suspend()?,
+            "edit" => {
+                let source = self
+                    .editor
+                    .as_ref()
+                    .map_or_else(String::new, Editor::buffer);
+                match session.edit_buffer(&source).await {
+                    Ok(source) => self.restore(source),
+                    Err(error) if error.is_cancelled() => {}
+                    Err(error) => {
+                        crate::report_error(&error, session.color(color, true));
+                    }
+                }
+            }
+            "help" => {
+                session.terminal().write(b"\r\nEnter: submit or continue  Alt-Enter/Ctrl-J: newline\r\nTab: complete  Ctrl-R: search history  Ctrl-O: external editor  Ctrl-_: undo  Alt-r: redo\r\nShift-Tab: previous completion  Ctrl-C: cancel  Ctrl-D: EOF  Ctrl-Z: suspend\r\n")?;
+            }
+            _ => {}
+        }
+        Ok(())
     }
 }
 

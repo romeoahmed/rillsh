@@ -1,10 +1,13 @@
+## Describe a value without calling it; functions include remaining parameters and documentation.
+fn help value = __pure ["help", value]
+
 enum Option {None, Some {value}}
 
 enum Result {Ok {value}, Err {error}}
 
 enum Control {Continue {value}, Stop {value}}
 
-struct Error {kind, message, span, notes}
+struct Error {kind, message, span, notes, exit_status, details}
 
 fn some value = Option.Some {value}
 
@@ -12,7 +15,7 @@ fn ok value = Result.Ok {value}
 
 fn err error = Result.Err {error}
 
-fn error kind message = Error {kind, message, span: null, notes: []}
+fn error kind message = Error {kind, message, span: null, notes: [], exit_status: null, details: {}}
 
 fn identity value = value
 
@@ -38,7 +41,7 @@ fn int value = __pure ["int", value]
 
 fn float value = __pure ["float", value]
 
-fn text value = __pure ["text", value]
+fn string value = __pure ["string", value]
 
 fn record pairs = __pure ["record", pairs]
 
@@ -54,6 +57,7 @@ fn lookup key fields = match __pure ["lookup", key, fields] of {
 fn entries fields = __pure ["entries", fields]
 
 export {
+  help,
   Option,
   Result,
   Control,
@@ -76,7 +80,7 @@ export {
   rem,
   int,
   float,
-  text,
+  string,
   record,
   extend,
   to_record,

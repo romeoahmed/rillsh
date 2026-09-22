@@ -38,12 +38,12 @@ fn a_deferred_host_wait_is_cancelled_when_its_peer_completes() {
             &rill_syntax::parse(
                 "host-cutoff",
                 r#"do {
-  let input = produce {
+  let input = seq.produce {
     acquire: { () => () },
     step: { () => some [read_text "pending", ()] },
     release: { _ _ => print "release" }
   }
-  merge [input, stream job { ^peer }] |> take 1 |> collect
+  merge [input, stream plan { ^peer }] |> take 1 |> collect
 }"#,
             )
             .unwrap(),
@@ -147,15 +147,15 @@ fn blocked_producer_callback_does_not_delay_a_ready_peer_or_its_cutoff() {
             &rill_syntax::parse(
                 "merge-callback",
                 r#"do {
-  let input = produce {
+  let input = seq.produce {
     acquire: { () => stdin () },
     step: { input => some [collect_bytes input, ()] },
     release: { _ reason => print (match reason of {
-      CloseReason.Cutoff => "cutoff",
+      seq.CloseReason.Cutoff => "cutoff",
       _ => "wrong reason"
     }) }
   }
-  merge [input, stream job { ^peer }] |> take 1 |> collect
+  merge [input, stream plan { ^peer }] |> take 1 |> collect
 }"#,
             )
             .unwrap(),
@@ -208,7 +208,7 @@ fn source_failure_is_caught_inside_its_callback_before_other_inputs_are_closed()
             &rill_syntax::parse(
                 "callback-error",
                 r#"do {
-  let input = produce {
+  let input = seq.produce {
     acquire: { () => stdin () },
     step: { state => match state of {
       () => Option.None,
@@ -289,7 +289,7 @@ fn peer_cutoff_finishes_an_already_started_release_callback() {
                 "protected-callback",
                 r#"do {
   let input = unfold { state => do {
-    produce {
+    seq.produce {
       acquire: { () => () },
       step: { _ => Option.None },
       release: { _ _ => do {
@@ -300,7 +300,7 @@ fn peer_cutoff_finishes_an_already_started_release_callback() {
     } |> collect
     some [0, state]
   } } ()
-  merge [input, stream job { ^peer }] |> take 1 |> collect
+  merge [input, stream plan { ^peer }] |> take 1 |> collect
 }"#,
             )
             .unwrap(),

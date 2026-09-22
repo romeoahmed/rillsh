@@ -54,6 +54,10 @@ impl<'gc> Scope<'gc> {
             self.insert(name.as_ref(), value);
         }
     }
+    /// Previously published snapshots have already passed the escape check.
+    pub fn local_values(&self) -> impl Iterator<Item = &Value<'gc>> {
+        self.slots.iter().flatten()
+    }
     pub fn values(&self) -> impl Iterator<Item = &Value<'gc>> {
         self.slots
             .iter()

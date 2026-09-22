@@ -12,7 +12,7 @@
 (field_expression field: (_) @property)
 (command_word) @string.special
 (command executable: (command_word) @function.call)
-["let" "fn" "rec" "if" "then" "else" "do" "match" "of" "struct" "enum" "with" "job" "import" "as" "export"] @keyword
+["let" "fn" "rec" "if" "then" "else" "do" "match" "of" "struct" "enum" "with" "plan" "import" "as" "export"] @keyword
 ["+" "-" "*" "/" "==" "!=" "<" "<=" ">" ">=" "and" "or" "not" "|>" "|" "^" "=" "=>"] @operator
 ["(" ")" "[" "]" "{" "}"] @punctuation.bracket
 ["," ":" "." ";"] @punctuation.delimiter

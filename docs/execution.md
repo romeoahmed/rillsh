@@ -26,16 +26,16 @@ let paths = [path "a.txt", path "b c.txt"]
 ^printf "%s\n" $message
 ^cat ...$paths
 
-let subjects = job {
+let subjects = plan {
   ^git log -n 100 --format=%s | ^sort
 }
 run subjects
 ```
 
-`job { ... }` contains exactly one external pipeline, with optional newlines around `|`.
+`plan { ... }` contains exactly one external pipeline, with optional newlines around `|`.
 It constructs a plan. A command statement beginning with `^` outside this form lowers to
 `run` of that plan and returns Unit on success. Commands are statements, not general
-expressions; use `job` and an execution function inside expressions. The process pipe
+expressions; use `plan` and an execution function inside expressions. The process pipe
 `|` is only legal in this command grammar. `|>` cannot be attached directly to an
 executing command statement: an explicit stream/capture bridge is required. A leading
 process pipe on a following line continues a pipeline only while that source is still
@@ -74,10 +74,18 @@ does. Invalid redirection paths are reported separately from argument failures.
 
 `command executable arguments` constructs the same one-stage plan programmatically.
 `pipe left right` composes plans and preserves their per-stage policies. There is no AST
-re-parsing. `with_cwd path plan` and `with_env record plan` return new plans with
+re-parsing. `with_cwd path pipeline` and `with_env record pipeline` return new plans with
 overrides applied to every stage. Repeated overrides replace the same key; other stage
 settings remain intact. Environment overrides overlay the launch snapshot and use the
 same name/value validation as `set_env`.
+
+`without_env names pipeline` removes the listed environment names from every stage's
+launch environment. Later `with_env` can restore a name; neither operation mutates
+session state. `with_stdin path pipeline` adds input redirection to the first stage.
+`with_stdout`, `append_stdout`, `with_stderr`, and `append_stderr` take path then plan
+and add a redirect to the final stage; `stderr_to_stdout pipeline` duplicates final stderr
+to its then-current stdout. Redirects append in application order. Decorate a component
+before `pipe` to target an earlier stage. Files open at launch, not plan construction.
 
 Unspecified cwd, environment, and PATH are snapshotted at launch. Explicit cwd overrides
 are resolved to an absolute directory at plan construction so later `cd` does not
@@ -86,7 +94,7 @@ the launch cwd. Unqualified executables are found using that launch's PATH. Reus
 plan therefore does not promise identical external state or output.
 
 Command statements (`^program ...`) always invoke the standard checked runner. A lexical
-binding named `run` affects explicit `run plan` calls only; it cannot change the meaning
+binding named `run` affects explicit `run pipeline` calls only; it cannot change the meaning
 of command syntax. `execute` retains ordinary foreground I/O and exposes unsuccessful
 exit status as data. Setup/exec failures still raise launch errors, and user
 cancellation follows the separate cancellation path.
@@ -110,19 +118,19 @@ redirection does not promise atomic file replacement.
 
 ## Execution functions
 
-| Function        | Behavior                                                                                                |
-| --------------- | ------------------------------------------------------------------------------------------------------- |
-| `execute plan`  | Foreground execution with inherited terminal streams; return JobReport without applying exit policy     |
-| `run plan`      | Foreground execution, inherited terminal streams; check all stage policies; return Unit                 |
-| `capture plan`  | Foreground execution, concurrent stdout/stderr capture; return report and Bytes; nonzero exit is data   |
-| `stream plan`   | Foreground job source producing stdout Bytes chunks; stderr inherited; completion checked at stream end |
-| `start plan`    | Start external-only background job; return session Job handle                                           |
-| `wait handle`   | Wait for a background job's report; nonzero exit is data; a stopped job raises JobStopped               |
-| `check report`  | Reject cancelled or failed reports; otherwise Unit                                                      |
-| `fg handle`     | Resume a job/context; return Unit for an external-only checked job or the resumed evaluation's result   |
-| `bg handle`     | Resume a stopped external-only job without terminal ownership; return Unit                              |
-| `cancel handle` | Cancel and await cleanup; return Unit; completed jobs are unchanged                                     |
-| `jobs ()`       | Immutable snapshots of session jobs                                                                     |
+| Function           | Behavior                                                                                                |
+| ------------------ | ------------------------------------------------------------------------------------------------------- |
+| `execute pipeline` | Foreground execution with inherited terminal streams; return JobReport without applying exit policy     |
+| `run pipeline`     | Foreground execution, inherited terminal streams; check all stage policies; return Unit                 |
+| `capture pipeline` | Foreground execution, concurrent stdout/stderr capture; return report and Bytes; nonzero exit is data   |
+| `stream pipeline`  | Foreground job source producing stdout Bytes chunks; stderr inherited; completion checked at stream end |
+| `start pipeline`   | Start external-only background job; return session Job handle                                           |
+| `wait handle`      | Wait for a background job's report; nonzero exit is data; a stopped job raises JobStopped               |
+| `check report`     | Reject cancelled or failed reports; otherwise Unit                                                      |
+| `fg handle`        | Resume a job/context; return Unit for an external-only checked job or the resumed evaluation's result   |
+| `bg handle`        | Resume a stopped external-only job without terminal ownership; return Unit                              |
+| `cancel handle`    | Cancel and await cleanup; return Unit; completed jobs are unchanged                                     |
+| `jobs ()`          | Immutable snapshots of session jobs                                                                     |
 
 `start`, `stream`, and `through` initiate launch when called. They complete the launch
 handshake before returning a handle; setup/exec error records raise a launch error. A
@@ -133,7 +141,7 @@ performed while constructing its source.
 `capture` returns a record with `stdout`, `stderr`, and `report` fields. It preserves
 bytes exactly, including trailing newlines and NUL. Launch failures and capture resource
 limits still raise errors; a command that starts and exits nonzero produces data.
-Capture has a default combined output limit of 64 MiB; `capture_with options plan` can
+Capture has a default combined output limit of 64 MiB; `process.capture_with options pipeline` can
 set a larger explicit limit. Exceeding the limit cancels/reaps the job and raises
 LimitExceeded with counts, never returns silently truncated success.
 
@@ -148,14 +156,14 @@ supervisor pipe, so data-job groups do not stop merely because the terminal has 
 enabled. Non-TTY inherited stderr may be connected directly. Programs requiring direct
 access to the controlling terminal must use `run` or `execute`.
 
-`through plan byte_stream` is the streaming process sink/source: it feeds the first
+`through pipeline byte_stream` is the streaming process sink/source: it feeds the first
 stage's stdin and exposes the last stage's stdout while inheriting stderr. It
 concurrently pumps input and output and checks completion. Conflicting explicit stdin or
 stdout redirection is rejected for `through` instead of discarding the supplied stream.
 Normal exit, downstream cutoff, and errors propagate upstream.
 
 ```rill
-stream job { ^git log --format=%s }
+stream plan { ^git log --format=%s }
   |> lines
   |> filter (starts_with "fix:")
   |> take 10
@@ -166,7 +174,7 @@ files (path ".")
   |> collect
   |> to_json
   |> chunks
-  |> through job { ^cat }
+  |> through plan { ^cat }
   |> write_stdout
 ```
 
@@ -192,7 +200,7 @@ selected unacceptable stage index. `check` raises ProcessError for a cancelled r
 a present failure; ordinary report values do not themselves cancel the calling
 evaluation.
 
-Default accepted exit codes are `[0]`. `accept_exit codes plan` replaces the final
+Default accepted exit codes are `[0]`. `accept_exit codes pipeline` replaces the final
 stage's policy with a nonempty List of codes in 0–255. Reports normalize this set to
 ascending unique codes. Configure an earlier stage before composition. Reports retain
 these policies and actual terminations after expected-cutoff classification; they never
@@ -311,7 +319,7 @@ of items. `collect` accepts a value stream and returns a List; collecting bytes 
 `collect_bytes`. Neither scalar values nor nested lists are flattened implicitly.
 `sort_by`, JSON document decoding, and collection are materialization boundaries and
 enforce explicit limits. Default `collect` limits are 1,000,000 items and a 64 MiB
-retained-representation budget; `collect_with` changes them. The budget counts each
+retained-representation budget; `seq.collect_with` changes them. The budget counts each
 distinct backing object reachable from collected data once, including shared list
 storage, and uses known backing capacities and owned payload sizes rather than a JSON
 estimate. Private allocator metadata and collection bucket layouts are excluded; this is
@@ -330,7 +338,7 @@ checked during long pure evaluations, not only on syscalls.
 
 ## Resource-owning producers
 
-`produce {acquire, step, release}` creates a resource-owning stream. Construction
+`seq.produce {acquire, step, release}` creates a resource-owning stream. Construction
 validates the protocol; acquisition happens only on first demand:
 
 | Callback  | Application                            | Result                                               |
@@ -349,7 +357,7 @@ once on normal exhaustion, close, cutoff, failure, cancellation, or enclosing sc
 exit, then close remaining child resources.
 
 Release receives the latest successfully returned state; failed or exhausted steps leave
-the previous state current. `std:seq` exports nominal `CloseReason` with `Exhausted`,
+the previous state current. The `seq.CloseReason` nominal type has cases `Exhausted`,
 `Closed`, `Cutoff`, `Failed {error}`, and `Cancelled`. Scope exit uses `Closed`.
 Stop/resume does not release the producer. The first transition to closing fixes the
 reason and prevents re-entry.
@@ -401,7 +409,7 @@ through the entire owned graph.
 | `drop n sequence`                                       | Nonnegative Int; discard at most n items                                              |
 | `chunks bytes`                                          | Explicit lazy stream of nonempty Bytes chunks; empty Bytes yields no items            |
 | `items list`                                            | Explicit lazy, single-consumer view of a List                                         |
-| `produce protocol`                                      | Lazy acquisition, stateful demand and explicit release in an owned child scope        |
+| `seq.produce protocol`                                  | Lazy acquisition, stateful demand and explicit release in an owned child scope        |
 | `zip inputs`, `merge inputs`                            | Single-consumer composition of a List of Streams; see multi-input contracts above     |
 | `unfold step initial`                                   | Lazy Stream; step returns None or Some `[item, next_state]`                           |
 | `range start end`                                       | Lazy ascending Int stream, inclusive start and exclusive end; empty when start >= end |
@@ -421,6 +429,40 @@ through the entire owned graph.
 | `write_text string`, `print string`                     | Write UTF-8 String exactly; print adds one LF                                         |
 | `join_path base child`, `basename path`, `dirname path` | Lexical Path construction/decomposition without filesystem access                     |
 | `write_stdout byte_stream`                              | Drain bytes exactly, then finalize associated jobs                                    |
+
+`flat_map transform sequence` preserves the outer category. List input requires each
+callback to return a List and concatenates those Lists eagerly; returning a Stream or
+another kind raises TypeError. Use `items` explicitly to enter lazy composition.
+Stream input accepts List or Stream results on demand. Exhaust and close each inner
+sequence before advancing the outer one.
+Cutoff, failure and cancellation close the active inner and outer resources; no later
+callback is invoked. Streams retain their existing scope and single-consumer rules.
+
+`group_by`, `count_by` and `unique_by` take a String-producing key function and a finite
+sequence. Evaluate the key once per item in input order. Group/count return Records in
+first-key order; groups preserve item order. Unique returns the first item for each key
+as a List. Stream input first uses normal bounded collection; List input is already
+materialized. These operations are explicit materialization boundaries, not online
+infinite-stream aggregators.
+
+`split_nul` and `text.split_nul_with {max_record_bytes}` split Bytes chunks on NUL into Bytes
+records without UTF-8 decoding or CR stripping. Delimiters are excluded, adjacent
+delimiters yield empty records, and a final unterminated nonempty record is emitted.
+A trailing delimiter adds no extra record. Default record size is 8 MiB; overflow fails
+rather than publishing a truncated record. Chunk boundaries do not change records.
+
+`read_file path` opens a regular file and returns a scoped Bytes stream. `read_bytes`
+and `fs.read_bytes_with {max_bytes}` explicitly collect it (64 MiB default).
+`write_file path stream` truncates a regular file, consumes Bytes chunks and closes it;
+`append_file` appends instead. Open/type errors occur before input is consumed. Paths
+resolve against the session directory when opening, and live descriptors survive `cd`.
+FIFOs, devices and directories are rejected; use explicit process plans for those
+interfaces. Writes are not atomic or durable transactions, and earlier bytes remain on
+failure. Never copy a file onto itself with a truncating sink.
+
+`write_stderr` is the byte-stream counterpart of `write_stdout`; `eprint` accepts a
+String and appends LF on stderr. `print` sends its text and LF in one acknowledged
+transport frame, preserving exact bytes and cancellation without two round trips.
 
 `fold_until` accepts only the shared Control constructors. Stop is normal consumer
 cutoff, not an exception: it closes the upstream chain, waits for owned producers to
@@ -448,11 +490,11 @@ stdin ()
   |> lines
   |> map { line => parse_int (trim line) }
   |> sum
-  |> text
+  |> string
   |> print
 ```
 
-`print` accepts String, never a debug rendering or an implicit conversion. Use `text`
+`print` accepts String, never a debug rendering or an implicit conversion. Use `string`
 for supported scalars, `display_path` for safe path display, and `to_json` for
 structured data. Writes are cooperatively scheduled through the existing byte sink,
 preserving cancellation and I/O errors.
@@ -495,20 +537,21 @@ defaults; unknown keys and negative/non-Int limits are errors. There is no impli
 unlimited sentinel. Zero permits only an empty result for size/count limits; nesting
 depth must be at least one.
 
-| Operation                           | Option keys              |
-| ----------------------------------- | ------------------------ |
-| `capture_with options plan`         | `max_bytes`              |
-| `collect_with options stream`       | `max_items`, `max_bytes` |
-| `collect_bytes_with options stream` | `max_bytes`              |
-| `lines_with options byte_stream`    | `max_line_bytes`         |
-| `read_text_with options path`       | `max_bytes`              |
-| `from_json_with options input`      | `max_bytes`, `max_depth` |
-| `to_json_with options value`        | `max_bytes`, `max_depth` |
-| `sort_by_with options key sequence` | `max_items`, `max_bytes` |
+| Operation                                                           | Option keys              |
+| ------------------------------------------------------------------- | ------------------------ |
+| `process.capture_with options pipeline`                             | `max_bytes`              |
+| `seq.collect_with options stream`                                   | `max_items`, `max_bytes` |
+| `seq.collect_bytes_with options stream`                             | `max_bytes`              |
+| `text.lines_with options byte_stream`                               | `max_line_bytes`         |
+| `text.split_nul_with options byte_stream`                           | `max_record_bytes`       |
+| `fs.read_text_with options path`, `fs.read_bytes_with options path` | `max_bytes`              |
+| `json.from_json_with options input`                                 | `max_bytes`, `max_depth` |
+| `json.to_json_with options value`                                   | `max_bytes`, `max_depth` |
+| `seq.sort_by_with options key sequence`                             | `max_items`, `max_bytes` |
 
 The unqualified functions partially apply their configurable counterparts to empty
 options Records. This binds defaults without executing the operation. `collect_bytes`
-and `read_text` default to 64 MiB; sorting uses collection limits. `sort_by_with`
+and `read_text` default to 64 MiB; sorting uses collection limits. `seq.sort_by_with`
 applies limits to List input as well as Stream input. Its retained-byte budget includes
 input values and cached keys together, counting shared objects once. Check byte/count
 budgets as data is consumed or retained and before output is emitted. Bounded lookahead

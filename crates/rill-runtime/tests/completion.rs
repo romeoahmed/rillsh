@@ -84,3 +84,27 @@ fn large_namespaces_are_sorted_and_bounded_without_changing_runtime_values() {
         ]
     );
 }
+
+#[test]
+fn completion_documentation_is_bounded_and_cannot_control_the_terminal() {
+    let mut engine = Engine::standard().unwrap();
+    let source = format!(
+        "## documentation\u{1b}[2J\u{202e}{}\nfn documented value = value",
+        "x".repeat(4096)
+    );
+    finish(&mut engine, &source).unwrap();
+    let query = rill_syntax::completion::query("doc", 3).unwrap();
+    let candidates = engine.complete(&query);
+    assert_eq!(candidates.len(), 1);
+    let (name, description) = &candidates[0];
+    assert_eq!(name, "documented");
+    assert!(description.contains("documentation\\u{1b}[2J\\u{202e}"));
+    assert!(!description.chars().any(char::is_control));
+    assert!(description.ends_with('…'));
+    assert!(description.len() < 2048);
+    // Escaping is presentation policy; explicit help remains ordinary String data.
+    finish(&mut engine, "help documented").unwrap();
+    assert!(engine.inspect(
+        |value| matches!(value, rill_runtime::value::Value::String(text) if text.contains('\u{1b}') && text.len() > 4096)
+    ));
+}

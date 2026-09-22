@@ -79,5 +79,9 @@ pub fn check<'gc>(
         format!("stage {index} failed with status {code}"),
     );
     error.exit_status = Some(code);
+    error.details.insert(
+        "stage".into(),
+        crate::error::Detail::Int(i64::try_from(index).unwrap_or(i64::MAX)),
+    );
     Err(error)
 }

@@ -6,6 +6,7 @@ license.workspace = true
 description = "A functional shell with structured data pipelines and reusable job plans"
 
 [dependencies]
+tempfile.workspace = true
 bytes.workspace = true
 rill-editor.workspace = true
 rill-runtime.workspace = true
@@ -29,7 +30,6 @@ workspace = true
 [dev-dependencies]
 insta.workspace = true
 criterion.workspace = true
-tempfile.workspace = true
 rustix = { workspace = true, features = ["pty", "event", "fs", "pipe"] }
 vt100.workspace = true
 

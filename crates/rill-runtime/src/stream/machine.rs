@@ -27,7 +27,16 @@ pub enum Consumer<'gc> {
         until: bool,
     },
     Each(Value<'gc>),
-    Write,
+    Write {
+        stderr: bool,
+    },
+    File {
+        #[collect(require_static)]
+        path: Option<std::path::PathBuf>,
+        append: bool,
+        #[collect(require_static)]
+        sink: Option<rill_system::resources::SourceId>,
+    },
     Display,
     Close,
 }
@@ -41,11 +50,19 @@ enum Action<'gc> {
     Zipped(Node<'gc>),
     Merged(Node<'gc>),
     Opened,
+    FileOpened,
+    FileQueued,
     FeedInput(Node<'gc>),
     FeedQueued(Node<'gc>),
     FeedWritten(Node<'gc>),
     Map(Value<'gc>),
     Mapped,
+    FlatInput(Node<'gc>),
+    FlatMapped(Node<'gc>),
+    FlatItem(Node<'gc>),
+    FlatClose(Node<'gc>),
+    FlatRelease(Node<'gc>),
+    FlatRetired(Node<'gc>),
     Filter {
         source: Node<'gc>,
         predicate: Value<'gc>,
@@ -77,7 +94,8 @@ pub struct Task<'gc> {
     #[collect(require_static)]
     owned: Vec<rill_system::resources::SourceId>,
     producers: Vec<Handle<'gc>>,
-    merges: Box<[Gc<'gc, RefLock<super::merge::Merge<'gc>>>]>,
+    merges: Vec<Gc<'gc, RefLock<super::merge::Merge<'gc>>>>,
+    settled: bool,
 }
 pub enum Step<'gc> {
     Yield,
@@ -123,7 +141,8 @@ impl<'gc> Task<'gc> {
             finished: None,
             owned,
             producers,
-            merges: merges.into_boxed_slice(),
+            merges,
+            settled: false,
         }
     }
     pub(super) fn pull_one(source: Node<'gc>) -> Self {
@@ -176,6 +195,16 @@ impl<'gc> Task<'gc> {
             self.awaiting = true;
             return Ok(Step::Host(Request::Through(plan)));
         }
+        if let Consumer::File { path, append, .. } = &mut self.consumer
+            && let Some(path) = path.take()
+        {
+            self.actions.push(Action::FileOpened);
+            self.awaiting = true;
+            return Ok(Step::Host(Request::OpenFile {
+                path,
+                append: Some(*append),
+            }));
+        }
         for _ in 0..64 {
             if let Some(action) = self.actions.pop() {
                 if let Some(step) = self.action(mc, action)? {
@@ -188,13 +217,31 @@ impl<'gc> Task<'gc> {
                     return Ok(step);
                 }
             } else {
+                if !self.settled && !matches!(self.consumer, Consumer::One | Consumer::Through(_)) {
+                    // Dynamic flat-map children are owned only while active. Harvest them
+                    // once at cutoff; exhausted children have already closed themselves.
+                    walk(self.source, |source| match source {
+                        Source::External(key) | Source::Feed { sink: key, .. }
+                            if !self.owned.contains(&key) =>
+                        {
+                            self.owned.push(key);
+                        }
+                        Source::Producer(producer)
+                            if !self.producers.iter().any(|p| Gc::ptr_eq(*p, producer)) =>
+                        {
+                            self.producers.push(producer);
+                        }
+                        _ => {}
+                    });
+                    self.settled = true;
+                }
                 let value = self.finished.take().unwrap_or_else(|| self.finish(mc));
                 if !self.merges.is_empty() {
                     self.finished = Some(value);
                     self.actions.push(Action::Discard);
                     self.awaiting = true;
                     let callbacks = self.callbacks();
-                    self.merges = Box::default();
+                    self.merges.clear();
                     return Ok(Step::DiscardCallbacks(callbacks));
                 }
                 if !self.producers.is_empty() {
@@ -226,6 +273,9 @@ impl<'gc> Task<'gc> {
     ) -> Result<Option<Step<'gc>>, Error> {
         match action {
             Action::Produced(producer, callback) => return self.produced(mc, producer, callback),
+            action @ (Action::FileOpened | Action::FileQueued) => {
+                return Ok(self.file_action(mc, action));
+            }
             Action::Opened => {
                 self.finished = Some(super::feed::opened(
                     mc,
@@ -262,18 +312,7 @@ impl<'gc> Task<'gc> {
                     *source.borrow_mut(mc) = Some(Source::Empty);
                 }
             }
-            Action::Lined(source) => {
-                let Some(Source::Lines { buffer, .. }) = *source.borrow() else {
-                    unreachable!("line continuation")
-                };
-                let mut buffer = buffer.borrow_mut(mc);
-                match self.item.take() {
-                    Some(value @ Value::Bytes(_)) => buffer.chunk = Some(value),
-                    Some(_) => return Err(Error::type_error("lines requires Bytes chunks")),
-                    None => buffer.ended = true,
-                }
-                self.actions.push(Action::Pull(source));
-            }
+            Action::Lined(source) => self.lined(mc, source)?,
             Action::Pull(source) => return self.pull(mc, source),
             Action::Zipped(source) => self.zipped(mc, source),
             Action::Merged(source) => {
@@ -292,6 +331,12 @@ impl<'gc> Task<'gc> {
                 }
             }
             Action::Mapped => self.item = self.reply.take(),
+            action @ (Action::FlatInput(_)
+            | Action::FlatMapped(_)
+            | Action::FlatItem(_)
+            | Action::FlatClose(_)
+            | Action::FlatRelease(_)
+            | Action::FlatRetired(_)) => return self.flat_action(mc, action),
             Action::Filter { source, predicate } => {
                 if let Some(item) = self.item.take() {
                     self.actions.push(Action::Filtered { source, item });
@@ -318,6 +363,142 @@ impl<'gc> Task<'gc> {
             Action::Discard => {
                 self.reply.take();
             }
+        }
+        Ok(None)
+    }
+    fn lined(&mut self, mc: &Mutation<'gc>, source: Node<'gc>) -> Result<(), Error> {
+        let Some(Source::Lines { buffer, .. }) = *source.borrow() else {
+            unreachable!("line continuation")
+        };
+        let mut buffer = buffer.borrow_mut(mc);
+        match self.item.take() {
+            Some(value @ Value::Bytes(_)) => buffer.chunk = Some(value),
+            Some(_) => return Err(Error::type_error("lines requires Bytes chunks")),
+            None => buffer.ended = true,
+        }
+        self.actions.push(Action::Pull(source));
+        Ok(())
+    }
+    fn file_action(&mut self, mc: &Mutation<'gc>, action: Action<'gc>) -> Option<Step<'gc>> {
+        match action {
+            Action::FileOpened => {
+                let Some(Value::Stream(token)) = self.reply.take() else {
+                    unreachable!("file sink response")
+                };
+                let Some(Source::External(key)) = token.borrow_mut(mc).source.take() else {
+                    unreachable!("file sink identity")
+                };
+                let Consumer::File { sink, .. } = &mut self.consumer else {
+                    unreachable!("file consumer")
+                };
+                *sink = Some(key);
+                self.owned.push(key);
+            }
+            Action::FileQueued => {
+                self.reply.take();
+                let Consumer::File {
+                    sink: Some(key), ..
+                } = self.consumer
+                else {
+                    unreachable!("open file consumer")
+                };
+                self.actions.push(Action::Discard);
+                return Some(Step::Host(Request::ReadSources {
+                    keys: vec![key],
+                    wait: true,
+                }));
+            }
+            _ => unreachable!("file continuation"),
+        }
+        None
+    }
+    fn flat_action(
+        &mut self,
+        mc: &Mutation<'gc>,
+        action: Action<'gc>,
+    ) -> Result<Option<Step<'gc>>, Error> {
+        match action {
+            Action::FlatInput(source) => {
+                if let Some(item) = self.item.take() {
+                    let Some(Source::FlatMap { transform, .. }) = *source.borrow() else {
+                        unreachable!("flat_map source")
+                    };
+                    self.actions.push(Action::FlatMapped(source));
+                    return Ok(Some(Step::Call(transform, item)));
+                }
+            }
+            Action::FlatMapped(source) => {
+                let Some(Source::FlatMap { owner, .. }) = *source.borrow() else {
+                    unreachable!("flat_map source")
+                };
+                let inner = match self.reply.take().expect("flat_map callback") {
+                    Value::List(values) => super::node(mc, Source::Items(values)),
+                    value @ Value::Stream(_) => super::consume(mc, value, owner)?,
+                    _ => {
+                        return Err(Error::type_error(
+                            "flat_map callback requires List or Stream",
+                        ));
+                    }
+                };
+                walk(inner, |source| {
+                    if let Source::Merge(merge) = source {
+                        self.merges.push(merge);
+                    }
+                });
+                let mut data = source.borrow_mut(mc);
+                let Some(Source::FlatMap { inner: current, .. }) = &mut *data else {
+                    unreachable!("flat_map source")
+                };
+                *current = Some(inner);
+                self.actions.push(Action::Pull(source));
+            }
+            Action::FlatItem(source) => {
+                if self.item.is_none() {
+                    self.actions.push(Action::FlatClose(source));
+                    let mut callbacks = Vec::new();
+                    if let Some(inner) = flat_inner(source) {
+                        walk(inner, |source| {
+                            if let Source::Merge(merge) = source {
+                                callbacks.extend(merge.borrow().callbacks());
+                            }
+                        });
+                    }
+                    if !callbacks.is_empty() {
+                        return Ok(Some(Step::DiscardCallbacks(callbacks)));
+                    }
+                }
+            }
+            Action::FlatClose(source) => {
+                self.actions.push(Action::FlatRelease(source));
+                let keys = flat_inner(source).map_or_else(Vec::new, resources);
+                if !keys.is_empty() {
+                    return Ok(Some(Step::Host(Request::Close(keys))));
+                }
+            }
+            Action::FlatRelease(source) => {
+                self.reply.take();
+                self.actions.push(Action::FlatRetired(source));
+                let producers = flat_inner(source).map_or_else(Vec::new, producer::handles);
+                if !producers.is_empty() {
+                    return Ok(Some(Step::Finalize(producers, Reason::Cutoff)));
+                }
+            }
+            Action::FlatRetired(source) => {
+                self.reply.take();
+                let mut data = source.borrow_mut(mc);
+                let Some(Source::FlatMap { inner, .. }) = &mut *data else {
+                    unreachable!("flat_map source")
+                };
+                if let Some(inner) = inner.take() {
+                    walk(inner, |source| {
+                        if let Source::Merge(merge) = source {
+                            self.merges.retain(|entry| !Gc::ptr_eq(*entry, merge));
+                        }
+                    });
+                }
+                self.actions.push(Action::Pull(source));
+            }
+            _ => unreachable!("flat_map continuation"),
         }
         Ok(None)
     }
@@ -407,7 +588,7 @@ impl<'gc> Task<'gc> {
             }
         } else {
             zip.tuple.clear();
-            *source.borrow_mut(mc) = Some(Source::Empty);
+            zip.ended = true;
         }
     }
     fn unfolded(
@@ -446,6 +627,13 @@ impl<'gc> Task<'gc> {
             .copied()
             .ok_or_else(|| Error::new("StreamConsumed", "stream source is not available"))?;
         match data {
+            Source::FlatMap { input, inner, .. } => {
+                self.actions.extend(
+                    inner.map_or([Action::FlatInput(source), Action::Pull(input)], |inner| {
+                        [Action::FlatItem(source), Action::Pull(inner)]
+                    }),
+                );
+            }
             Source::Producer(producer) => return self.pull_producer(mc, producer),
             Source::Feed { .. } => match super::feed::pull(mc, source) {
                 super::feed::Pull::Input(input) => self
@@ -459,19 +647,10 @@ impl<'gc> Task<'gc> {
                     })));
                 }
             },
-            Source::External(key) => {
-                self.actions.push(Action::External(source));
-                return Ok(Some(Step::Host(Request::ReadSources {
-                    keys: vec![key],
-                    wait: true,
-                })));
-            }
+            Source::External(key) => return Ok(Some(self.external(source, key))),
             Source::Lines { input, buffer } => match buffer.borrow_mut(mc).poll(mc)? {
                 super::lines::Poll::Item(value) => self.item = Some(value),
-                super::lines::Poll::End => {
-                    self.item = None;
-                    *source.borrow_mut(mc) = Some(Source::Empty);
-                }
+                super::lines::Poll::End => self.item = None,
                 super::lines::Poll::Continue => self.actions.push(Action::Pull(source)),
                 super::lines::Poll::NeedInput => self
                     .actions
@@ -490,6 +669,7 @@ impl<'gc> Task<'gc> {
                     return Ok(Some(step));
                 }
             },
+            Source::Zip(zip) if zip.borrow().ended => self.item = None,
             Source::Zip(zip) => {
                 let input = zip.borrow().inputs[0];
                 self.actions
@@ -523,7 +703,6 @@ impl<'gc> Task<'gc> {
             Source::Take { input, remaining } => {
                 if remaining == 0 {
                     self.item = None;
-                    *source.borrow_mut(mc) = Some(Source::Empty);
                 } else {
                     *source.borrow_mut(mc) = Some(Source::Take {
                         input,
@@ -540,6 +719,13 @@ impl<'gc> Task<'gc> {
             }
         }
         Ok(None)
+    }
+    fn external(&mut self, source: Node<'gc>, key: rill_system::resources::SourceId) -> Step<'gc> {
+        self.actions.push(Action::External(source));
+        Step::Host(Request::ReadSources {
+            keys: vec![key],
+            wait: true,
+        })
     }
     fn pull_producer(
         &mut self,
@@ -598,12 +784,29 @@ impl<'gc> Task<'gc> {
             Consumer::Close | Consumer::Through(_) => {
                 unreachable!("control consumer does not pull")
             }
-            Consumer::Write => {
+            Consumer::File {
+                sink: Some(key), ..
+            } => {
                 let Value::Bytes(chunk) = item else {
-                    return Err(Error::type_error("write_stdout requires Bytes chunks"));
+                    return Err(Error::type_error("file sink requires Bytes chunks"));
+                };
+                self.actions.push(Action::FileQueued);
+                return Ok(Some(Step::Host(Request::Send {
+                    key: *key,
+                    bytes: Some(chunk.0.clone()),
+                })));
+            }
+            Consumer::File { sink: None, .. } => unreachable!("file opens before consuming input"),
+            Consumer::Write { stderr } => {
+                let Value::Bytes(chunk) = item else {
+                    return Err(Error::type_error("byte output requires Bytes chunks"));
                 };
                 self.actions.push(Action::Discard);
-                return Ok(Some(Step::Host(Request::Write(chunk.0.clone()))));
+                return Ok(Some(Step::Host(if *stderr {
+                    Request::WriteError(chunk.0.clone())
+                } else {
+                    Request::Write(chunk.0.clone())
+                })));
             }
             Consumer::Display => {
                 item.persistent()?;
@@ -645,9 +848,11 @@ impl<'gc> Task<'gc> {
             Consumer::Collect { values, .. } => list(mc, std::mem::take(values)),
             Consumer::Bytes { bytes, .. } => Value::bytes(mc, std::mem::take(bytes)),
             Consumer::Fold { accumulator, .. } => *accumulator,
-            Consumer::Each(_) | Consumer::Write | Consumer::Display | Consumer::Close => {
-                Value::Unit
-            }
+            Consumer::Each(_)
+            | Consumer::File { .. }
+            | Consumer::Write { .. }
+            | Consumer::Display
+            | Consumer::Close => Value::Unit,
         }
     }
 }
@@ -669,6 +874,10 @@ pub(super) fn walk<'gc>(root: Node<'gc>, mut visit: impl FnMut(Source<'gc>)) {
         };
         visit(source);
         match source {
+            Source::FlatMap { input, inner, .. } => {
+                nodes.push(input);
+                nodes.extend(inner);
+            }
             Source::Merge(merge) => nodes.extend(merge.borrow().inputs().rev()),
             Source::Zip(zip) => nodes.extend(zip.borrow().inputs.iter().rev().copied()),
             Source::Lines { input, .. }
@@ -680,4 +889,11 @@ pub(super) fn walk<'gc>(root: Node<'gc>, mut visit: impl FnMut(Source<'gc>)) {
             _ => {}
         }
     }
+}
+
+fn flat_inner(source: Node<'_>) -> Option<Node<'_>> {
+    let Some(Source::FlatMap { inner, .. }) = *source.borrow() else {
+        unreachable!("flat_map source")
+    };
+    inner
 }

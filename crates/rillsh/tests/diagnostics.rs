@@ -31,7 +31,7 @@ fn unicode_before_failure_preserves_source_columns() {
 #[test]
 fn cleanup_failure_retains_primary_diagnostic() {
     insta::assert_snapshot!(diagnostic(
-        r#"produce {
+        r#"seq.produce {
   acquire: { () => 0 },
   step: { _ => raise (error "StepFailure" "cannot produce a value") },
   release: { _ _ => raise (error "ReleaseFailure" "cannot finish cleanup") }

@@ -14,7 +14,7 @@ API differences belong in the platform adapter; missing facilities are build err
 
 | Area                          | Baseline                                 | Project boundary                                             |
 | ----------------------------- | ---------------------------------------- | ------------------------------------------------------------ |
-| Implementation language       | Current stable Rust, Edition 2024        | Cargo workspace; generated C only for Tree-sitter            |
+| Implementation language       | Current stable Rust, Edition 2024        | Cargo workspace; C is confined to Tree-sitter                |
 | Processes and system services | POSIX.1-2024 / Issue 8                   | Linux/macOS user-space APIs; no POSIX shell grammar claim    |
 | User directories              | XDG Base Directory 0.8                   | Same config/state policy on both platforms                   |
 | Text and segmentation         | UTF-8 and supported library Unicode data | Extended grapheme editing; byte-preserving native paths      |

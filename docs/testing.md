@@ -51,7 +51,9 @@ Build small valid Proptest domains with strategies and `prop_map`, rather than r
 most samples. Keep explicit empty, boundary and invalid regressions. Use independent
 Rust values as oracles: stable-sort properties compare key order, record-rest properties
 compare unmatched fields, and JSON properties check numbers and key order independently
-of encoding. Equality laws require comparable values; merge requires per-input order,
+of encoding. Encoding errors retain precise paths after sibling containers and GC yields.
+Aggregation compares first-key and item order with a linear model.
+Equality laws require comparable values; merge requires per-input order,
 not a fixed interleaving. Effectful callbacks need traces, not assumed algebraic laws.
 
 Persist and commit minimized regression seeds beside their tests. Seeds depend on the
@@ -62,7 +64,13 @@ in CI.
 
 PTY assertions use rendered content and cursor state. Cover cancellation, EOF, multiline
 editing, history search, completion acceptance without execution and terminal handoff.
-Filename insertion must denote exactly one path/argument. Test Rill policies without
+Completed filename insertion must denote exactly one path/argument; exercise directory
+prefix continuation and insertion within an existing command separately. Completion
+must respect lexical scope and escape documentation without altering explicit help data.
+External-editor tests include atomic saves and acceptance
+without execution. Source-tool tests prove checking and formatting cannot run effects or
+resolve imports. Dynamic flat-map tests cover cleanup before the next inner source,
+cutoff through wrappers, failure and cancellation. Test Rill policies without
 claiming paste or undo limits that Reedline cannot enforce.
 
 ## Fuzzing and performance

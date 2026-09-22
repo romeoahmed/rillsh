@@ -131,7 +131,14 @@ impl<'a> Compiler<'a> {
                 }
                 let codes = functions
                     .iter()
-                    .map(|f| self.function(Some(f.name.clone()), &f.parameters, f.body))
+                    .map(|f| {
+                        self.function(
+                            Some(f.name.clone()),
+                            &f.parameters,
+                            f.body,
+                            Some(f.span.start),
+                        )
+                    })
                     .collect();
                 self.emit(Instruction::Functions(codes), 0..0);
                 self.constant(Literal::Unit, 0..0);
@@ -175,6 +182,7 @@ impl<'a> Compiler<'a> {
         name: Option<String>,
         parameters: &[Pattern],
         body: ExprId,
+        declaration: Option<usize>,
     ) -> Rc<FunctionCode> {
         let mut compiler = Self::new(self.module, Rc::clone(&self.code.source));
         compiler.capture = true;
@@ -201,7 +209,18 @@ impl<'a> Compiler<'a> {
                 source: self.reference(name),
             })
             .collect();
+        let documentation = declaration.and_then(|start| {
+            let mut lines: Vec<_> = self.module.source[..start]
+                .trim_end_matches([' ', '\t', '\r'])
+                .lines()
+                .rev()
+                .map_while(|line| line.trim_start().strip_prefix("##").map(str::trim))
+                .collect();
+            lines.reverse();
+            (!lines.is_empty()).then(|| lines.join("\n"))
+        });
         let function = FunctionCode {
+            documentation,
             name,
             parameters: parameters.to_vec(),
             captures,
@@ -304,7 +323,7 @@ impl<'a> Compiler<'a> {
                 parameters,
                 body,
             } => {
-                let code = self.function(name.clone(), parameters, *body);
+                let code = self.function(name.clone(), parameters, *body, None);
                 self.emit(Instruction::Closure(code), span);
             }
             ExprKind::Match { subject, arms } => self.matching(*subject, arms, tail, span),

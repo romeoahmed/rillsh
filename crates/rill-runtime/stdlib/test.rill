@@ -1,0 +1,16 @@
+import "std:core" as core
+
+## Require Bool true; failure raises AssertionError.
+fn assert condition =
+  if condition then () else raise (core.error "AssertionError" "assertion failed")
+
+## Compare equality-capable values without coercion.
+fn assert_equal expected actual = assert (expected == actual)
+
+## Run a thunk and require a language error with the given kind; cancellation propagates.
+fn assert_error kind thunk = match attempt thunk of {
+  core.Result.Err {error} => assert_equal kind error.kind,
+  core.Result.Ok {value: _} => raise (core.error "AssertionError" "expected an error")
+}
+
+export {assert, assert_equal, assert_error}

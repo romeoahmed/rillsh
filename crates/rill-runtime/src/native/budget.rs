@@ -77,6 +77,22 @@ impl Budget {
                         )?;
                         pending.extend(constants.iter().flatten().copied());
                     }
+                    let mut arguments = closure.arguments;
+                    while let Some(bound) = arguments {
+                        if !self.seen.insert(Gc::as_ptr(bound).addr()) {
+                            break;
+                        }
+                        self.charge(
+                            size_of::<crate::value::Arguments<'_>>()
+                                + bound.bindings.capacity().saturating_mul(size_of::<(
+                                    usize,
+                                    Value<'_>,
+                                )>(
+                                )),
+                        )?;
+                        pending.extend(bound.bindings.iter().map(|(_, value)| *value));
+                        arguments = bound.previous;
+                    }
                     if self.seen.insert(Gc::as_ptr(closure.environment).addr()) {
                         let environment = closure.environment.borrow();
                         self.layout(&environment.layout)?;
@@ -182,6 +198,9 @@ impl Budget {
                 continue;
             }
             self.charge(size_of::<FunctionCode>())?;
+            if let Some(documentation) = &function.documentation {
+                self.charge(documentation.capacity())?;
+            }
             if let Some(name) = &function.name {
                 self.charge(name.capacity())?;
             }
@@ -211,11 +230,7 @@ impl Budget {
                 continue;
             }
             self.charge(size_of::<Code>())?;
-            if self.seen.insert(Rc::as_ptr(&code.source).addr()) {
-                self.charge(size_of::<crate::code::Source>())?;
-                self.charge(code.source.name.capacity())?;
-                self.charge(code.source.text.capacity())?;
-            }
+            self.source(&code.source)?;
             self.charge(
                 code.constants
                     .capacity()
@@ -274,6 +289,14 @@ impl Budget {
         }
         Ok(())
     }
+    fn source(&mut self, source: &std::rc::Rc<crate::code::Source>) -> Result<(), Error> {
+        if self.seen.insert(std::rc::Rc::as_ptr(source).addr()) {
+            self.charge(size_of::<crate::code::Source>())?;
+            self.charge(source.name.capacity())?;
+            self.charge(source.text.capacity())?;
+        }
+        Ok(())
+    }
     fn exports(&mut self, fields: &Vec<(String, Vec<String>)>) -> Result<(), Error> {
         self.charge(
             fields
@@ -320,7 +343,9 @@ impl Budget {
             )?;
             for (key, value) in &stage.environment {
                 self.charge(key.as_bytes_with_nul().len())?;
-                self.charge(value.as_bytes_with_nul().len())?;
+                if let Some(value) = value {
+                    self.charge(value.as_bytes_with_nul().len())?;
+                }
             }
             self.charge(stage.accepted_codes.capacity())?;
         }

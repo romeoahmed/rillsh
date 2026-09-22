@@ -15,7 +15,7 @@ use std::{
     io,
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -25,6 +25,8 @@ pub struct Editor {
     control: Control,
     notifications: Notifications,
     color: ColorDepth,
+    context: String,
+    parsed: Arc<Mutex<Option<rill_syntax::ast::Module>>>,
 }
 impl Editor {
     /// Create an editor with parser-backed continuation and XDG state history.
@@ -42,10 +44,12 @@ impl Editor {
                 ));
                 history::SafeHistory::default()
             });
+        let parsed = Arc::default();
         Self {
             line: Some(
                 Reedline::create()
                     .use_bracketed_paste(true)
+                    .with_quick_completions(true)
                     .with_break_signal(Arc::clone(&control.wake))
                     .with_external_printer(notifications.0.clone())
                     .with_history(Box::new(history))
@@ -56,7 +60,7 @@ impl Editor {
                             .with_name("completion")
                             .with_input_mode(reedline::InputMode::FullBuffer),
                     )))
-                    .with_validator(Box::new(Syntax))
+                    .with_validator(Box::new(Syntax(Arc::clone(&parsed))))
                     .with_highlighter(Box::new(Highlight(color)))
                     .with_hinter(Box::new(
                         DefaultHinter::default().with_style(Style::new().dimmed()),
@@ -66,6 +70,39 @@ impl Editor {
             control,
             notifications,
             color,
+            context: String::new(),
+            parsed,
+        }
+    }
+    /// Refresh owned prompt metadata once, before entering the editor thread.
+    pub fn set_context(&mut self, context: String) {
+        self.context = context;
+    }
+    /// Transfer the validated AST when the submitted buffer has not changed.
+    ///
+    /// # Panics
+    /// Panics if an earlier validator panic poisoned the shared cache.
+    pub fn take_module(&mut self, source: &str) -> Option<rill_syntax::ast::Module> {
+        self.parsed
+            .lock()
+            .expect("parser cache")
+            .take()
+            .filter(|module| module.source == source)
+    }
+    /// Copy the editable buffer without invoking validation or submission.
+    #[must_use]
+    pub fn buffer(&self) -> String {
+        self.line
+            .as_ref()
+            .map_or_else(String::new, |line| line.current_buffer_contents().into())
+    }
+    /// Restore rejected syntax for explicit editing; this never submits the buffer.
+    pub fn restore(&mut self, source: String) {
+        if let Some(line) = &mut self.line {
+            line.run_edit_commands(&[
+                reedline::EditCommand::Clear,
+                reedline::EditCommand::InsertString(source),
+            ]);
         }
     }
     /// Apply the current session's color hints without replacing history or editing state.
@@ -99,7 +136,7 @@ impl Editor {
             .line
             .take()
             .ok_or_else(|| io::Error::other("editor state is already in use"))?;
-        let result = match line.read_line(&RillPrompt(self.color)) {
+        let result = match line.read_line(&RillPrompt(self.color, &self.context)) {
             Ok(Signal::ExternalBreak(_)) => {
                 if !self.control.discard.swap(false, Ordering::Relaxed) {
                     self.line = Some(line);
@@ -107,7 +144,7 @@ impl Editor {
                 }
                 line.run_edit_commands(&[reedline::EditCommand::Clear]);
                 line = line.with_immediately_accept(true);
-                let result = line.read_line(&RillPrompt(self.color));
+                let result = line.read_line(&RillPrompt(self.color, &self.context));
                 line = line.with_immediately_accept(false);
                 result.map(|_| Signal::CtrlC)
             }
@@ -171,9 +208,12 @@ impl Notifications {
 pub fn startup_file() -> Option<PathBuf> {
     xdg::BaseDirectories::with_prefix("rillsh").get_config_file("init.rill")
 }
-struct Syntax;
+#[derive(Default)]
+struct Syntax(Arc<Mutex<Option<rill_syntax::ast::Module>>>);
 impl Validator for Syntax {
     fn validate(&self, line: &str) -> ValidationResult {
+        let mut cached = self.0.lock().expect("parser cache");
+        *cached = None;
         if line.len() > history::ENTRY_LIMIT {
             return ValidationResult::Complete;
         }
@@ -181,7 +221,11 @@ impl Validator for Syntax {
             Err(errors) if errors.iter().all(|error| error.incomplete) => {
                 ValidationResult::Incomplete
             }
-            _ => ValidationResult::Complete,
+            Ok(module) => {
+                *cached = Some(module);
+                ValidationResult::Complete
+            }
+            Err(_) => ValidationResult::Complete,
         }
     }
 }
@@ -194,10 +238,7 @@ impl Highlighter for Highlight {
             output.push((Style::new(), line.into()));
             return output;
         }
-        let Ok(tokens) = rill_syntax::token::lex(line) else {
-            output.push((Style::new(), line.into()));
-            return output;
-        };
+        let tokens = rill_syntax::token::highlight_tokens(line);
         let mut position = 0;
         for token in tokens {
             if position != token.span.start {
@@ -218,12 +259,15 @@ impl Highlighter for Highlight {
                 | Kind::Of
                 | Kind::Do
                 | Kind::With
-                | Kind::Job
+                | Kind::Plan
                 | Kind::Import
                 | Kind::As
                 | Kind::Export
                 | Kind::Struct
-                | Kind::Enum => self.0.select(Color::Purple, 176, (198, 120, 221)),
+                | Kind::Enum
+                | Kind::And
+                | Kind::Or
+                | Kind::Not => self.0.select(Color::Purple, 176, (198, 120, 221)),
                 Kind::Command | Kind::Pipe | Kind::ValuePipe | Kind::Redirect(_) => {
                     self.0.select(Color::Cyan, 73, (86, 182, 194))
                 }
@@ -242,10 +286,14 @@ impl Highlighter for Highlight {
         output
     }
 }
-struct RillPrompt(ColorDepth);
-impl Prompt for RillPrompt {
+struct RillPrompt<'a>(ColorDepth, &'a str);
+impl Prompt for RillPrompt<'_> {
     fn render_prompt_left(&self) -> Cow<'_, str> {
-        "rill".into()
+        if self.1.is_empty() {
+            "rill".into()
+        } else {
+            format!("{}\nrill", self.1).into()
+        }
     }
     fn render_prompt_right(&self) -> Cow<'_, str> {
         "".into()
@@ -273,6 +321,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_complete_valid_input_is_retained_for_submission() {
+        let syntax = Syntax::default();
+        for rejected in [
+            "let value =".into(),
+            "1 + )".into(),
+            " ".repeat(history::ENTRY_LIMIT + 1),
+        ] {
+            syntax.validate("40 + 2");
+            assert_eq!(syntax.0.lock().unwrap().as_ref().unwrap().source, "40 + 2");
+            syntax.validate(&rejected);
+            assert!(syntax.0.lock().unwrap().is_none());
+        }
+    }
+
+    #[test]
     fn highlighting_preserves_source_in_every_color_mode() {
         for depth in [
             ColorDepth::Plain,
@@ -283,7 +346,7 @@ mod tests {
             for source in [
                 "",
                 "  ",
-                "let x = \"\u{754c}\"\n# comment\nx |> text",
+                "let x = \"\u{754c}\"\n# comment\nx |> string",
                 "^printf '%s' $x",
                 "\"unfinished",
             ] {
@@ -298,7 +361,7 @@ mod tests {
 
     #[test]
     fn history_search_reports_no_match_and_escapes_the_query() {
-        let prompt = RillPrompt(ColorDepth::Plain);
+        let prompt = RillPrompt(ColorDepth::Plain, "");
         let search = PromptHistorySearch::new(
             reedline::PromptHistorySearchStatus::Failing,
             "missing\n\u{1b}".into(),
@@ -312,13 +375,19 @@ mod tests {
     fn continuation_uses_language_syntax() {
         for source in ["{ x =>", "let value =", "^printf $("] {
             assert!(
-                matches!(Syntax.validate(source), ValidationResult::Incomplete),
+                matches!(
+                    Syntax::default().validate(source),
+                    ValidationResult::Incomplete
+                ),
                 "{source}"
             );
         }
         for source in ["map", "let value = 1", "1 + )"] {
             assert!(
-                matches!(Syntax.validate(source), ValidationResult::Complete),
+                matches!(
+                    Syntax::default().validate(source),
+                    ValidationResult::Complete
+                ),
                 "{source}"
             );
         }

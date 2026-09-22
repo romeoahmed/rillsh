@@ -85,8 +85,72 @@ impl DirectorySource {
         Ok(None)
     }
 }
+/// Open regular file data without blocking on FIFOs or acquiring a terminal.
+///
+/// # Errors
+/// Reports open/type failures before publishing a resource. Writes are not atomic.
+pub fn open_file(
+    cwd: &OwnedFd,
+    path: &std::path::Path,
+    append: Option<bool>,
+) -> io::Result<OwnedFd> {
+    let flags = append.map_or(OFlags::RDONLY, |append| {
+        OFlags::WRONLY
+            | OFlags::CREATE
+            | if append {
+                OFlags::APPEND
+            } else {
+                OFlags::empty()
+            }
+    });
+    let fd = openat(
+        cwd,
+        path,
+        flags | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC,
+        Mode::from_raw_mode(0o666),
+    )?;
+    if FileType::from_raw_mode(rustix::fs::fstat(&fd)?.st_mode) != FileType::RegularFile {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "file data requires a regular file",
+        ));
+    }
+    if append == Some(false) {
+        rustix::fs::ftruncate(&fd, 0)?;
+    }
+    Ok(fd)
+}
+struct FileWriter {
+    file: Option<std::fs::File>,
+    worker: Option<JoinHandle<(std::fs::File, io::Result<()>)>>,
+}
+impl FileWriter {
+    fn send(&mut self, bytes: bytes::Bytes) -> io::Result<()> {
+        use std::io::Write;
+        let mut file = self
+            .file
+            .take()
+            .ok_or_else(|| io::Error::other("file write already in progress"))?;
+        self.worker = Some(tokio::task::spawn_blocking(move || {
+            let result = file.write_all(&bytes);
+            (file, result)
+        }));
+        Ok(())
+    }
+    async fn flush(&mut self) -> io::Result<()> {
+        if let Some(worker) = &mut self.worker {
+            let result = worker.await;
+            self.worker = None;
+            let (file, result) = result.map_err(io::Error::other)?;
+            self.file = Some(file);
+            result?;
+        }
+        Ok(())
+    }
+}
 enum Resource {
     External,
+    FileWriter(FileWriter),
     Output(crate::output::Output),
     Input(crate::input::Input),
     Process(Box<crate::process_source::ProcessSource>),
@@ -96,6 +160,13 @@ enum Resource {
 impl Resource {
     async fn next(&mut self) -> Result<Option<Item>, SourceError> {
         match self {
+            Self::FileWriter(writer) => {
+                return writer
+                    .flush()
+                    .await
+                    .map(|()| Some(Item::Written(true)))
+                    .map_err(SourceError::from);
+            }
             Self::External => return std::future::pending().await,
             Self::Output(output) => {
                 return output
@@ -194,6 +265,16 @@ impl Sources {
     /// # Errors
     /// Rejects stale keys, non-writers, and overlapping chunks.
     pub fn send(&mut self, key: SourceId, bytes: Option<bytes::Bytes>) -> io::Result<()> {
+        if let Some(Resource::FileWriter(writer)) = self.entries.get_mut(key) {
+            return bytes.map_or_else(
+                || {
+                    Err(io::Error::other(
+                        "close file sinks through resource cleanup",
+                    ))
+                },
+                |bytes| writer.send(bytes),
+            );
+        }
         let Some(Resource::Output(output)) = self.entries.get_mut(key) else {
             return Err(io::Error::other("process input is closed"));
         };
@@ -203,6 +284,35 @@ impl Sources {
             self.entries.remove(key);
             Ok(())
         }
+    }
+    /// Register a regular file opened by the coordinator's joined worker.
+    ///
+    /// # Errors
+    /// Reports cancellation-channel creation failure for readers.
+    pub fn register_file(&mut self, fd: OwnedFd, write: bool) -> io::Result<SourceId> {
+        Ok(self.entries.insert(if write {
+            Resource::FileWriter(FileWriter {
+                file: Some(fd.into()),
+                worker: None,
+            })
+        } else {
+            Resource::Input(crate::input::Input::new(fd)?)
+        }))
+    }
+    /// Open and register file data relative to the session directory.
+    ///
+    /// # Errors
+    /// Reports opening, worker or resource initialization failure.
+    pub async fn file(
+        &mut self,
+        cwd: OwnedFd,
+        path: PathBuf,
+        append: Option<bool>,
+    ) -> io::Result<SourceId> {
+        let fd = tokio::task::spawn_blocking(move || open_file(&cwd, &path, append))
+            .await
+            .map_err(io::Error::other)??;
+        self.register_file(fd, append.is_some())
     }
     /// Open a directory relative to the launch-independent session capability.
     ///
@@ -353,6 +463,7 @@ impl Sources {
                     source.suspend().await?;
                 }
                 Resource::Input(input) => input.pause().await?,
+                Resource::FileWriter(writer) => writer.flush().await?,
                 _ => {}
             }
         }
@@ -376,6 +487,7 @@ impl Sources {
     /// Reports pending I/O, process cleanup or worker-join errors after removing the key.
     pub async fn close(&mut self, key: SourceId) -> Result<(), SourceError> {
         match self.entries.remove(key) {
+            Some(Resource::FileWriter(mut writer)) => writer.flush().await?,
             Some(Resource::Reading(worker)) => {
                 drop(worker.await.map_err(io::Error::other)?.1?);
             }

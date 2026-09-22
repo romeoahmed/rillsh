@@ -83,10 +83,49 @@ fn evaluation(c: &mut Criterion) {
             b.iter(|| metadata.complete(std::hint::black_box(&query)));
         });
     }
+    let mut session = Engine::standard().unwrap();
+    let publication = parse(
+        "publication",
+        "let saved = do { let data = [40, 2]; { a b => a + b + data[0] } 0 }; ()",
+    )
+    .unwrap();
+    c.bench_function("session/replace-partial", |b| {
+        b.iter(|| {
+            session.begin(&publication).unwrap();
+            finish(&mut session);
+        });
+    });
     pipelines(c);
+    json(c);
     constructors(c);
     record_patterns(c);
     allocation(c);
+}
+
+fn json(c: &mut Criterion) {
+    let fixture = parse(
+        "json-data",
+        r#"let rows = range 0 1000 |> map { n => {name: "sample", data: [n, true, null]} } |> collect"#,
+    ).unwrap();
+    let encode = parse("json-encode", "to_json rows").unwrap();
+    c.bench_function("json/encode-records", |b| {
+        b.iter_batched_ref(
+            || {
+                let mut engine = Engine::standard().unwrap();
+                engine.begin(&fixture).unwrap();
+                finish(&mut engine);
+                engine.begin(&encode).unwrap();
+                engine
+            },
+            |engine| {
+                finish(engine);
+                assert!(engine.inspect(|value| matches!(value, Value::Bytes(bytes)
+                    if bytes.0.starts_with(br#"[{"name":"sample","data":[0,true,null]}"#)
+                        && bytes.0.ends_with(br#"{"name":"sample","data":[999,true,null]}]"#))));
+            },
+            BatchSize::LargeInput,
+        );
+    });
 }
 
 fn allocation(c: &mut Criterion) {
@@ -103,7 +142,7 @@ repeat 1000"
         ),
         (
             "gc/scalar-materialization",
-            format!("scalars '{}' |> length", "x".repeat(10_000)),
+            format!("text.scalars '{}' |> length", "x".repeat(10_000)),
             10_000,
         ),
     ] {
@@ -207,6 +246,16 @@ fn constructors(c: &mut Criterion) {
 fn pipelines(c: &mut Criterion) {
     for (name, source, expected) in [
         (
+            "evaluate/sequential-flat-map",
+            "range 0 100 |> flat_map { n => range 0 10 } |> sum",
+            4_500,
+        ),
+        (
+            "evaluate/grouping",
+            "range 0 1000 |> count_by { n => string (rem n 10) } |> entries |> map { [key, count] => count } |> sum",
+            1_000,
+        ),
+        (
             "evaluate/json-roundtrip",
             "range 0 1000 |> collect |> to_json |> from_json |> sum",
             499_500,
@@ -223,7 +272,7 @@ fn pipelines(c: &mut Criterion) {
         ),
         (
             "evaluate/producer-lifecycle",
-            r"produce {
+            r"seq.produce {
   acquire: { () => 0 },
   step: { n => if n < 1000 then some [n, n + 1] else Option.None },
   release: { state reason => () }

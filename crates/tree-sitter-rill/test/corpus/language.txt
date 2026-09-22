@@ -87,15 +87,15 @@ match some 3 of {
 ==================
 Commands, ordered redirects and spread
 ==================
-let plan = job { ^printf "%s" $value ...$args 2>&1 > out | ^cat < input }
-run plan
+let pipeline = plan { ^printf "%s" $value ...$args 2>&1 > out | ^cat < input }
+run pipeline
 
 ---
 
 (source_file
   (let_declaration
     (binding)
-    (job
+    (plan
       (command_pipeline
         (command
           (command_word)

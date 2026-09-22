@@ -11,8 +11,8 @@ fn merge_advances_a_peer_while_capture_waits_and_reaps_the_losing_job() -> io::R
     for operation in ["capture", "run"] {
         let output = tempfile::tempfile()?;
         let source = r#"do {
-  let blocked = items [()] |> map { () => capture job { ^sh -c "touch started; sleep 30" } }
-  let ready = stream job { ^sh -c "while test ! -e started; do sleep 0.01; done; printf ready" }
+  let blocked = items [()] |> map { () => capture plan { ^sh -c "touch started; sleep 30" } }
+  let ready = stream plan { ^sh -c "while test ! -e started; do sleep 0.01; done; printf ready" }
   merge [blocked, ready] |> take 1 |> each write_bytes
 }"#
         .replace("capture job", &format!("{operation} job"));
